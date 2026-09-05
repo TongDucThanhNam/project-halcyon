@@ -13,8 +13,9 @@ on a loading panel. The configured answers contain no `joinLobby` handler;
 the stub returns the configured generic `{"code":0,"returnValue":{}}`.
 No hero selection, match entry, or gameplay was reached. This run proves
 local menu access; it does not prove a working match server or PvP simulation.
-The next implementation boundary is the mobile lobby response/state flow.
-The required response and notification schema remains **[Unverified]**.
+The current blocker is the transition after `joinLobby`. Its required response,
+any notification sequence, and the surviving client path to match entry remain
+**[Unverified]**. Implementing a lobby is not yet an evidence-backed next step.
 
 All game connections outside guest loopback were rejected for the game's UID
 before launch. Tests involved only the operator's emulator and server.
@@ -114,7 +115,7 @@ local guest/session replies, and the currently configured WebSocket notify
 payload `{"friends":[]}`. These replies include a synthetic diagnostic skin
 manifest from the PC investigation, not a recovered complete content catalog.
 
-## Evidence and next boundary
+## Evidence
 
 Captures are under `$TEMP/halcyon_stack/mobile-20260905/`:
 
@@ -138,6 +139,46 @@ configuration string, and revision `147219`. The configuration selected
 `lobby: solo_bots`, `difficulty: very_easy`, handle `Guest`, and social cosmetic
 fields. The 3v3 choice was visible in the UI; no explicit map field was present
 in this captured call. Do not invent a lobby response from this request alone.
+
+## Revised next step — establish the match-entry exchange
+
+The operator reports that current CE no longer exposes the original party/lobby
+feature. Historically, SEMC's
+[2020-07-01 CE update](https://www.vainglorygame.com/news/vainglory-community-edition-update-edtheshred/)
+explicitly put further party development on hold while describing the game as
+playable. That announcement is historical context, not a fresh verification of
+every feature in the current service.
+
+Do not equate the missing player-facing party feature with the internal RPC
+named `joinLobby`. This client demonstrably sends that RPC for `solo_bots`;
+the name alone establishes neither its reply schema nor a functioning party
+system. The loading panel with our generic reply does not establish which
+fields or events would advance it.
+
+Existing Android observations include a successful match and a match socket
+opening at game start (`vainglory-netcode-backend.md` §1–2). They establish that
+a match-entry path existed in the observed client/service combination. They
+do not supply decoded HTTPS platform replies, or prove that the same path is
+reachable with our current synthetic session data.
+
+The next bounded investigation should:
+
+1. Check the existing successful-run artifacts for preserved platform results
+   or client state around match entry. Treat TLS-only captures as an explicit
+   missing source of reply bodies.
+2. Use the sanctioned local runtime route to identify what the client consumes
+   after the captured request, if accessible. Require a concrete field read,
+   state transition, or accepted event before implementing that behavior.
+   Do not resume the stopped broad binary-RE or codec-cracking campaigns.
+3. Produce a documented exchange supported by evidence, or a precise list of
+   missing inputs. If the stock path cannot be established, evaluate a deliberate
+   client repack for direct local match entry as a separate, unverified option.
+
+Acceptance for this investigation is an evidenced transition toward the local
+match socket, or an explicit evidence gap. Hero selection and a restored lobby
+are possible later milestones, not promised results of the current findings.
+
+## Reset and rollback
 
 Bind mounts and these guest firewall rules are temporary for this emulator
 boot. Reboot removes them; adbd/server restarts can also remove reverse mappings.

@@ -93,6 +93,7 @@ in the leaf; this entry point holds routes and brief status only.
 | Store format / container / cipher | `Docs/Teardown/vainglory-store-format.md` | `Tools/Teardown/` scripts |
 | How to capture / reproduce evidence on the emulator | `Docs/Teardown/vainglory-runtime-reconstruction.md` | `vainglory-artifact-reproduction.md` for exact counts + corrections |
 | Building the deterministic server-authoritative sim | `Docs/Research/veilbound-multiplayer-design.md` (input-stream model) | the determinism spike under `Docs/Research/spikes/determinism/` |
+| After Phase 0: closing T1 (matchmaking schema) and opening the T3 thin slice; RE-asset→server mapping, determinism decisions, open gaps | `Docs/Plan/next-steps.md` | the Teardown leaves it cites per row |
 
 When no row matches, stay with this file and the source. Do not load docs "just
 in case."
@@ -106,7 +107,7 @@ authoritative**. To self-host we must build three tiers:
 
 | Tier | What it is | RE status | Difficulty |
 |---|---|---|---|
-| **T1 Front door** | preauth bootstrap + platform RPC (TLS JSON-RPC menu/auth/matchmaking) | **Partial** — mobile CE local menu verified; lobby/matchmaking schema remains open (see mobile leaf above). | Open |
+| **T1 Front door** | preauth bootstrap + platform RPC (TLS JSON-RPC menu/auth/matchmaking) | **Partial** — menu tier verified (PC + mobile CE); lobby/matchmaking schema remains open — discovery plan in `Docs/Plan/next-steps.md` §1 | Open |
 | **T2 Gateway + match server** | frame grammar `[u16 BE len][body]`, Blowfish ECB per-match key, route-request greeting, join handshake, heartbeat | **Closed** (`mock_gcp.py` round-trip proved encode/decode) | Easy |
 | **T3 Authoritative simulation** | run the actual game logic: movement, ability effects, minion/jungle AI, turret aggro, vision/FoW, XP/gold, death/respawn, win/lose — and emit the event stream | **The ceiling** — not recovered; must be reimplemented | Hard |
 
@@ -131,15 +132,16 @@ are not, and must be derived or rebuilt.
 
 ## Current phase
 
-Phase 0 (T2 wire layer, corpus-validated) — plan in `Docs/Plan/phase0.md`.
-Server source lives in `server/` (`wire.py`/`decode.py`/`gateway.py`/
-`match_server.py`); `server/mock_gcp.py` + `server/vgdecode.py`
-are the reference round-trip proof and reusable decoder brought in from the
-corpus.
+Phase 0 is **closed** (acceptance met 2026-09-05: 24/24 tests, corpus
+decode, local gateway + match e2e — `Docs/Plan/phase0.md`). The T1 menu
+tier is verified on both PC and mobile CE; the exchange after `joinLobby`
+is still unknown, and T3 has no code yet.
 
-Latest client checkpoint: mobile CE 4.13.4 (147219) reaches the local menu;
-`joinLobby` is the next blocker. Open the mobile leaf above for evidence and
-reproduction. Match entry and T3 gameplay remain unverified.
+**The active brief is `Docs/Plan/next-steps.md`**: close T1 via the
+matchmaking-schema discovery plan (§1, HackedGlory schema-sheet audit
+first), open the T3 movement thin slice with entity-spawn-opcode
+discovery running in parallel (§2), under the binding determinism
+decisions (§3).
 
 ## Report discipline
 

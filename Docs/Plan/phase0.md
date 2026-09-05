@@ -9,6 +9,10 @@ Phase 0 does **not** make a real client play — that is gated by the T1 fork at
 the bottom. Phase 0 proves **T2** (transport + crypto + handshake) so T3 (the
 authoritative sim) builds on a verified base.
 
+> **Status (2026-09-05): CLOSED.** Acceptance criteria 1–4 met (24/24 tests,
+> corpus decode, local gateway + match e2e). Continuation — T1 matchmaking
+> discovery + T3 thin slice — lives in `Docs/Plan/next-steps.md`.
+
 ## Canonical corpus paths (outside the repo — read-only by IP rule)
 
 | Path | Contents |

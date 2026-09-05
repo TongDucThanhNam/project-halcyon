@@ -58,7 +58,7 @@ names what was swept and how.
 | Backend topology, live traffic windows, transport strings, smoothness synthesis | `vainglory-netcode-backend.md` (§14) |
 | **Wire protocol** — the match connection itself: endpoint topology, frame grammar, obfuscation, traffic shape, capture playbook | `vainglory-protocol-wire.md` (§15) |
 | **PC client internals** — PC menu reply shapes, friendListAll watchdog errors, date workaround, update/notify mapping | `vainglory-pc-client-internals.md` |
-| **Mobile CE local-server test** — LDPlayer recovery, loopback routing, temporary TLS trust, verified menu and `joinLobby` boundary | `vainglory-mobile-local-stack.md` |
+| **Mobile CE local-server test** — LDPlayer routing/TLS, verified menu, missing match-entry exchange after `joinLobby`, bounded investigation | `vainglory-mobile-local-stack.md` |
 | **Mesh/skeleton rigging architecture** — how hero models were packed and rigged, and which techniques transfer to our own models | `vainglory-mesh-skeleton-structure.md` (§16) |
 | **Mechanics matrix / 3v3 build bar** — what each gameplay domain still needs before an original 3v3 build can start; measured jungle timers; the remaining search plan | `vainglory-mechanics-matrix.md` |
 
