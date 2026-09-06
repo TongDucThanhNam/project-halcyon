@@ -804,7 +804,8 @@ coincide exactly with the old table's sequential "static id" run
   (1500/1515–1519) anywhere, including the pre-1137 phase — **hero state
   rides 1011 blocks + the 1070 stream + 1053/1086 deltas; the real server
   never sends a hero 1010.** (Minions/statics do get 1010s, with HP in the
-  122-B variant — that is the template for the 1087 minion-wave throat.)
+  122-B variant — the wave-1 measurement below falsified that guess:
+  lane minions spawn via the 126-B 1010 + 1016 + 1070 + 1067 sequence.)
 - **Live falsification of the hero-1010 extension (2026-09-06 14:58,
   LDPlayer against the local stack)**: the server emitted a measured-shape
   126-B hero 1010 for eid 1500 right after the tape completed; the client
@@ -824,6 +825,57 @@ coincide exactly with the old table's sequential "static id" run
   sim-only world (1070/1116) can be tested live without deleting the tape
   file.
 
+**Lane-minion wave spawn measured on the wire (2026-09-06 night, vg5
+`.vgr` match-5 corpus, wave-1 window decoded from the 7034 flow; tools
+`measure_1087*.py` in `$TEMP/vg_max/`, outside the repo).** The wave-1
+throat is **not** a 1087 batch: lane minions spawn via the **126-B 1010
+variant + 1016 move intent + 1070 position + 1067 state**, ten entities
+per wave in five mirrored right/left pairs:
+
+- **Grid**: wave 1 lands at **+22.974 s after the 1137 ack**, interval
+  **exactly 25.0 s** (six starts pinned: 22.974 / 47.96 / 72.99 / 98.06 /
+  123.14 / 148.22) — this **corrects the "60 s" wave reading** the
+  HackedGlory table and the mechanics leaf carried. Pairs offset
+  **0.00 / 0.92 / 1.94 / 2.86 / 3.88 s** inside a wave.
+- **Eids**: allocated sequentially from 4610 across the whole match
+  (wave 1 = 4610..4619, wave 2 = 4620..4629), **even = right side, odd =
+  left side** — the same sequential-per-wave mechanic §15.6 saw as
+  4314→5871 on the older corpus.
+- **Per-pair burst order** (corpus raw order; right first, states
+  left-first): 1010(right) → 1016(right) → 1070(right @ spawn point B,
+  71.280/12.930) → 1010(left) → 1016(left) → 1070(left @ −B) →
+  1070(left @ lane point A, ±70.841/12.788) → 1070(right @ A) →
+  1067(left, state 00) → 1067(right, state 00); each pair's two 1067s
+  flip to state `0f` **+0.10 s** after its own spawn.
+- **Minion 1010 id-map (126-B)**: +0 = **spawner eid** (wave-1 pairs use
+  366, 366, 367, 365, 365 — both sides of a pair share the spawner eid),
+  +4 = class `eb39ce55` (the same class the §15.6 static table mapped to
+  the spawner group 365..368), +8 = the new minion eid. Position,
+  facing (0,0,1), +88 tail and +116 seq all match the 126-B map above;
+  the seq byte continues the global 1010 counter. Side-dependent bytes:
+  +96..98 (`00 00 01` right / `00 01 00` left) and +119..121
+  (`01 01 02` right / `01 00 01` left).
+- **1016 ENTITY_FLOAT (14 B)**: `[u8 seq][f32 x][f32 y][5×0]` — the seq
+  byte is its own per-entity counter; the target is the walker's first
+  lane point.
+- **1067 ENTITY_STATE (14 B)**: `[u32 eid][u8 side][u8 01][u8
+  state][7×0]` — side `01`=left / `02`=right (unvalidated values
+  rejected by the builder), state `00`=spawned, `0f`=moving.
+- **Walk**: 1070 heartbeat every **1.33 s** along the team lane polyline
+  (right: 17 points from B to (1.500, 5.500); left: 18 mirrored points;
+  list in `server/roster.py` `LANE_PATH_*`), measured ground speed
+  **4.5 u/s**; heartbeats **continue at rest** after arrival (idle
+  walkers keep emitting their stop position).
+- **What is absent**: no 1087, no 122-B HP 1010, no 1053/1086 in the
+  wave-1 spawn window — the "1087 minion-wave throat" phrasing above was
+  the pre-measurement guess and is falsified; the 122-B HP variant
+  belongs to statics (eids 292..400: turrets, shops, camps), which spawn
+  in the dump phase, not with the wave.
+- **Sim simplification to keep visible**: the halcyon director walks
+  every pair the full polyline to (±1.5, 5.5); the corpus shows pairs
+  2–5 halting earlier (x ±9.5..10.5) — per-pair stop positions are
+  [Open] constants, not yet measured individually.
+
 **Their open problems vs our local artifacts** — the two archives are
 complementary, not redundant:
 
@@ -833,7 +885,7 @@ complementary, not redundant:
 | Structure/objective HP | §15.6 tier table 2500/3000/3500/5000/10000/448 |
 | **Kill/death detection** | **§15.8 death chain: 1054 overkill + 1073 destroy + 1035 despawn, ground-truthed on 3563** |
 | **Absolute HP vs deltas** | **1010 122-B variant @+36/+40 (minions/statics only — heroes never get 1010) + 1054 deltas** |
-| Wave timers | 60 s interval, 12–14 entities (§15.8 above) |
+| Wave timers | **corrected 2026-09-06: 25.0 s interval, 10 lane minions/wave (5 mirrored pairs)** — their 60 s / 12–14 reading was a coarser estimate; see the minion-wave block above |
 | **Hero assignment** | hero eid family = 1500 + 1515–1519; snapshot 1113 carries eid+handle per record; 1006 order gives roster |
 | C→S input format | **closed**: 1012 = move/targeted-cast (x,y), 1041 = targetless cast, 1157/1078 = level-up, 1134/1133 = shop, join seq + keepalive (§15.8 match 3) |
 | Ability-cast c2s | **closed**: targeted casts ride 1012 (same as move — a ground-target order), targetless ride 1041 (`ffffffff` null-target) |

@@ -61,8 +61,10 @@ Build order (each stage gated on the previous):
    opcode is found — estimate, not a commitment.)*
 2. **Basic attack.** Dummy target, server validates range, emits
    1054/1053. Goal: damage popup + HP bar move.
-3. **Minion waves.** 60 s spawner, ~12–14 entities, anchor-chained lane
-   path. Goal: lanes alive.
+3. **Minion waves.** ~~60 s spawner, ~12–14 entities~~ *(corrected
+   2026-09-06 by the wave-1 decode: 25.0 s interval, 10 lane minions = 5
+   mirrored pairs, first wave at +22.974 s — §15, wire leaf §15.8)*,
+   anchor-chained lane path. Goal: lanes alive.
 4. **Turret aggro.** Simplest state machine (closest enemy in range),
    measured HP tiers. Goal: lanes fight.
 5. **Death/respawn.** HP ≤ 0 → despawn → timer → fountain. Goal: the
@@ -111,7 +113,7 @@ in the Teardown leaves; the complete 12-gap list lives in §4.
 | Store/cipher tooling INST/PTCH (`vainglory-store-format.md`, `Tools/Teardown/`) | One-shot offline extractor → JSON dumps for the server | Direct (toolchain, not runtime) |
 | Netcode topology (`vainglory-netcode-backend.md` §1) | Already embodied in T2 (`server/gateway.py`, `server/match_server.py`) | Direct — done |
 | `.vgr` corpus + oracle bot matches (matrix §19) | **Verification oracle** — replay rule changes against ground-truth event streams | Direct, irreplaceable |
-| Wave 60 s / HP tiers / jungle timers / start gold 600 (ledger row 8) | Scheduler + constants tables | Direct |
+| Wave timer **corrected: 25.0 s**, 10 minions/wave; HP tiers / jungle timers / start gold 600 (ledger row 8) | Scheduler + constants tables | Direct |
 
 **Does not transfer** (client-side presentation/assets; out of server
 scope): texture/BC1 codec work, VFX shadergraph containers, audio,
@@ -460,3 +462,71 @@ wave** (minions receive 1010s with HP in the corpus) từ allocation layout
 đã đo (blob 40 B, new eid tuần tự từ 0x7d6) → sau đó 1053/1086 stat
 deltas theo damage giả lập trên dummy. Mỗi họng giữ nguyên trình tự
 measure → build → test → live.
+
+## 15. Update 2026-09-06 (late night II) — T3 slice 2 LIVE: lane-minion wave spawn
+
+Slice 2 của `Docs/Plan/t3-slice-2-prompt.md`, đo → build → test → live.
+**Premise của prompt bị chính phép đo falsify** (đúng luật của slice
+protocol): minion wave **không** đi qua 1087 và **không** dùng 1010
+122-B HP — wave-1 spawn thật là **1010 126-B + 1016 + 1070 + 1067**.
+Toàn bộ layout + bằng chứng đã vào wire leaf §15.8 (block "Lane-minion
+wave spawn measured on the wire"); những con số định mệnh:
+
+- Wave 1 tại **+22.974 s** sau 1137-ack, interval **25.0 s chính xác**
+  (6 mốc pinned) — **sửa claim "60 s, 12–14 entities"** mà §3 Build
+  order và bảng HackedGlory đang mang; mỗi wave = **10 lane minion**
+  (5 cặp mirror phải/trái, offset 0/0.92/1.94/2.86/3.88 s).
+- Eid cấp tuần tự từ 4610, chẵn=phải/lẻ=trái; spawner eid của cặp dùng
+  chung (366,366,367,365,365) — trùng group 365..368 của bảng §15.6.
+- Walk 4.5 u/s theo polyline lane team (đầy đủ trong
+  `server/roster.py::LANE_PATH_*`), 1070 heartbeat 1.33 s, **vẫn heartbeat
+  khi đứng nghỉ cuối lane**; 1067 `[eid][side][01][state][7×0]`
+  (side 01 trái/02 phải, state 00 spawn/0f di chuyển), 1016
+  `[seq][x][y][5×0]` là target đầu tiên của walker.
+
+**Build**: `server/roster.py` thêm builder thuần `build_minion_spawn_1010`
+(id-map 126-B đúng measure), `build_entity_state`, `build_move_intent` +
+constants lane; `server/wave.py` (mới) — `Director` deterministic: mọi
+giờ suất sinh từ (t0, tick), không random, không wall-clock vào state;
+`server/match_server.py` — director armed tại tape_base (anchor 1137-ack),
+`seq_1010` kế thừa đếm 1010 của tape; kill switch **`HALCYON_NO_WAVE=1`**
+từ ngày đầu. Hero mặc định **không bao giờ** nhận 1010
+(`HALCYON_HERO_1010` vẫn OFF — §14 đã chứng minh live làm client EOF).
+
+Tests: **90/90** xanh (`python -B -W error::ResourceWarning -m unittest
+discover -s server/test -t .`; baseline 76 + 12 unit `test_wave.py` + 2
+e2e). Unit pin từng byte-shape (hex điểm lane `428e8f5c`/`414ee148`,
+tail theo bên, seq wrap) và lịch determinism (wave 2 = eid 4620..4629,
+walk monotone tới (1.500, 5.500)); e2e no-tape: join → lock → dump →
+burst đúng thứ tự corpus `[1010,1016,1070,1010,1016,1070,1070,1070,1067,
+1067]` → 10 eid 4610..4619 → 20 1067 (mỗi eid `00` rồi `0f`) → 1070
+stream tới cuối lane; `HALCYON_NO_WAVE=1` im lặng hoàn toàn. Hai test
+đã bắt được 1 bug suite-thật: `TestNoTapeFlag` để lại
+`HALCYON_HERO_1010=1` trong env khi `old is None` — đã sửa hygiene
+(pop vô điều kiện trong finally), không có test nào bị giảm độ khắt khe.
+
+**Việc 0 — `server/platform/guest_setup.py`** (1 lệnh
+`python -m server.platform.guest_setup`): re-apply toàn bộ routing sau
+reboot — bind hosts/cacerts overlays, 4 firewall rule tagged
+`halcyon-*`, 4 `adb reverse`, kết thúc bằng verify guest
+`ping rpc.kindred-live.net → 127.0.0.1`. Idempotent theo **hiệu lực nội
+dung**, không theo mechanism: trên LDPlayer này `/system/etc/hosts` và
+`.../cacerts` là mount point của block device riêng (`/dev/block/sdb2`)
+nên bind cũ không còn trong `/proc/mounts` sau snapshot — script kiểm
+tra nội dung (tên platform trong hosts, CA `41e9eb4e.0`) và skip khi đã
+có hiệu lực. Firewall check theo marker (`-S OUTPUT` là normalized,
+comment + `--to-ports` làm dấu hiệu riêng từng rule — 2 rule nat dùng
+chung comment nên phải phân theo port). Chạy thử thật: 2 lần liên tiếp
+→ lần 2 toàn "ok (already)", rule count ổn định 1/1/2, verify pass.
+Hai bẫy đã ghi vào script docstring: `adb shell su -c` phải bọc **một
+chuỗi được quote** (không thì su chỉ nhận token đầu), và khôi phục
+adb-server khi shell treo (transport `device` không đảm bảo shell sống).
+
+**Simplification ghi rõ**: mọi cặp trong sim đi hết polyline team tới
+(±1.5, 5.5); corpus cho thấy cặp 2–5 dừng sớm hơn (x ±9.5..10.5) — vị
+trí dừng theo cặp là [Open], chưa đo riêng.
+
+**Next bounded step**: turret aggro (§3 Build order mục 4) trên nền
+wave đã sống — state machine gần nhất-trong-range, HP tier đã đo, damage
+qua 1054/1053 khi hai lane giao nhau; hoặc basic-attack dummy nếu aggro
+cần thêm dữ kiện target-acquisition.

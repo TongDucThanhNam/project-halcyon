@@ -703,6 +703,118 @@ def facing_toward(x: float, y: float, tx: float, ty: float) -> tuple[float, floa
 
 
 # --------------------------------------------------------------------------
+# Lane-minion wave spawn — vg5_final.pcap match 5 (match id
+# 045f86d4-7ef2-4125-a835-e70a96288c88, recovered 2026-09-06 from the .vgr
+# chunk filename), 0..655 s world window, 242 lane-minion 1010s measured.
+# The prompt's 1087/1010-HP assumption is falsified by the corpus: lane
+# minions are NEVER 1087-allocated (0/326 moving non-hero eids have a 1087)
+# and their spawn 1010 is the 126-B no-HP variant under a dedicated id map
+# (+0 spawner structure eid, +4 class id, +8 the new minion's eid). The
+# spawn sequence per minion pair is: 1010 → 1016 → 1070(A) ×2 sides →
+# 1070(B) ×2 → 1067(state 0) ×2 → +0.10 s 1067(state 0x0f) ×2.
+# --------------------------------------------------------------------------
+LANE_MINION_CLASS = 0xEB39CE55  # 1010 +4 for every lane-minion spawn (242/242)
+LANE_SPAWNER_EIDS = (366, 366, 367, 365, 365)   # 1010 +0 per pair, wave-1
+#   measured (vg5_final +22.97..26.85 s); the rotation rule is [Open], the
+#   wave-1 sequence is pinned, later waves repeat it.
+LANE_MINION_FIRST_EID = 4610    # corpus wave-1 first eid (even = right side)
+MINION_WAVE_SIZE = 10           # 5 pairs × 2 sides
+MINION_WAVES_MEASURED = 33      # pairs 22.97 → 47.96 → …: 25.0 s interval,
+#   six wave starts pinned 22.974/47.96/72.99/98.06/123.14/148.22 — the
+#   mechanics leaf's 60 s is wrong for this mode (solo-bots 3v3).
+WAVE_INTERVAL = 25.0
+WAVE_FIRST_SPAWN_AT = 22.974     # wave-1 first pair after the world anchor
+WAVE_PAIR_OFFSETS = (0.00, 0.92, 1.94, 2.86, 3.88)   # s after wave start
+#   (measured 22.974, 23.895, 24.916, 25.833, 26.854)
+WAVE_STATE_DELAY = 0.10         # 1067 state 00 → 0x0f, measured +0.104 s
+MINION_SPEED = 4.5              # u/s (dominant measured 4.49–4.50)
+MINION_POSITION_PERIOD = 1.33   # s between 1070s idle; walking adds
+#   waypoint-arrival sends (measured heartbeat 1.32–1.35 s)
+
+# Spawn 1070 points, f32-exact from corpus (right side; left = negated x):
+#   A = the lane-side point, B = the 0.46 u behind-waypoint the minion
+#   shuffles to first; the spawn 1010 carries B.
+LANE_POINT_A = (struct.unpack(">f", bytes.fromhex("428daeb6"))[0],
+                struct.unpack(">f", bytes.fromhex("414c9ca6"))[0])   # 70.841, 12.788
+LANE_POINT_B = (struct.unpack(">f", bytes.fromhex("428e8f5c"))[0],
+                struct.unpack(">f", bytes.fromhex("414ee148"))[0])   # 71.280, 12.930
+
+# Lane polylines measured from wave-1 survivors eid 4610 (right) / 4611
+# (left), from B to each one's meeting-point rest position. Simplification
+# [documented in next-steps §15]: every pair walks its side's full line;
+# corpus pairs 2–5 stop earlier (±9.5..10.5 x).
+LANE_PATH_RIGHT = (
+    (65.620, 11.101), (58.982, 7.905), (51.362, 6.400), (49.125, 5.957),
+    (43.677, 5.256), (35.913, 4.749), (28.086, 4.913), (26.255, 5.057),
+    (20.278, 5.528), (12.435, 5.521), (7.877, 5.006), (7.422, 5.033),
+    (5.125, 5.169), (3.764, 5.249), (2.849, 5.297), (1.481, 5.380),
+    (1.500, 5.500),
+)
+LANE_PATH_LEFT = (
+    (-65.620, 11.101), (-59.129, 7.707), (-51.477, 6.377), (-49.218, 6.063),
+    (-43.775, 5.307), (-36.014, 4.764), (-28.186, 4.915), (-26.355, 5.057),
+    (-20.378, 5.522), (-12.534, 5.520), (-7.977, 5.011), (-7.521, 5.041),
+    (-4.327, 5.250), (-3.865, 5.280), (-3.405, 5.310), (-1.130, 5.398),
+    (-0.675, 5.427), (-0.500, 5.500),
+)
+LANE_SPAWN_RIGHT = LANE_POINT_B          # 1010 spawn position per side
+LANE_SPAWN_LEFT = (-LANE_POINT_B[0], LANE_POINT_B[1])
+
+ENTITY_STATE_PAYLOAD_SIZE = 14   # s2c 1067: [u32 eid][u8 side][01][state][7B 0]
+ENTITY_STATE_SIDE_LEFT = 0x01
+ENTITY_STATE_SIDE_RIGHT = 0x02
+ENTITY_STATE_SPAWNED = 0x00
+ENTITY_STATE_MOVING = 0x0F
+
+MOVE_INTENT_PAYLOAD_SIZE = 14    # s2c 1016: [u8][f32 target-x][f32 target-y][5B 0]
+#   the u8 was 33/34 for wave-1 pairs (equals the 1010 seq byte of the same
+#   minion; hero samples show 00/05 = player slot instead) — semantics
+#   [Open]; we reuse the seq byte of the minion's spawn 1010.
+
+
+def build_entity_state(eid: int, side: int, state: int) -> bytes:
+    """s2c 1067 ENTITY_STATE — minion spawn/update shape (14 B)."""
+    if side not in (ENTITY_STATE_SIDE_LEFT, ENTITY_STATE_SIDE_RIGHT):
+        raise ValueError("1067 side must be 0x01 (left) or 0x02 (right)")
+    return struct.pack(">IBBB", eid, side, 0x01, state) + bytes(7)
+
+
+def build_move_intent(seq: int, x: float, y: float) -> bytes:
+    """s2c 1016 — the movement target the entity walks toward (14 B)."""
+    return struct.pack(">Bff", seq & 0xFF, x, y) + bytes(5)
+
+
+def build_minion_spawn_1010(spawner_eid: int, minion_eid: int, x: float, y: float,
+                            seq: int, side: int) -> bytes:
+    """s2c 1010, lane-minion spawn variant (126-B no-HP): the id map differs
+    from the static full update — +0 = spawner structure eid (365..367),
+    +4 = LANE_MINION_CLASS, +8 = the new minion's eid (corpus: 4610.. at
+    wave 1; the eid space doubles as the global entity-write counter, which
+    reconciles the "+8 = tick" reading of the static frames). Position is
+    the B waypoint; facing (0, 1); z ground. Team-dependent tail bytes are
+    measured per side: +96..98 and +119..121 (right 00 00 01 / 01 01 02,
+    left 00 01 00 / 01 00 01)."""
+    body = bytearray(ENTITY_FULL_UPDATE_PAYLOAD_SIZE)
+    struct.pack_into(">I", body, 0, spawner_eid)
+    struct.pack_into(">I", body, 4, LANE_MINION_CLASS)
+    struct.pack_into(">I", body, 8, minion_eid)
+    struct.pack_into(">fff", body, 12, x, GROUND_Z, y)
+    struct.pack_into(">fff", body, 24, 0.0, 0.0, 1.0)
+    body[88:96] = _TAIL_88
+    if side == ENTITY_STATE_SIDE_RIGHT:
+        body[96:99] = b"\x00\x00\x01"
+        body[119:122] = b"\x01\x01\x02"
+    else:
+        body[96:99] = b"\x00\x01\x00"
+        body[119:122] = b"\x01\x00\x01"
+    body[112:116] = _TAIL_112
+    body[116] = seq & 0xFF
+    body[117] = 0x01
+    body[118] = 0x00
+    return bytes(body)
+
+
+# --------------------------------------------------------------------------
 # 1162 timer tick — [u32 eid][u32 tag][u16 0][f32 value][8B tail]
 # --------------------------------------------------------------------------
 

@@ -82,6 +82,8 @@ class TestNoTapeFlag(unittest.TestCase):
             os.environ["HALCYON_HERO_1010"] = "1"
             self.assertTrue(self._stream().emit_hero_1010)
         finally:
+            # always clear: a leftover "1" leaks into later worlds' streams
+            os.environ.pop("HALCYON_HERO_1010", None)
             if old is not None:
                 os.environ["HALCYON_HERO_1010"] = old
 
@@ -586,6 +588,196 @@ class TestKeyAutoDetection(unittest.TestCase):
         match = self._exchange("")
         self.assertEqual(match.cipher.key, wire.key_for(""))
         self.assertNotEqual(match.cipher.key, wire.key_for(MATCH_ID))
+
+
+class TestWaveE2E(unittest.TestCase):
+    """T3 slice 2: the no-tape world spawns the measured lane-minion wave —
+    10 minions (5 right/left pairs) with the corpus spawn sequence
+    1010 → 1016 → 1070(B) → 1070(A) → 1067(00) → 1067(0f), then walking
+    1070s. HALCYON_NO_WAVE=1 must silence the whole layer. Corpus timing is
+    unit-pinned in test_wave; here the schedule constants are shrunk so the
+    socket flow runs in seconds."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gw = gateway.Gateway("127.0.0.1", port=0, match_id=MATCH_ID,
+                                 heartbeat_port=0, heartbeat_interval=0.05)
+        cls.gw.start()
+        cls.cipher = wire.MatchCipher(MATCH_ID)
+        cls.tempdir = tempfile.mkdtemp(prefix="halcyon-wave-")
+        cls._old = (match_server.WORLD_TAPE_PATH, match_server.LOCK_COUNTDOWN,
+                    roster.WAVE_FIRST_SPAWN_AT, roster.WAVE_PAIR_OFFSETS,
+                    roster.WAVE_STATE_DELAY, roster.MINION_POSITION_PERIOD,
+                    roster.MINION_SPEED, roster.WAVE_INTERVAL)
+        match_server.WORLD_TAPE_PATH = os.path.join(cls.tempdir, "no-tape.bin")
+        match_server.LOCK_COUNTDOWN = 0.3
+        roster.WAVE_FIRST_SPAWN_AT = 0.5
+        roster.WAVE_PAIR_OFFSETS = (0.00, 0.20, 0.40, 0.60, 0.80)
+        roster.WAVE_STATE_DELAY = 0.02
+        roster.MINION_POSITION_PERIOD = 0.3
+        roster.MINION_SPEED = 30.0
+        roster.WAVE_INTERVAL = 10.0
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.gw.stop()
+        shutil.rmtree(cls.tempdir, ignore_errors=True)
+        (match_server.WORLD_TAPE_PATH, match_server.LOCK_COUNTDOWN,
+         roster.WAVE_FIRST_SPAWN_AT, roster.WAVE_PAIR_OFFSETS,
+         roster.WAVE_STATE_DELAY, roster.MINION_POSITION_PERIOD,
+         roster.MINION_SPEED, roster.WAVE_INTERVAL) = cls._old
+
+    def _read_message(self, sock, timeout=5.0):
+        """One encrypted message → (opcode, payload); skips nothing."""
+        sock.settimeout(max(0.05, timeout))
+        body = wire.read_frame(sock)
+        self.assertIsNotNone(body)
+        return wire.decode_body(self.cipher, body)
+
+    def _join_to_world(self, client):
+        """Route → join → pick → lock → dump → WORLD; returns after the
+        1137 echo (the world is live). Any pick-phase frame zoo is skipped —
+        only the awaited frame ends each stage (the existing suite's
+        strict=False convention)."""
+        client.sendall(wire.build_route_request("127.0.0.1"))
+        self.assertEqual(wire.read_frame(client), wire.ROUTE_ACK_BODY)
+        client.sendall(wire.encode_message(
+            self.cipher, wire.OP.PLAYER_UUID,
+            SESSION_UUID.encode("ascii") + bytes(34)))
+
+        def await_op(want, timeout=8.0):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                op, payload = self._read_message(
+                    client, timeout=deadline - time.monotonic())
+                if op == want:
+                    return payload
+            self.fail(f"expected opcode {want} not arrived")
+
+        await_op(wire.OP.SNAPSHOT_JOIN)                  # opener → snapshot
+        selection = struct.pack(">II", 925, 0x2fd7245d) + bytes(6)
+        client.sendall(wire.encode_message(self.cipher, wire.OP.JOIN_1118,
+                                           selection))
+        await_op(wire.OP.JOIN_1118)                      # pick echo
+        client.sendall(wire.encode_message(self.cipher, wire.OP.BUILD_LOCK,
+                                           bytes(6)))
+        client.sendall(wire.encode_message(
+            self.cipher, wire.OP.LOCK_COMMIT,
+            struct.pack(">I", 0x4260123e) + bytes(2)))
+        finals = []
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:               # lock countdown → finals
+            op, payload = self._read_message(
+                client, timeout=deadline - time.monotonic())
+            if op == wire.OP.PLAYER_INFO:
+                finals.append(payload)
+            elif op == wire.OP.ROSTER_FINAL:
+                break
+        self.assertEqual(len(finals), 6)                 # 1006×6 then 1132
+
+        # client map-load done: 1134 → dump → 1134 echo; 1137 → verbatim echo
+        client.sendall(wire.encode_message(self.cipher, wire.OP.SHOP_OPEN,
+                                           bytes(6)))
+        await_op(wire.OP.SHOP_OPEN)
+        ready = bytes.fromhex("000005dc0100")
+        client.sendall(wire.encode_message(self.cipher, wire.OP.HERO_READY,
+                                           ready))
+        self.assertEqual(await_op(wire.OP.HERO_READY, timeout=5.0), ready)
+
+    def _read_wave_stream(self, client, seconds):
+        """Collect minion-layer frames for a while; only 1116 pings may
+        interleave (the no-tape world with hero-1010 OFF emits nothing else
+        until movement is requested). Ends early on idle timeout."""
+        allowed = {wire.OP.SLOT_FLAGS_PING, wire.OP.ENTITY_FULL_UPDATE,
+                   wire.OP.POSITION, wire.OP.ENTITY_STATE, wire.OP.ENTITY_FLOAT}
+        out = []
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                op, payload = self._read_message(
+                    client, timeout=deadline - time.monotonic())
+            except (socket.timeout, TimeoutError):
+                break
+            self.assertIn(op, allowed)
+            if op != wire.OP.SLOT_FLAGS_PING:
+                out.append((op, payload))
+        return out
+
+    def test_wave_spawn_sequence_and_movement(self):
+        client = socket.create_connection((self.gw.host, self.gw.port),
+                                          timeout=5)
+        self.addCleanup(client.close)
+        self._join_to_world(client)
+        frames = self._read_wave_stream(client, 6.0)
+        ops = [op for op, _ in frames]
+
+        # first pair: the corpus burst order
+        self.assertEqual(ops[:10],
+                         [wire.OP.ENTITY_FULL_UPDATE, wire.OP.ENTITY_FLOAT,
+                          wire.OP.POSITION, wire.OP.ENTITY_FULL_UPDATE,
+                          wire.OP.ENTITY_FLOAT, wire.OP.POSITION,
+                          wire.OP.POSITION, wire.OP.POSITION,
+                          wire.OP.ENTITY_STATE, wire.OP.ENTITY_STATE])
+        spawn0 = frames[0][1]
+        self.assertEqual(len(spawn0), roster.ENTITY_FULL_UPDATE_PAYLOAD_SIZE)
+        self.assertEqual(struct.unpack_from(">I", spawn0, 0)[0], 366)
+        self.assertEqual(struct.unpack_from(">I", spawn0, 4)[0],
+                         roster.LANE_MINION_CLASS)
+        self.assertEqual(struct.unpack_from(">I", spawn0, 8)[0], 4610)
+        self.assertEqual(spawn0[116], 1)                 # seq: tape-less → 1
+        spawn1 = frames[3][1]
+        self.assertEqual(struct.unpack_from(">I", spawn1, 8)[0], 4611)
+        self.assertEqual(spawn1[116], 2)
+        # 10 minions, eids sequential, spawners = wave-1 measured set
+        spawns = [p for op, p in frames if op == wire.OP.ENTITY_FULL_UPDATE]
+        self.assertEqual(
+            len(spawns), 10,
+            msg=[(struct.unpack_from(">I", p, 0)[0],
+                  struct.unpack_from(">I", p, 8)[0]) for p in spawns])
+        self.assertEqual([struct.unpack_from(">I", p, 8)[0] for p in spawns],
+                         list(range(4610, 4620)))
+        self.assertEqual([struct.unpack_from(">I", p, 0)[0] for p in spawns],
+                         [s for s in roster.LANE_SPAWNER_EIDS for _ in (0, 1)])
+        # 20 1067s; per minion exactly one SPAWNED (00) then one MOVING (0f)
+        # — the corpus emits each pair's moving states WAVE_STATE_DELAY after
+        # its own spawn, so the flat order interleaves across pairs
+        states = [p for op, p in frames if op == wire.OP.ENTITY_STATE]
+        self.assertEqual(len(states), 20)
+        state_hist = {}
+        for p in states:
+            state_hist.setdefault(struct.unpack_from(">I", p, 0)[0], []) \
+                     .append(p[6])
+        self.assertEqual(set(state_hist), set(range(4610, 4620)))
+        for hist in state_hist.values():
+            self.assertEqual(hist, [roster.ENTITY_STATE_SPAWNED,
+                                    roster.ENTITY_STATE_MOVING])
+        # walking: eid 4610 advances toward its first lane point (x drops
+        # from 71.28), then rests at the lane end (speed-patched 30 u/s)
+        path = [struct.unpack_from(">ff", p, 4)
+                for op, p in frames if op == wire.OP.POSITION
+                and struct.unpack_from(">I", p, 0)[0] == 4610]
+        self.assertGreaterEqual(len(path), 4)
+        self.assertAlmostEqual(path[0][0], roster.LANE_SPAWN_RIGHT[0], places=3)
+        self.assertLess(path[-1][0], 65.62)              # past the first node
+        self.assertEqual((round(path[-1][0], 2), round(path[-1][1], 2)),
+                         (round(roster.LANE_PATH_RIGHT[-1][0], 2),
+                          round(roster.LANE_PATH_RIGHT[-1][1], 2)))
+
+    def test_no_wave_env_kills_the_layer(self):
+        old = os.environ.get("HALCYON_NO_WAVE")
+        os.environ["HALCYON_NO_WAVE"] = "1"
+        try:
+            client = socket.create_connection((self.gw.host, self.gw.port),
+                                              timeout=5)
+            self.addCleanup(client.close)
+            self._join_to_world(client)
+            frames = self._read_wave_stream(client, 3.0)
+            self.assertEqual(frames, [])                 # 1116-only world
+        finally:
+            if old is None:
+                os.environ.pop("HALCYON_NO_WAVE", None)
+            else:
+                os.environ["HALCYON_NO_WAVE"] = old
 
 
 if __name__ == "__main__":

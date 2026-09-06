@@ -23,9 +23,13 @@ the local hero entity. Hero-1010 full updates exist behind
 HALCYON_HERO_1010=1 only — the corpus (6645 1010s, matches 1+5) never
 sends 1010 for a hero, and the live client aborted the match when we did
 (2026-09-06); hero state rides 1011 blocks + 1070 + the delta stream.
-HALCYON_NO_TAPE=1 skips the tape entirely for a pure-sim world. The
-remaining entity simulation is T3 work — no invented bytes go out, only
-measured replays, measured layouts and sim-computed positions/ticks.
+HALCYON_NO_TAPE=1 skips the tape entirely for a pure-sim world. The first
+deterministic sim slice (T3 slice 2) runs lane-minion waves after the tape:
+the measured vg5_final spawn sequence (1010 class eb39ce55 → 1016 → 1070 →
+1067 states) on the measured 25 s wave grid, kill switch HALCYON_NO_WAVE=1.
+The remaining entity simulation (combat, jungle AI, vision) is later T3
+work — no invented bytes go out, only measured replays, measured layouts
+and sim-computed positions/ticks.
 """
 from __future__ import annotations
 
@@ -42,11 +46,13 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import hero_catalog
     import roster
+    import wave
     import wire
     import world_tape
 else:
     from . import hero_catalog
     from . import roster
+    from . import wave
     from . import wire
     from . import world_tape
 
@@ -117,6 +123,11 @@ class SnapshotStream(threading.Thread):
         self.tape_frames = None           # loaded lazily on WORLD entry
         self.tape_i = 0
         self.tape_done = False
+        # lane-minion waves (T3 slice 2): measured vg5_final spawn sequence,
+        # scheduled from the world anchor; HALCYON_NO_WAVE=1 disables the
+        # whole wave layer (live falsification must be env-switchable)
+        self.emit_waves = not os.environ.get("HALCYON_NO_WAVE")
+        self.wave_director = None
 
     def stop(self):
         self._stop_event.set()
@@ -247,6 +258,11 @@ class SnapshotStream(threading.Thread):
             self.log(f"[match] world tape: {len(frames)} frames, "
                      f"{span:.1f}s (corpus bootstrap — sim is T3)")
             self.tape_frames = frames
+            # the 1010 seq byte counts every entity full update the client
+            # has seen — continue from the tape's tail, not from zero
+            self.seq_1010 = sum(
+                1 for _t, b in frames
+                if struct.unpack_from(">H", b)[0] == wire.OP.ENTITY_FULL_UPDATE)
         else:
             self.log(f"[match] no world tape — echo/1055 fallback "
                      f"(expected at {WORLD_TAPE_PATH})")
@@ -293,16 +309,35 @@ class SnapshotStream(threading.Thread):
         (c2s 1012 → 1070 at the corpus cadence) and hero 1010 full updates
         (first one HERO_1010_PERIOD after the live layer starts). The tape
         carries its own 1116 frames, so ours start only once it has played
-        out."""
+        out. Lane-minion waves (T3 slice 2) run on the measured 25 s grid
+        anchored at the world start — wave 1 lands at +22.97 s, i.e. after
+        the 12.5 s tape has finished; HALCYON_NO_WAVE=1 turns them off."""
         self._load_tape()
         if not self.tape_frames:
             self.tape_done = True     # fallback: live layer only
         tape_base = time.monotonic()
+        self.wave_t0 = tape_base      # corpus 1137-ack instant = tape t=0
+        if self.emit_waves:
+            self.wave_director = wave.Director(tape_base, seq_1010=[self.seq_1010])
+            self.log(f"[match] minion-wave director armed: wave 1 at "
+                     f"+{roster.WAVE_FIRST_SPAWN_AT:.2f}s, interval "
+                     f"{roster.WAVE_INTERVAL:.1f}s, 10 minions/wave "
+                     f"(eids from {self.wave_director.first_eid})")
+        else:
+            self.log("[match] HALCYON_NO_WAVE set — no minion waves")
         next_move_tick = time.monotonic() + roster.MOVE_TICK
         next_ping = time.monotonic() + 1.0
         next_full_update = None       # armed when the live layer starts
         while not self._stop_event.is_set():
             now = time.monotonic()
+            if self.wave_director is not None:
+                # waves anchor at the world start, independent of the tape
+                self.wave_director.seq_1010[0] = self.seq_1010
+                wave_frames = self.wave_director.pump(now)
+                self.seq_1010 = self.wave_director.seq_1010[0]
+                for op, payload in wave_frames:
+                    self._send(op, payload)
+                    self.frames_sent += 1
             if not self.tape_done:
                 while self.tape_i < len(self.tape_frames):
                     t_ms, body = self.tape_frames[self.tape_i]
