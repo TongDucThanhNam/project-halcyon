@@ -1,0 +1,91 @@
+"""One command for the whole host side of a live run:
+
+    python -m server.platform.live_up
+
+1. stop any previous instance of this stack (processes whose command line
+   contains `server.platform.local_stack`; a stale NON-stack holder of
+   :80/:443 is left alone — the stack tolerates it by design);
+2. start a fresh `python -m server.platform.local_stack` detached, output
+   to $TEMP/halcyon_stack/live-stdout.txt;
+3. wait until the gateway/heartbeat ports listen (from answers.json
+   `_gw_port`/`_hb_port`);
+4. re-apply the guest routing via server.platform.guest_setup (idempotent).
+
+After this: force-stop + relaunch the game on the emulator and drive the
+taps; the platform FSM is automatic (boot=menus, joinLobby->playing).
+"""
+import os
+import subprocess
+import sys
+import time
+
+from . import guest_setup, local_stack
+
+KILL_PS = ("Get-CimInstance Win32_Process "
+           "-Filter \"Name like 'python%'\" "
+           "| Where-Object {$_.CommandLine -match 'local_stack'} "
+           "| Select-Object -ExpandProperty ProcessId")
+
+
+def _running_pids() -> list[int]:
+    res = subprocess.run(["powershell", "-NoProfile", "-c", KILL_PS],
+                         capture_output=True, text=True, timeout=30)
+    return [int(line) for line in res.stdout.split()
+            if line.strip().isdigit()]
+
+
+def _ports_listening(ports: list[int]) -> bool:
+    res = subprocess.run(["netstat", "-ano"], capture_output=True,
+                         text=True, timeout=30)
+    listening = set()
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[0] == "TCP" and parts[3] == "LISTENING":
+            try:
+                listening.add(int(parts[1].rsplit(":", 1)[1]))
+            except ValueError:
+                pass
+    return all(p in listening for p in ports)
+
+
+def main(argv=None) -> int:
+    pids = _running_pids()
+    for pid in pids:
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                       capture_output=True, timeout=30)
+        print(f"[live] stopped previous stack pid {pid}")
+    if not pids:
+        print("[live] no previous stack process found")
+
+    answers = local_stack._answers()
+    ports = [int(answers.get("_gw_port", 7100)),
+             int(answers.get("_hb_port", 2112)),
+             8080, 8443]
+    log_path = os.path.join(local_stack.STACK_DIR, "live-stdout.txt")
+    os.makedirs(local_stack.STACK_DIR, exist_ok=True)
+    with open(log_path, "ab") as log_fh:
+        proc = subprocess.Popen(
+            [sys.executable, "-B", "-m", "server.platform.local_stack"],
+            stdout=log_fh, stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP |
+            subprocess.DETACHED_PROCESS)
+    print(f"[live] stack starting detached (pid {proc.pid}, log {log_path})")
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if _ports_listening(ports):
+            print(f"[live] stack ports up: {ports}")
+            break
+        time.sleep(0.5)
+    else:
+        print(f"[live] FAILED: ports {ports} not listening within 30 s — "
+              f"see {log_path}")
+        return 2
+
+    rc = guest_setup.main()
+    print("[live] host side ready — relaunch the game and drive the taps")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

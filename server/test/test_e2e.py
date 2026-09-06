@@ -686,10 +686,11 @@ class TestWaveE2E(unittest.TestCase):
 
     def _read_wave_stream(self, client, seconds):
         """Collect minion-layer frames for a while; only 1116 pings may
-        interleave (the no-tape world with hero-1010 OFF emits nothing else
-        until movement is requested). Ends early on idle timeout."""
+        interleave. 1054/1073/1035 are part of the live stream now — the
+        walkers meet and fight inside this window (combat layer)."""
         allowed = {wire.OP.SLOT_FLAGS_PING, wire.OP.ENTITY_FULL_UPDATE,
-                   wire.OP.POSITION, wire.OP.ENTITY_STATE, wire.OP.ENTITY_FLOAT}
+                   wire.OP.POSITION, wire.OP.ENTITY_STATE, wire.OP.ENTITY_FLOAT,
+                   wire.OP.COMBAT_DELTA, wire.OP.DESTROY, wire.OP.DESPAWN}
         out = []
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:

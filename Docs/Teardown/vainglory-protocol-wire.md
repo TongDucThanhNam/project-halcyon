@@ -876,6 +876,48 @@ per wave in five mirrored right/left pairs:
   2–5 halting earlier (x ±9.5..10.5) — per-pair stop positions are
   [Open] constants, not yet measured individually.
 
+**Combat events measured on the wire (2026-09-06 night, vg5 corpus,
+tools `measure_combat{,2,3}.py` in `$TEMP/vg_max/`).** The lane-minion
+fight, for the T3 combat slice:
+
+- **Engagement**: first minion-vs-minion 1054 at **+39.699 s** — attacker
+  4610 (R) holding its path end (1.500, 5.500), victim 4611 (L) holding
+  (−0.500, 5.500): **the waves walk to their endpoints and fight there**,
+  distance exactly **2.00** (melee range; minion→minion hit distances
+  p10 1.41 / median 3.16 / p90 6.08 / max 7.28 → ranged minions exist
+  [Open: class split]).
+- **1054 COMBAT_DELTA** (layout row above): minion-target frames carry
+  the fixed 8-B tail `00 05 04 00 00 00 00 00` (400/400 sampled);
+  minion-sourced damage is discrete (histogram peaks −28 ×232, −50 ×136,
+  −33, −19, −39…; first-blood hit −19.4), consistent with
+  `D = W/(1+A/100)` per class/armor [Open: per-class table].
+- **Repeat hits**: gap between consecutive 1054s of one (src,tgt) pair —
+  median **0.60 s** (p10 0.00 — multi-attacker volleys; p90 2.68).
+- **Minion HP has NO wire source**: 17,037 1053s carry hero-family eids
+  only; 0 of 6 minion-targeted 1053s; no 1011, 1162 or 122-B (HP) 1010
+  frame ever carries a minion eid. The client computes minion HP itself
+  from the 1054 stream (maxHP from local assets) — the input-stream
+  model end to end. A server therefore only needs internal HP for death
+  decisions; damage totals to death in the corpus exceed/undershoot the
+  450 tier per victim (hero damage mixed in), so exact server-side HP
+  accounting is [Open].
+- **Minion death is two frames, same instant**: **1073 DESTROY then 1035
+  DESPAWN** (`[u32 eid][u16 0]`, tail 0000), no overkill 1054 and no
+  1068/1037/1072 frames (the longer chain in §15.8 above belongs to
+  structure 3563, not minions). 216 minion deaths, eids 4610+ — first
+  three at +51.66/+52.39/+55.48 s after living 26–30 s.
+- **1045** (14 B, 4,274 frames): `[u32 a][u32 b][u8 flag][5×0]` where a/b
+  are real eids (hero/minion/static; b = `ffffffff` in 66 frames = target
+  cleared) — target/aggro events; flag census {0:1417, 1:1274, 7:371,
+  8:337, 11:245, 10:237, 2:276, 3:85…} [Open: per-flag semantics].
+- **1046** (22 B, sparse): `[u32 eid][f32 x][u32 0][f32 y][u8 kind][3×0]`
+  — position-tagged event (projectile/impact-class), kind 00/03 seen
+  [Open].
+- **1016 during combat**: retargets arrive as `[u8 seq][f32 x][f32 y]`
+  with **no eid field** — association is stream-context (the entity the
+  surrounding frames speak about), e.g. retarget points at −0.5/5.5 =
+  the victim's held position. Frame-order context rule [Open].
+
 **Their open problems vs our local artifacts** — the two archives are
 complementary, not redundant:
 

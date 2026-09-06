@@ -189,7 +189,7 @@ class TestWaveDirector(unittest.TestCase):
         self.assertEqual(len(set(spawns)), 20)
 
     def test_minions_walk_and_stop_at_lane_end(self):
-        d = self._director()
+        d = self._director(combat=False)   # walk/heartbeat layer in isolation
         end = roster.WAVE_FIRST_SPAWN_AT + 30.0
         frames = self._pump_until(d, end, step=0.05)
         tail = [p for op, p in frames if op == 1070
@@ -222,6 +222,120 @@ class TestWaveDirector(unittest.TestCase):
     def test_empty_before_first_wave(self):
         d = self._director()
         self.assertEqual(d.pump(d.t0 + roster.WAVE_FIRST_SPAWN_AT - 0.05), [])
+
+
+class TestCombatBuilders(unittest.TestCase):
+    """s2c 1054 / 1073 / 1035 — shapes pinned on the vg5 corpus
+    (measure_combat*.py): tail 00050400… in 400/400 minion-target frames;
+    death = destroy then despawn, tail 0000, same instant."""
+
+    def test_combat_delta_1054(self):
+        p = roster.build_combat_delta(4610, 4611, -19.4)
+        self.assertEqual(len(p), roster.COMBAT_DELTA_PAYLOAD_SIZE)
+        self.assertEqual(struct.unpack_from(">II", p, 0), (4610, 4611))
+        self.assertAlmostEqual(struct.unpack_from(">f", p, 8)[0], -19.4,
+                               places=2)   # f32 roundtrip
+        self.assertEqual(p[12:], roster.COMBAT_DELTA_TAIL)
+
+    def test_destroy_and_despawn_1073_1035(self):
+        for build in (roster.build_destroy, roster.build_despawn):
+            p = build(4614)
+            self.assertEqual(len(p), roster.DESTROY_PAYLOAD_SIZE)
+            self.assertEqual(struct.unpack_from(">IH", p, 0), (4614, 0))
+
+
+class TestCombatDirector(unittest.TestCase):
+    """The fight at the lane meeting point: first blood is 4610 -> 4611
+    (corpus-measured pair) once both walkers hold their endpoints 2.0 apart;
+    repeat hits every 0.6 s; death = 1073 then 1035, no more heartbeats.
+    The wave grid is shrunk (spawn at +0.5 s) — walk time to the meeting
+    point stays real, so first blood lands ~16.5 s in."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._old_spawn = roster.WAVE_FIRST_SPAWN_AT
+        roster.WAVE_FIRST_SPAWN_AT = 0.5
+
+    @classmethod
+    def tearDownClass(cls):
+        roster.WAVE_FIRST_SPAWN_AT = cls._old_spawn
+
+    def _director(self, **kw):
+        return wave.Director(100.0, seq_1010=kw.pop("seq", [0x20]), **kw)
+
+    def _pump_until(self, d, duration, step=0.05):
+        frames = []
+        t = 0.0
+        while t < duration:
+            t += step
+            frames += d.pump(d.t0 + t)
+        return frames
+
+    def _hits(self, frames, src=None, tgt=None):
+        out = []
+        for op, p in frames:
+            if op != 1054:
+                continue
+            s, t = struct.unpack_from(">II", p, 0)
+            if (src is None or s == src) and (tgt is None or t == tgt):
+                out.append((s, t, struct.unpack_from(">f", p, 8)[0]))
+        return out
+
+    def test_first_blood_is_4610_to_4611_at_meeting_point(self):
+        d = self._director()
+        frames = self._pump_until(d, roster.WAVE_FIRST_SPAWN_AT + 16.5)
+        hits = self._hits(frames)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0][:2], (4610, 4611))
+        self.assertAlmostEqual(hits[0][2], -roster.MINION_ATTACK_DAMAGE,
+                               places=2)   # f32 roundtrip
+
+    def test_repeat_hits_on_measured_cooldown(self):
+        d = self._director()
+        frames = self._pump_until(d, roster.WAVE_FIRST_SPAWN_AT + 20.0)
+        seq4610 = [op for op, p in frames if op == 1054
+                   and struct.unpack_from(">II", p, 0) == (4610, 4611)]
+        self.assertGreaterEqual(len(seq4610), 2)
+        # 0.6 s cadence over a ~4.5 s window: bounded burst, never a flood
+        self.assertLessEqual(len(seq4610), 8)
+
+    def test_death_is_destroy_then_despawn_and_stops_heartbeats(self):
+        d = self._director()
+        frames = self._pump_until(d, roster.WAVE_FIRST_SPAWN_AT + 60.0)
+        ops = [op for op, _ in frames]
+        self.assertIn(1073, ops)
+        self.assertIn(1035, ops)
+        for i, op in enumerate(ops):
+            if op != 1073:
+                continue
+            eid = struct.unpack_from(">I", frames[i][1], 0)[0]
+            self.assertEqual(ops[i + 1], 1035)
+            self.assertEqual(
+                struct.unpack_from(">I", frames[i + 1][1], 0)[0], eid)
+        death_idx = {struct.unpack_from(">I", p, 0)[0]: i
+                     for i, (op, p) in enumerate(frames) if op == 1073}
+        for i, (op, p) in enumerate(frames):
+            if op != 1070:
+                continue
+            eid = struct.unpack_from(">I", p, 0)[0]
+            if eid in death_idx and i > death_idx[eid]:
+                self.fail(f"dead eid {eid} published a later 1070")
+
+    def test_hero_never_a_combat_target(self):
+        d = self._director()
+        frames = self._pump_until(d, roster.WAVE_FIRST_SPAWN_AT + 60.0)
+        for op, p in frames:
+            if op == 1054:
+                src, tgt = struct.unpack_from(">II", p, 0)
+                for eid in (src, tgt):
+                    self.assertNotIn(eid, (1500, 1515, 1516, 1517, 1518, 1519))
+
+    def test_combat_determinism(self):
+        def run():
+            d = self._director()
+            return self._pump_until(d, roster.WAVE_FIRST_SPAWN_AT + 40.0,
+                                    step=0.05)
+        self.assertEqual(run(), run())
 
 
 if __name__ == "__main__":

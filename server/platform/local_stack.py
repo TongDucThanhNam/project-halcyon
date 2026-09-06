@@ -79,6 +79,59 @@ def _answers() -> dict:
         return DEFAULT_ANSWERS
 
 
+MATCH_ID = "00000000-1111-4222-8333-444455556666"
+
+
+def _fsm_update_state(answers_path: str, state_obj: dict,
+                      match_id: str = MATCH_ID, gw_port: int | None = None) -> None:
+    """Rewrite only the `update` row of answers.json (other rows preserved).
+    Pure-FSM helper so tests can drive it against a scratch file."""
+    try:
+        with open(answers_path, encoding="utf-8") as fh:
+            answers = json.load(fh)
+    except Exception:
+        answers = dict(DEFAULT_ANSWERS)
+    if gw_port is not None and "host" in state_obj:
+        state_obj = dict(state_obj, port=gw_port)
+    answers["update"] = {"code": 0, "returnValue": state_obj}
+    with _log_lock:
+        with open(answers_path, "w", encoding="utf-8") as fh:
+            json.dump(answers, fh, indent=1)
+
+
+def fsm_on_boot(answers_path: str = ANSWERS_PATH,
+                gw_port: int | None = None) -> None:
+    """Boot must answer `menus` — a leftover `playing` from a previous run
+    makes the booting client try to open a match socket from the menu
+    (observed 2026-09-06: gray screen, then a libhoudini native death).
+    Disable with "_fsm_auto": false in answers.json."""
+    if _answers().get("_fsm_auto", True):
+        _fsm_update_state(answers_path, {"state": "menus"}, gw_port=gw_port)
+
+
+def fsm_on_rpc(rpc_method: str, answers_path: str = ANSWERS_PATH,
+               gw_port: int | None = None) -> None:
+    """Drive the client's update-FSM from the RPC stream: the client polls
+    `update` as its FSM driver, so the moment it sends joinLobby we flip
+    `playing` (+host/port) — skipping matched_partners/accept screen, the
+    known-good route (§14). exitLobby returns the world to `menus` so a
+    finished match does not re-queue the client forever."""
+    if not _answers().get("_fsm_auto", True):
+        return
+    if rpc_method == "joinLobby":
+        _fsm_update_state(
+            answers_path,
+            {"state": "playing", "host": "127.0.0.1",
+             "matchId": MATCH_ID},
+            gw_port=gw_port if gw_port is not None
+            else int(_answers().get("_gw_port", 7100)))
+        _log(f"FSM joinLobby -> update=playing (port "
+             f"{_answers().get('_gw_port', 7100)})")
+    elif rpc_method == "exitLobby":
+        _fsm_update_state(answers_path, {"state": "menus"})
+        _log("FSM exitLobby -> update=menus")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -262,6 +315,7 @@ class Handler(BaseHTTPRequestHandler):
                 answer = answers[rpc_method]
             else:
                 answer = answers.get("rpc_default", DEFAULT_ANSWERS["rpc_default"])
+            fsm_on_rpc(rpc_method)
             # The client parses the body as a STREAM of JSON values
             # (FUN_00ebfddc: while(*cursor) parse_next). A trailing newline
             # makes parse_next fail on the leftover byte, dispatch a NULL
@@ -335,9 +389,12 @@ def main() -> None:
     # without elevation) — move to 7101/2113 by setting _gw_port/_hb_port.
     cfg = _answers()
     gw = gateway.Gateway("127.0.0.1", port=int(cfg.get("_gw_port", 7100)),
-                         match_id="00000000-1111-4222-8333-444455556666",
+                         match_id=MATCH_ID,
                          heartbeat_port=int(cfg.get("_hb_port", 2112)), log=_gwlog)
     gw.start()
+    fsm_on_boot(gw_port=gw.port)   # a stale `playing` answer must not poison boot
+    print(f"[stack] FSM auto {'ON' if _answers().get('_fsm_auto', True) else 'OFF'} "
+          f"(boot=menus; joinLobby->playing:{gw.port}; exitLobby->menus)")
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", 80), Handler)
         print(f"[stack] http://127.0.0.1:80 (all SEMC hosts) — log {LOG_PATH}")

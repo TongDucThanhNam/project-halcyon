@@ -784,6 +784,42 @@ def build_move_intent(seq: int, x: float, y: float) -> bytes:
     return struct.pack(">Bff", seq & 0xFF, x, y) + bytes(5)
 
 
+# -- combat events (T3 slice 3; measured on vg5, measure_combat*.py) --------
+
+COMBAT_DELTA_PAYLOAD_SIZE = 20  # s2c 1054: [u32 src][u32 tgt][f32 delta][8B tail]
+#   corpus: damage is negative (minion-vs-minion melee first blood -19.4 at
+#   distance 2.00; spread -6.3..-99.3 incl. hero/other-class sources
+#   [Open: per-class damage]); the 8-B tail was `00 05 04 00 00 00 00 00`
+#   in 400/400 sampled minion-target frames — pinned here.
+COMBAT_DELTA_TAIL = bytes.fromhex("0005040000000000")
+MINION_ATTACK_DAMAGE = 19.4     # melee first-blood hit (4610 -> 4611)
+MINION_ATTACK_COOLDOWN = 0.6    # s between repeat hits of one (src, tgt)
+MINION_ATTACK_RANGE = 2.0       # first blood happened at exactly 2.00
+MINION_HP = 450.0               # lane-minion HP tier (mechanics leaf §17)
+
+DESTROY_PAYLOAD_SIZE = 6        # s2c 1073 / 1035: [u32 eid][u16 0]
+#   minion death chain measured: 1073 destroy then 1035 despawn, same
+#   timestamp, tail 0000, NO overkill 1054 and no 1068/1037/1072 frames
+#   (that longer chain belongs to structure 3563). Server HP is internal —
+#   the client has no HP stream for minions (no 1053/1011/1162/122-B-1010
+#   ever carries a minion eid) and computes its own HP from the 1054 stream.
+
+
+def build_combat_delta(src_eid: int, tgt_eid: int, delta: float) -> bytes:
+    """s2c 1054 COMBAT_DELTA — the wire's damage event."""
+    return struct.pack(">IIf", src_eid, tgt_eid, delta) + COMBAT_DELTA_TAIL
+
+
+def build_destroy(eid: int) -> bytes:
+    """s2c 1073 DESTROY."""
+    return struct.pack(">IH", eid, 0)
+
+
+def build_despawn(eid: int) -> bytes:
+    """s2c 1035 DESPAWN."""
+    return struct.pack(">IH", eid, 0)
+
+
 def build_minion_spawn_1010(spawner_eid: int, minion_eid: int, x: float, y: float,
                             seq: int, side: int) -> bytes:
     """s2c 1010, lane-minion spawn variant (126-B no-HP): the id map differs

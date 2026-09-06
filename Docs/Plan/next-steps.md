@@ -530,3 +530,39 @@ trí dừng theo cặp là [Open], chưa đo riêng.
 wave đã sống — state machine gần nhất-trong-range, HP tier đã đo, damage
 qua 1054/1053 khi hai lane giao nhau; hoặc basic-attack dummy nếu aggro
 cần thêm dữ kiện target-acquisition.
+
+## 16. Update 2026-09-06 (late night III) — QoL stack automation + T3 slice 3: combat
+
+**QoL (một lệnh `python -m server.platform.live_up`)**: kill stack cũ →
+start `local_stack` detached (log `$TEMP/halcyon_stack/live-stdout.txt`)
+→ chờ 4 port → chạy `guest_setup` idempotent. FSM lobby tự động trong
+`local_stack` (`_fsm_auto` mặc định ON): boot ghi `update=menus` (dính
+`playing` cũ lúc boot = màn xám + 1 lần chết natives — quan sát tối nay),
+thấy `joinLobby` → tự flip `playing`+host/port (bỏ accept screen, §14),
+`exitLobby` → về `menus` (không re-queue vô hạn). 7 unit tests
+`test_platform_fsm.py`; đã chạy thật: boot → `update` = `menus` xác nhận
+trong answers.json.
+
+**Slice 3 measure** (`measure_combat{,2,3}.py`, block "Combat events
+measured" trong wire §15.8): hai wave **đi hết polyline rồi đánh nhau tại
+endpoint** — first blood +39.699 s, 4610→4611, distance đúng **2.00**
+(melee range); damage minion discrete (peak −28; hit đầu −19.4); nhịp
+lặp **0.60 s**/(src,tgt); **HP minion không có trên wire** (1053 chỉ
+hero-family; không 1011/1162/122-B-1010 cho minion) — client tự cộng HP
+từ 1054; chết = **1073 rồi 1035, cùng instant**, không overkill (chain
+dài 1068/1037/1072 là của structure 3563). 1045 = target/aggro event
+`[eid][eid][flag][5×0]`, `ffffffff` = drop target [Open: từng flag];
+1046 = event gắn vị trí 22 B [Open]; 1016 retarget không mang eid —
+gắn theo ngữ cảnh dòng frame [Open].
+
+**Build**: `roster` thêm `build_combat_delta` (tail đo được
+`00050400 00000000`), `build_destroy`/`build_despawn` + constants
+(RANGE 2.0, DAMAGE 19.4, COOLDOWN 0.6, HP 450 nội bộ). `wave.py`: acquisition
+gần nhất-trong-range (tie-break eid), 1 hit/0.6 s, chết → 1073+1035 cùng
+batch rồi ngừng walk/heartbeat; cờ `combat=False` cô lập layer walk cho
+unit test. **Không hero nào bị nhắm** (chưa đo được aggro hero của minion —
+[Open], giữ an toàn như hero-1010). Suite **104/104** (90 + 7 FSM + 7 combat).
+
+**[Open] ghi rõ**: damage theo class minion (ranged tồn tại: hit distance
+p90 6.08/max 7.28), per-pair stop positions, HP accounting chính xác
+server-side, semantics từng flag 1045, quy tắc ngữ cảnh 1016.

@@ -1,11 +1,12 @@
-"""Lane-minion wave director — the first deterministic T3 sim slice.
+"""Lane-minion wave director — the first deterministic T3 sim slices.
 
 Every value here is corpus-measured (vg5_final.pcap match 5, 2026-09-06;
 see roster.py "Lane-minion wave spawn" block for the byte layout and the
-falsified 1087/1010-HP assumption). The director is pure: it emits
-(opcode, payload) frames as a function of (wave schedule, elapsed time) —
-no randomness, no wall-clock state, no c2s input. The caller owns sending,
-framing and the shared 1010 seq counter (passed in as a one-int list).
+falsified 1087/1010-HP assumption, and the "combat events" block for the
+slice-3 combat constants). The director is pure: it emits (opcode, payload)
+frames as a function of (wave schedule, elapsed time) — no randomness, no
+wall-clock state, no c2s input. The caller owns sending, framing and the
+shared 1010 seq counter (passed in as a one-int list).
 
 Per minion pair the emission order is the corpus raw-burst order:
   1010(right) 1016(right) 1070(right,B) · 1010(left) 1016(left) 1070(left,B)
@@ -14,6 +15,14 @@ Per minion pair the emission order is the corpus raw-burst order:
 After spawning, each minion walks its side's lane polyline at MINION_SPEED,
 publishing 1070 on waypoint arrival and every MINION_POSITION_PERIOD s,
 holding at the line's end (corpus idle heartbeats keep flowing).
+
+Combat (slice 3, measured): opposing minions in MINION_ATTACK_RANGE fight —
+nearest-enemy acquisition, one 1054 (delta -MINION_ATTACK_DAMAGE) per
+MINION_ATTACK_COOLDOWN, HP tracked server-internally from MINION_HP; at
+hp<=0 the minion emits 1073 then 1035 in the same batch and stops walking
+and heart-beating. The client keeps its own HP from the 1054 stream (no HP
+field exists for minions anywhere in the corpus), exactly the corpus
+mechanics; damage per class / ranged minions stay [Open].
 """
 from __future__ import annotations
 
@@ -23,13 +32,17 @@ OP_SPAWN_1010 = 1010
 OP_INTENT_1016 = 1016
 OP_STATE_1067 = 1067
 OP_POSITION_1070 = 1070
+OP_COMBAT_1054 = 1054
+OP_DESTROY_1073 = 1073
+OP_DESPAWN_1035 = 1035
 
 
 class Minion:
-    """One lane minion: spawn schedule, walk state, publish cadence."""
+    """One lane minion: spawn schedule, walk state, publish cadence, hp."""
 
     __slots__ = ("eid", "side", "spawn_at", "x", "y", "path", "seg",
-                 "next_position_at", "_last_step")
+                 "next_position_at", "_last_step", "hp", "target",
+                 "next_attack_at", "alive")
 
     def __init__(self, eid: int, side: int, spawn_at: float):
         self.eid = eid
@@ -42,6 +55,10 @@ class Minion:
         self.seg = 0                            # walking toward path[seg]
         self.next_position_at = spawn_at + roster.MINION_POSITION_PERIOD
         self._last_step = spawn_at
+        self.hp = roster.MINION_HP
+        self.target: "Minion | None" = None
+        self.next_attack_at: float | None = None
+        self.alive = True
 
     def step_to(self, now: float):
         """Advance the walk to `now`; the walk starts at spawn_at, so the
@@ -82,9 +99,11 @@ class Director:
     """
 
     def __init__(self, t0: float, first_eid: int = roster.LANE_MINION_FIRST_EID,
-                 seq_1010: list[int] | None = None):
+                 seq_1010: list[int] | None = None,
+                 combat: bool = True):
         self.t0 = t0
         self.first_eid = first_eid
+        self.combat = combat          # False = slice-2 walk/heartbeat only
         self.seq_1010 = seq_1010 if seq_1010 is not None else [0]
         self.next_minion = first_eid
         self.wave_index = 0
@@ -155,7 +174,7 @@ class Director:
                     m.eid, m.side, roster.ENTITY_STATE_MOVING)))
 
         for m in self.minions:
-            if now < m.spawn_at:
+            if not m.alive or now < m.spawn_at:
                 continue
             if not m.arrived:
                 prev_seg = m.seg
@@ -170,4 +189,53 @@ class Director:
                 out.append((OP_POSITION_1070,
                             roster.build_position(m.eid, m.x, m.y)))
                 m.next_position_at = now + roster.MINION_POSITION_PERIOD
+
+        out += self._combat(now)
         return out
+
+    # -- combat (slice 3, corpus-measured constants) -------------------------
+
+    def _combat(self, now: float):
+        """Nearest-enemy-in-range acquisition, 1054 damage ticks on the
+        measured 0.6 s cadence, and the measured two-frame death: 1073 then
+        1035 in the same batch. Deterministic: acquisition order is spawn
+        order, ties break on eid."""
+        if not self.combat:
+            return []
+        fighters = [m for m in self.minions
+                    if m.alive and m.spawn_at <= now]
+        deaths: list[Minion] = []
+        out: list[tuple[int, bytes]] = []
+        for m in fighters:
+            if m.target is not None and (
+                    not m.target.alive
+                    or self._dist(m, m.target) > roster.MINION_ATTACK_RANGE):
+                m.target = None
+                m.next_attack_at = None
+            if m.target is None:
+                foes = [f for f in fighters
+                        if f.side != m.side
+                        and self._dist(m, f) <= roster.MINION_ATTACK_RANGE]
+                if foes:
+                    m.target = min(foes, key=lambda f: (self._dist(m, f),
+                                                        f.eid))
+                    m.next_attack_at = now       # strike on acquisition
+            if m.target is None or now < m.next_attack_at:
+                continue
+            m.next_attack_at = now + roster.MINION_ATTACK_COOLDOWN
+            out.append((OP_COMBAT_1054, roster.build_combat_delta(
+                m.eid, m.target.eid, -roster.MINION_ATTACK_DAMAGE)))
+            m.target.hp -= roster.MINION_ATTACK_DAMAGE
+            if m.target.hp <= 0:
+                deaths.append(m.target)
+        for victim in deaths:
+            if not victim.alive:
+                continue        # already killed earlier in this same tick
+            victim.alive = False
+            out.append((OP_DESTROY_1073, roster.build_destroy(victim.eid)))
+            out.append((OP_DESPAWN_1035, roster.build_despawn(victim.eid)))
+        return out
+
+    @staticmethod
+    def _dist(a: Minion, b: Minion) -> float:
+        return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
