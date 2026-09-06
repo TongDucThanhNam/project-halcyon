@@ -323,10 +323,11 @@ def main() -> None:
             json.dump(DEFAULT_ANSWERS, fh, indent=1)
 
     gw_log_path = os.path.join(STACK_DIR, "gateway_log.txt")
+    gw_log_lock = threading.Lock()
 
     def _gwlog(msg: str) -> None:
         stamp = time.strftime("%H:%M:%S")
-        with open(gw_log_path, "a", encoding="utf-8") as fh:
+        with gw_log_lock, open(gw_log_path, "a", encoding="utf-8") as fh:
             fh.write(f"[{stamp}] {msg}\n")
 
     # Gateway ports are configurable: a stale elevated copy of an older stack
@@ -337,8 +338,15 @@ def main() -> None:
                          match_id="00000000-1111-4222-8333-444455556666",
                          heartbeat_port=int(cfg.get("_hb_port", 2112)), log=_gwlog)
     gw.start()
-    httpd = ThreadingHTTPServer(("127.0.0.1", 80), Handler)
-    print(f"[stack] http://127.0.0.1:80 (all SEMC hosts) — log {LOG_PATH}")
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 80), Handler)
+        print(f"[stack] http://127.0.0.1:80 (all SEMC hosts) — log {LOG_PATH}")
+    except OSError as exc:
+        # A stale (often elevated) holder of :80 keeps serving HTTP — but from
+        # the SHARED hot-reloaded answers.json, so its replies stay correct.
+        # This instance still owns its freshly configured gateway ports above.
+        httpd = None
+        print(f"[stack] :80 unavailable ({exc!r}) — HTTP stays with the holder", flush=True)
     print(f"[stack] rpc journal {RPC_LOG_PATH}")
     print(f"[stack] answers {ANSWERS_PATH} (hot-reloaded)")
     print(f"[stack] T2 gateway 127.0.0.1:{gw.port} + heartbeat :{gw.relay.port}")
@@ -379,7 +387,10 @@ def main() -> None:
         print("[stack] https://127.0.0.1:8443 (alternate TLS)", flush=True)
 
     try:
-        httpd.serve_forever()
+        if httpd is not None:
+            httpd.serve_forever()
+        else:
+            threading.Event().wait()  # gateway-only instance; block main thread
     except KeyboardInterrupt:
         pass
     finally:

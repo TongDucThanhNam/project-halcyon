@@ -18,7 +18,8 @@ def key_for(match_uuid):
 SWAP4 = lambda b: b[3::-1] + b[7:3:-1]
 
 def parse_pcap(path):
-    data = open(path, 'rb').read()
+    with open(path, 'rb') as fh:
+        data = fh.read()
     magic = data[:4]
     if magic == b'\xd4\xc3\xb2\xa1':
         en, bo = '<', 'LE'

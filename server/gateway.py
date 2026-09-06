@@ -123,7 +123,10 @@ class Gateway:
                         return
                     if not data:
                         return                    # EOF one way → tear down both
-                    peers[sock].sendall(data)
+                    try:
+                        peers[sock].sendall(data)
+                    except OSError:
+                        return                    # peer reset mid-burst (client left)
         finally:
             for sock in sockets:
                 try:

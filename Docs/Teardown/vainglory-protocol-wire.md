@@ -391,7 +391,7 @@ our samples).** Their `FUN_100123fa0` switch names the decimal range
 | 1087 | ENTITY_DATA (40 B) | per-entity blob |
 | 1107 | HERO_CATALOG | `*HeroName*` strings — our 0x0453 `*Adagio*` events |
 | 1108 | GAME_MODE / 1135 | MODE_NAME `*GameMode_HF_SoloBots*` |
-| 1114 | **SNAPSHOT 2592 B** | = **6 × 161 B scoreboard records** (+8 slot, +15 team, +18 eid, +24 handle 32 B, +104 uuid 36 B, **+16 gold u16**) — the 85 big frames in §15.5 are full-scoreboard dumps (~2 Hz in combat), not world state |
+| 1114 | **SNAPSHOT 2592 B** | = **6 × 161 B roster records** (1113 join-slot layout corrected below; applying it to 1114 still needs independent verification) — the 85 big frames in §15.5 are full-scoreboard dumps (~2 Hz in combat), not world state |
 
 Coordinate system note: wire positions share the map leaf's coordinate
 frame (X −90…+90 matches the 30-anchor table extents), so wire and
@@ -406,7 +406,7 @@ frames. Field maps [Observed]:
 
 | Op | Name | Payload (decoded) |
 |---|---|---|
-| 1010 | ENTITY_FULL_UPDATE | 124/128 B; id@+8, x/y/z@+12/16/20, yaw cos/sin@+24/28, scale 1.0@+32, **HP@+36, maxHP@+40** |
+| 1010 | ENTITY_FULL_UPDATE | **two payload variants: 126 B (no HP) and 122 B (HP@+36, maxHP@+40)**; eid@+0, class id@+4, write-tick@+8, x/z/y@+12/16/20, facing cos/sin@+24/32. The former "124/128 B; id@+8" row counted the opcode into the length and misread the +8 write-tick as entity id — full offset evidence and the hero-1010 falsification in §15.8 "1010 measured on the wire" (corrected 2026-09-06) |
 | 1053 | HERO_STAT | `[u32 eid][f32 value][u8 type][5B tail]` — hero-family eids only; type 6 = HP delta (−600…+402), 8 = cooldown/atk-speed (1…16.8), 4 = range events (turret ±800 at siege moments), 2 = −150…+30, 0 = −10000…+6 |
 | 1054 | COMBAT_DELTA | `[u32 src][u32 tgt][f32 delta][8B tail]` — negative = damage (typical minion hit −27.8; spread −11…−70), positive small = regen-class; **kill blow = giant overkill (−10000.0 on the 3563 death)**; attribution verified: heroes 1515/1516 + minions 6xxx–8xxx vs turret 3539 |
 | 1086 | ENTITY_PROP | `[u32 eid][u32 src][f32 amount][u8 0x0c][u8 seq][u16]` — property increments; dominant 3.594 (passive XP-class trickle), bursts 2048/512/32 = scaled counters [partial] |
@@ -510,7 +510,11 @@ protocol confirmed stable across matches, ports and keys.
 **SNAPSHOT 1113 record, empirically pinned:** 2,590 B payload = 2 f32
 header + **6 records at stride 161** ("Guest/Alpha/Beta/Gamma/Delta/
 Epsilon" found at +161 steps; eid u16 sits 9 bytes before the 32-byte
-handle; `__Kindred_Player_Bot__` uuid sentinel for bots). Gold column
+handle; `__Kindred_Player_Bot__` uuid sentinel for bots). [2026-09-06
+live correction: slot base is **+8** with an 8-byte prefix inside each
+161-byte slot. The intermediate +16 interpretation split that prefix off
+and mislabelled the next slot prefix as a tail. Correct offsets and hero
+selection semantics are in the roster block below.] Gold column
 **resolved as a measured negative** (post-audit mining): a full sweep of
 every u16/u32/f32 position in the record area across 81 match-3
 snapshots — monotone and purchase-dip-tolerant fingerprints — finds **no
@@ -595,6 +599,231 @@ f32 value, u8 type, bool@+9)` with two more bool flags at payload +10/+11
 New entity band **3768–3778**: receive type-4 range events (8 each), take
 and deal small damage — ability/pet/indicator-class entities [Partial].
 
+**Roster / join-completion exchange closed (2026-09-06, vgfull.pcap +
+c2s.bin re-decode; encoders live in `server/roster.py`).** The join gate
+after the opener burst is the **player roster**, and its binding mechanism
+is now field-exact:
+
+- **c2s 1000** = 70 B payload: the account session uuid (36 B ASCII) + 34 B
+  zero pad. Match 1's Guest uuid `ea4c7fda-…` is the account session — it
+  recurs across matches, so 1000 is presentation, not per-match binding.
+- **1118 hero selection** (live-corrected): c2s `[u32 hero_id][u32
+  selection_hash][6B 0]`, s2c echoes the selection. The client sends it
+  without any preceding s2c 1118. Live selection pairs: Amael =
+  `(925, 0x2fd7245d)`, Adagio = `(244, 0xf9fd7554)`; clicking a different
+  hero changes the pair. These are **not per-match player credentials**.
+  The first field recurs in 1006 (+164), 1011 (+0), and 1113 slot (+9);
+  the second recurs in 1011 (+4) and 1113 slot (+13). Internal hash
+  semantics and the full hero/skin ID table remain open.
+- **1006 PLAYER_INFO = 222 B**, one frame per player, roster order, sent
+  as two identical groups of 6 (`1006×6 → 1135 → 1006×6`): handle 64 B @+0,
+  session uuid 36 B @+64, hero eid u32 @+160, selected hero id u32 @+164,
+  **committed selection hash u32 @+168** (supersedes the "XP-class f32"
+  reading — same bytes; see the post-lock block below), const `0x9241f10e`
+  @+172, loadout/tail union
+  @+176..221 (local: 5×FNV1a("")=811c9dc5 + `ff ff 00 ff` + `00 02 01 00` +
+  `01 00`; bots: derived 16 B guid + `f1dedae3`-class u32 + `ff ff ff ff` +
+  `00 02 01 00 01`) [union semantics Open, minor].
+- **1135 MODE_NAME** = `*mode*` zero-padded to 70 B (no u32 prefix — vs
+  1108 which is `[u32 0][*mode*]`, same 70 B).
+- **1011 hero block = 750 B**: hero id u32 @+0, selection hash u32 @+4, eid u32 @+8,
+  **team u32 @+12 (values 1/2)**, `ff ff` @+16, hero-stat f32 run @+18…
+  (content hero-specific, not mapped), tail `…ff ff ff ff [u8 slot-class]`.
+  Stream order = reverse roster order, each block followed by 7 ×
+  **1162 TIMER_TICK** (`[u32 eid][u32 tag][u16 0][f32][8B tail]`, same
+  global tag set for every hero).
+- **1113 SNAPSHOT layout**, corrected by full-byte reconstruction:
+  `8 B countdown (f32 ×2) + 16 × 161 B slots + 6 B zero padding = 2590 B`.
+  Slot base `8 + 161*k`: occupied u8 +0, **zero-based slot index** u8 +1,
+  pick flags u16 +2, marker `ff ff ff 00` +4, team u8 +8 (1/2),
+  **selected hero id** u16 +9 (`ffff` while unpicked), eid u16 +11,
+  selection hash u32 +13, handle region 80 B +17, identity region 64 B +97.
+  Empty slots retain their index and marker, team=0, hero/eid=`ffff`,
+  hash=`10c2bad9`. Initial local hash is zero; initial bot hashes are
+  `10c2bad9`. Corpus UUIDs occupy 36 B of the identity region; this does
+  not imply the field is only 36 B wide. The previous +16/has-next/
+  one-based-slot interpretation is superseded.
+- **Live crash isolation:** rebuilt 1001/1108 are byte-identical to the
+  corpus. Old snapshot + rebuilt opener survives; new snapshot with
+  generated hero IDs crashes before any s2c 1118 or stream. Changing only
+  hero IDs to `ffff` restores hero selection; changing only hashes does
+  not. A valid client-selected pair then renders the local hero portrait.
+  The truncated JWT identity was not necessary to change for this fix;
+  the current encoder nevertheless preserves the available 64-byte region.
+- **Cadence and lock:** captured snapshots arrive around 2.5 Hz; later
+  snapshots show 7.0→0.0 and flags `0101`. A single pre-pick snapshot
+  **does render a functioning hero picker** and the client interpolates
+  its countdown. The earlier claim that a silent snapshot stream alone
+  explains a dead picker is disproved. Clicking Lock In sends c2s 1123
+  (6 B zeros). Current local code acknowledges selections, updates only
+  the local slot on lock, and streams the countdown; the post-lock
+  gameplay transition is still open. Do not equate this with full join
+  completion or emit fabricated 1011 hero blocks before a selection.
+- Corpus c2s order remains 1000 → 1112 → 1131 → 1118 (selection) →
+  1123 (lock) → 1119 `[f32][00 00]` → 1134 → 1137
+  `[u16 0][u32 eid][01 00]` → 1133. Only through 1123 is live-verified
+  with the current local implementation; the meaning of 1119 needs
+  additional evidence.
+
+**Post-lock world-init exchange closed (2026-09-06, ACK-precise trace of
+vgfull.pcap; implemented in `server/match_server.py` + `server/roster.py`).**
+Method: for every c2s frame, the TCP ACK of the segment carrying it names
+exactly how many s2c bytes the client had received — causality without
+timestamp guessing. Two corrections of the 2026-09-06 morning readings are
+included (1119 semantics; 1006 +168). Sequence, measured:
+
+- **c2s 1123 + c2s 1119 ride one TCP segment** (lock + commit, one UI
+  action). 1119 is `[u32 committed hash][00 00]` — NOT a generic confirm
+  and not an f32: the client resolves the loadout at lock time and sends a
+  hash *different* from its clicked 1118 pair (corpus: clicked
+  `(925, 2fd7245d)`, committed `4260123e`). The committed hash replaces the
+  clicked hash everywhere downstream (1113 slot +13, 1006 +168, 1011 +4).
+- s2c answer to the lock: **1113 (slot 0101, clicked hash) → s2c 1123 echo
+  (6 B zeros) → 1113 (committed hash) → s2c 1119 echo `[u32][00 00]`**.
+  Countdown still shows the pick pair (296.5/300.0) at this point.
+- **Bot assignment + lock countdown restart**: a burst of **8× identical
+  1113 at (7.00, 7.0)** in which *every* slot is 0101 with its hero — bots
+  carry fixed (hero, hash) pairs (396/bc155def, 244/f9fd7554, 399/4a490296,
+  254/9d1ad5d3, 924/e25acb56; the 244 pair equals what a live client click
+  produces, so the hash is a hero/skin property). The countdown then ticks
+  at **~10 Hz** (vs ~2.5 Hz pre-lock) to 0.05.
+- **At 0: 1006×6 (final) + 1132 (6 B zeros)** — then the wire is silent
+  ~23 s while the client loads the map; the client answers with
+  **c2s 1134 + c2s 1137 in one segment** (ack exactly through 1132).
+- **World dump, one burst**: 1135 → 1006×6 → 1105 (6 B zeros) → per hero in
+  *reverse* roster order: 1011 (750 B payload) + 1162×7 → **1087×39**
+  (entity-allocation blobs: `[u32 eid][u32 eid][u16][u16][u16 new_eid][u16
+  type]…` with sequential new entity ids — the strongest spawn-opcode lead
+  for the §2 gate) → 1055×6 (`[u32][10 B zeros]`, derivation open) →
+  s2c 1134 echo → s2c 1137 echo (`00 00 05 dc 01 00` = `[u16 0][u16 eid]
+  [u16 0100]`) → **1116** (~1 Hz afterwards): 16 × `[u32 eid][u16 flags]` +
+  6 B pad (102 B), local flag 0100, bots 0101.
+- **1006 +168 correction**: it is the *committed selection hash* u32 (the
+  "final XP-class f32" reading was the same bytes misread as a float).
+  Local tail: 7×FNV1a("") (not 5) @+176..204, `ff ff 00 ff` @+204,
+  `00 02 01 00` @+208, `00 00 00 01` @+212. Bot tail: zeros @+176, shared
+  16 B guid @+180 (derivation unknown — md5/FNV of sentinel+match id do not
+  match), `f1dedae3` @+200, `ff ff ff ff` @+204, `00 02 0<team> 00` @+208,
+  `01 00 00 00` @+212.
+- **1011 tail pinned**: `ff ff ff ff` @+741, slot-class u8 @+745 (slot 5 →
+  05). Stat run +18..740 is hero-specific kit content, still unmapped.
+- **1162**: values all 0.0; the 8 B tail carries the real flags; tag set =
+  3 global + per-hero extras [Open].
+- **Steady pre-game stream** after the dump: 1053×6 + 1086×6 every ~0.3 s,
+  1087/1086 allocation runs, 1116 ~1 Hz. The full gameplay firehose
+  (1067/1070/1054/1010…) starts only after **c2s 1133** (build-select close).
+- Decoder note: `decode.walk_stream` now decrypts small 8-aligned bodies,
+  so 1112/1119/1123/1131/1132/1105/1116/1134/1137/1055 appear as named
+  opcodes in decodes (previously bucketed as raw opcode-0 frames).
+
+**World layer live: map render + first server-controlled movement
+(2026-09-06 evening, LDPlayer 4.13.4 against the local stack).** The
+post-1137 entity stream is served as a real-time *tape* — every s2c frame
+the corpus server sent in 0..12.5 s after its 1137 echo, paced by
+`[u32 t_ms][u16 len][body]` records (`server/world_tape.py`; file outside
+the repo). Live-measured results:
+
+- The client accepts the tape bootstrap and **enters the match**: full HUD
+  (minimap, 1:0x timer, 600 gold, ability bar), the three allied heroes in
+  the spawn circle with nameplates and level-1 HP bars, camera follow on
+  the local hero. No re-queue, no crash attributable to our bytes (the
+  remaining random crashes are the known libhoudini segfaults — identical
+  signatures in menu phases, see the mobile leaf).
+- **c2s 1133 accompanies the "Choose a Build" overlay** — it fired 8–10 s
+  into the tape replay, exactly when the overlay appears, so "open/announce"
+  fits live behavior better than the archived "close" label [Open: the
+  corpus client sends 1133 once; overlay dismissal used Android BACK and
+  produced no c2s frame].
+- **New c2s op-0 variant**: 6-byte payload `[f32 uptime][00 00]`, one every
+  ~2 s during world load/play; the f32 rises ~2.0 per sample (client
+  uptime/clock ticker). The corpus c2s keepalive class is the 2-byte-tick
+  form; whether the corpus also carries the 6-byte form is unchecked
+  [Open]. Transport lesson: parsing op-0 strictly as 2 B **kills the match
+  socket mid-world-load** and the client re-queues — consume variants.
+- **Movement slice closed live**: c2s 1012 `[f32 x][f32 y][6B 0]` → s2c
+  1070 `[u32 eid][f32 x][f32 y][u16 0]` at a 0.2 s cadence moves hero eid
+  1500 on screen (measured live: spawn −78.18/0.88 → target −70.25/3.01,
+  camera follows). The spawn pair equals the f32s at 1011 stat-run +18 —
+  the block's position fields are confirmed by behavior, not just bytes.
+- Dump-order corrections from the tape decode (supersedes the bullet
+  above): the dump burst is 1135 → 1006×6 → 1105 → (1011 + 1162×7) in
+  reverse roster order → **1087 allocations (~241 entities over the 12.5 s
+  window, 40 B blobs, sequential new eids from 0x7d6) → 1055×6 sits
+  between the 1087 batch and the s2c echoes** (the earlier reading sent
+  1055 right after the hero blocks — wrong place) → 1134/1137 echoes →
+  delta stream 1053/1086/1067/1085/1164/1045 + 1010 full updates ×27.
+  The 2592 B frames in that window are 1113 roster snapshots (the ~10 Hz
+  lock countdown), not world state.
+
+**1010 ENTITY_FULL_UPDATE measured on the wire (2026-09-06 night, match 1,
+all 173 frames of the match decoded; second pass same night on the `.vgr`
+match-5 corpus — all 6,472 1010s of 169,963 parsed frames — tools
+`measure_1010*.py` in `$TEMP/vg_max/`, outside the repo).** Two payload
+variants exist: **126 B** (no HP — all 173 of wire match 1; 821 of match 5)
+and **122 B** (HP — 5,651 of match 5). Offset map of the 126-B variant
+(evidence = per-offset distinct-value counts + cross-frame correlation
+over all 173):
+
+| Off | Type | Content | Evidence |
+|---|---|---|---|
+| +0 | u32 | entity eid (upper u16 always 0; 21 eids, range 292..372) | 21 distinct at +3, +0..2 constant 0 |
+| +4 | u32 | entity-class id — **exactly 4 values** (`c10b41da`, `3df641a9`, `4dd5b7d0`, `eb39ce55`), each mapping 1:1 to an eid group (e.g. `eb39ce55` → {365..368}) | semantics [Open] (prefab/archetype hash is the guess) |
+| +8 | u32 | global entity-write tick: +1 per consecutive frame (whole first burst 3539..3565 is +1/frame), jumps between bursts in step with the rest of the entity stream (Δ776 over 15.0 s = 51.7/s right after load; Δ264 over 25.0 s = 10.6/s later) → a shared write counter, not a fixed-rate clock; production rule [Open] | 173 distinct, strictly monotonic |
+| +12 | f32 | x (observed ±88.5) | |
+| +16 | f32 | z/height — **0.00707 in 167/173** (`3be7a8f8` = ground); rare elevated 0.067/0.174/0.487/0.808/1.747 | |
+| +20 | f32 | y (0.51..42) | |
+| +24 | f32 | facing **cos** | every (+24, +32) pair is a unit vector (all 56 non-default pairs |v|=1.0000) |
+| +28 | f32 | 0.0 always | 173/173 |
+| +32 | f32 | facing **sin** (idle default pair (0.0, 1.0) ×117) | |
+| +36..+87 | — | **zero in 173/173** — no HP/maxHP fields in this shape (the `.vgr` row above is the 122-B variant below) | |
+| +88..95 | 8 B | class tail: `01`×8 (114), `03 01 01 01`+u32 `xx xx b9 ff` (50), `d9 29 b9 ff e5 29 b9 ff` (9) | [Open] |
+| +96..98 | 3 B | zeros (114) or one rotating `01` among the three (59) | [Open] |
+| +112..115 | 4 B | `ff ff ff ff` (164); `00`/varied bytes in 9 effect-class frames | [Open] |
+| +116 | u8 | second monotonic counter: +1 per frame in a burst (06..1e), small gaps (+2/+3) across bursts → own counter, not +8's low byte (3539&0xff=0x13 ≠ 06) | [Open] |
+| +117/+118 | u8 | 0x01 / 0x00 always | 173/173 |
+| +119..121 | 3 B | `01` then class pairs (`ff`,02 / `ff`,00 / `01`,02 / `01`,00…) | [Open] |
+| +122..125 | 4 B | zero (observed frames) | |
+
+**The 122-B HP variant (match-5 `.vgr` corpus, 5,651 frames).** Same
+offset map through +32, then **+36 f32 current HP, +40 f32 maxHP** and
+every tail field shifted −4 vs the 126-B layout (so the record simply ends
+4 bytes earlier). Measured maxHP histogram = the §15.6/§15.8 tiers
+(turrets 5000/3000, lane-minion 450-class); tails carried by the sample
+template: +96..103 `03 0f 03 03 03 03 03 03`, +119..121 `01 ff 01`
+[Open]. Length reconciliation of the old leaf row: 124 = 122+2 and
+128 = 126+2 (opcode counted into the record); the old `id@+8` column is
+the +8 entity-write tick, not an eid — its first-burst values 3539–3565
+coincide exactly with the old table's sequential "static id" run
+3539–3565, which is how placement names got joined onto tick numbers
+[Interpretation].
+
+- **Entity coverage**: 1010s exist **only for non-hero entities** — match 1:
+  21 eids 292..372 (minions, jungle, camp statics at x=±71.28/y=12.93);
+  match 5: 0 of 6,472 frames carry any hero eid. Combined census
+  **0 / 6,645 hero-1010s across both corpora**: no 1010 for any hero eid
+  (1500/1515–1519) anywhere, including the pre-1137 phase — **hero state
+  rides 1011 blocks + the 1070 stream + 1053/1086 deltas; the real server
+  never sends a hero 1010.** (Minions/statics do get 1010s, with HP in the
+  122-B variant — that is the template for the 1087 minion-wave throat.)
+- **Live falsification of the hero-1010 extension (2026-09-06 14:58,
+  LDPlayer against the local stack)**: the server emitted a measured-shape
+  126-B hero 1010 for eid 1500 right after the tape completed; the client
+  EOF'd the match socket **1 s after the first hero-1010** (first frame
+  14:58:18 → EOF 14:58:19) and re-queued at 14:58:28. Conclusion: the
+  absence of hero-1010 in the corpus is a real server behavior, not a
+  capture gap; sending one breaks the client.
+- **Pacing**: first burst of 25 coalesced frames at +6.43 s after the 1137
+  ack (client-finish catch-up, one per tick), then per-entity refresh
+  ranging ~1 s pairs (camp statics, teleport-class mirrored x re-spawns)
+  to ~6 s (busiest statics, 40 frames/244.6 s).
+- Emission (halcyon server): `roster.build_entity_full_update` writes only
+  these two measured maps; the shared `world_tick` (+8) and `seq_1010`
+  (+116) are per-stream deterministic counters (+1 per entity write / per
+  1010). Hero 1010 is **default-OFF** behind `HALCYON_HERO_1010=1` (the
+  live abort above); `HALCYON_NO_TAPE=1` skips the corpus tape so the
+  sim-only world (1070/1116) can be tested live without deleting the tape
+  file.
+
 **Their open problems vs our local artifacts** — the two archives are
 complementary, not redundant:
 
@@ -603,7 +832,7 @@ complementary, not redundant:
 | Minion/structure entity mapping (they tracked only hero ids 1500–1505) | §15.6 static table: 73 ids decoded, all 6 structure classes + shops placed and HP-tiered |
 | Structure/objective HP | §15.6 tier table 2500/3000/3500/5000/10000/448 |
 | **Kill/death detection** | **§15.8 death chain: 1054 overkill + 1073 destroy + 1035 despawn, ground-truthed on 3563** |
-| **Absolute HP vs deltas** | **1010 @+36/+40 per entity every ≈5 s + 1054 deltas** |
+| **Absolute HP vs deltas** | **1010 122-B variant @+36/+40 (minions/statics only — heroes never get 1010) + 1054 deltas** |
 | Wave timers | 60 s interval, 12–14 entities (§15.8 above) |
 | **Hero assignment** | hero eid family = 1500 + 1515–1519; snapshot 1113 carries eid+handle per record; 1006 order gives roster |
 | C→S input format | **closed**: 1012 = move/targeted-cast (x,y), 1041 = targetless cast, 1157/1078 = level-up, 1134/1133 = shop, join seq + keepalive (§15.8 match 3) |

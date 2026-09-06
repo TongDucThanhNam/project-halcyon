@@ -195,6 +195,31 @@ The copied files can remain inert under `/data/local/tmp`; no filesystem
 deletion is needed to restore routing or trust. Restore the local-only rules
 before any subsequent active local-server test.
 
+## Reverse-mapping failures seen live (2026-09-06)
+
+Three distinct symptoms, all routing, all fixed without touching the server:
+
+- **Black screens (~8 KB screenshots)** after an app relaunch: the adb
+  server had restarted and dropped every reverse mapping — including the
+  platform ports, so the menu RPC never reached the host. Re-add **all
+  four** (`8080`, `8443`, plus the current gateway/heartbeat ports) and
+  check `adb reverse --list`, not just `adb devices`.
+- **"Unable to connect :-/"** with only the gateway/heartbeat mappings
+  restored: the platform half (`8080`/`8443`) was still missing. The guest
+  NAT redirects 80→8080 and 443→8443, so no direct 80/443 mappings exist —
+  the set is exactly those four ports.
+- **Gateway port drift**: with a stale elevated stack still holding
+  7100/2112, the fresh stack serves 7102/2114 (ports advertised through the
+  shared hot-reloaded `answers.json`). The reverse set must name the
+  *current* gateway/heartbeat ports, and `adb reverse` must be re-run after
+  every adb-server restart regardless of app state.
+
+Also on this date: random native deaths with identical `libhoudini.so`
+signatures (tombstones in `$TEMP/halcyon_stack/`) occur in menu phases with
+the local server uninvolved — do not attribute client disappearances to our
+bytes without checking `logcat -b events` for `am_crash` and comparing
+tombstone signatures.
+
 ## Match-entry exchange verified end-to-end (2026-09-06)
 
 Running investigation (§143) closed on the platform tier. With
@@ -321,3 +346,138 @@ file as a script puts `server/platform/` on `sys.path` and shadows the
 stdlib `platform` module (pycryptodome import crash). Server-side test
 coverage: 26/26 (`python -m unittest discover -s server/test`), including
 auto-key adoption for both observed client key variants.
+
+## Roster live validation failed (2026-09-06)
+
+**[Observed]** Restarted the local stack with the working-tree roster
+implementation (`python -B -u -m server.platform.local_stack`). Rechecked
+UID 10060 IPv4/IPv6 local-only rules and existing ADB reverse mappings:
+guest 7100 routes to host 7101, heartbeat 2112 to 2113; HTTP/TLS use
+8080/8443. No remote backend was contacted.
+
+The launcher initially remained blank; explicitly starting the installed
+`com.superevilmegacorp.nuogameentry.NuoActivityGame` activity reached the
+menu. Selected Solo Bots / 3v3 / Very Easy, then hot-stepped the existing
+platform answers through pending_auto, matched_partners and playing.
+The existing synthetic match-found reply displayed **5v5 Solo Bots** despite
+the 3v3 menu selection; mode consistency remains an additional open issue.
+
+Two joins (host log 10:59:50 and 11:00:01) adopted the expected match-id key,
+received c2s 1000, logged c2s 1112 and 1131 (6 B each), and ended in EOF
+approximately one second later. No 1118 echo, 1123 or 1137 was logged.
+Neither connection reached the scheduled roster-dump log. The client
+returned to its splash screen; Android crash logs show GL-thread SIGSEGV,
+SEGV_MAPERR, null dereference at 0x10 for both corresponding game processes.
+The native-translation backtraces do not identify a protocol field.
+Guest clock timestamps differ from the host clock.
+
+**[Observed discrepancy, cause unverified]** The identity presented in this
+local c2s 1000 is a JWT prefix, not the corpus's 36-byte UUID. Both roster
+builders retain only its first 36 bytes. The corpus UUID equality test
+therefore does not establish correct identity binding for this live flow.
+Do not assert this mismatch caused the crash without a controlled comparison.
+Likewise, 1011 zero stats cannot explain a frame that was never sent in
+these attempts. Isolate opener reconstruction, 1118 and early snapshots
+before proceeding to entity-spawn work.
+
+Artifacts remain outside the repo under `$TEMP/halcyon_stack/`:
+`roster-*.png` (menu steps and post-join splash),
+`roster-client-crash.txt`, `roster-live-gateway.txt`,
+`roster-stack-stdout.txt`, `roster-stack-stderr.txt`, and the pre-run
+configuration backup `roster-answers-before.json`.
+The game was force-stopped to end the crash loop; `answers.json` now returns
+`update.state="menus"`. The updated stack remains running and local-only
+routing remains installed. No client files were changed.
+
+Checks: 41/41 tests passed with ResourceWarning treated as errors and
+bytecode writes disabled. This is a failed **live acceptance** result,
+not a failing unit test and not a closed roster gate.
+
+## Hero-selection crash isolated and fixed (2026-09-06)
+
+**[Observed]** Used an external probe harness
+`$TEMP/halcyon_stack/roster_probe_stack.py` with the current setup/catalog
+builders and controlled snapshot variants. All game routing remained local.
+The script is a diagnostic harness, not the production launch command.
+
+| Host time | Variant | Result |
+|---|---|---|
+| 11:13:57 | HEAD snapshot shape, rebuilt 1001/1108, no 1118/stream | Countdown and empty panels, alive until deliberate stop |
+| 11:14:26 | New populated snapshot alone | EOF/crash about one second later |
+| 11:15:15 | New snapshot, IDs=`ffff`, hashes=`10c2bad9` | Hero picker, Guest + two allied bot names, unsolicited c2s 1118 |
+| 11:16:14 | Change **only IDs** to `ffff`, retain derived hashes | Hero picker; choosing Adagio and locking emits 1118 and 1123 |
+| 11:17:39 | Change **only hashes**, retain derived IDs | EOF/crash |
+| 11:18:17 | Unpicked snapshot; echo client 1118 and update local hero | Guest portrait populated, selectable hero changes acknowledged |
+| 11:24:51 | Corrected normal `server.platform.local_stack` | Hero picker and portrait; Adagio selected 11:25:26, lock received 11:25:28; connection survives |
+
+The immediate crash trigger is the generated value in the **hero-selection
+ID field**, previously mislabelled player ID. Initial slots need `ffff`.
+This comparison did not need to alter the JWT identity or game mode; those
+were not the necessary correction for the observed crash.
+
+**Selection meaning/direction:** c2s 1118 arrives with no prior s2c 1118.
+Amael selected = `(925, 0x2fd7245d)`; clicking Adagio changes it to
+`(244, 0xf9fd7554)`. These values are stable across the probe and normal
+stack. S2c acknowledges the chosen pair. The client sends 1123 (6 B zeros)
+on Lock In. The earlier "server-issued player credential echoed by client"
+claim is disproved. A single snapshot was sufficient to display a usable
+picker, so streaming was not the missing prerequisite either.
+
+**Layout:** the corrected 8-byte countdown / 16 slot records / 6-byte
+padding builder matches every byte of the first corpus snapshot. Each
+record includes its own 8-byte prefix (occupied, zero-based index, flags,
+marker). Field regions place the identity in 64 bytes; the corpus's UUID
+only used 36. The implementation now preserves the live identity prefix.
+Precise offsets are in the wire leaf §15.8.
+
+**Remaining gate:** after lock the client remains connected on a dark
+waiting overlay; the corrected server does not send placeholder gameplay
+blocks. No live 1119/1137 or game world was observed. Bot choices and the
+post-lock transition, valid hero initialization and full selection ID/hash
+validation are open. This is hero-selection acceptance, not gameplay or
+complete join acceptance.
+
+External evidence: `probe-baseline.png`, `probe-new-only.png`,
+`probe-prepid.png`, `probe-select-adagio.png`, `probe-lock-adagio.png`,
+`probe-interactive*.png`, `selection-final-initial.png`,
+`selection-final-adagio.png`, `selection-final-locked.png`,
+`selection-stack-stdout.txt`, `selection-stack-stderr.txt`, and the matching
+host windows in `gateway_log.txt`, all under `$TEMP/halcyon_stack/`.
+`roster_compare.py` reproduces opener equality and exposed the missing slot
+prefix bytes. Repository regression tests now check full initial-snapshot
+equality and the client-initiated selection flow (44/44 green).
+
+Handoff state: normal stack restarted again at host 11:30 with serialized
+gateway logging (prevents reader/writer log-line loss). The emulator is
+left at the working, unlocked hero picker (`selection-ready.png`);
+`answers.json` returns `playing` with the same local match route. The
+probe harness is stopped. Logs for this launch are
+`selection-ready-stdout.txt` / `selection-ready-stderr.txt`; the latter
+is empty. All routing remains local-only.
+
+## Post-lock world-init served (2026-09-06, evening) — live run pending
+
+The "remaining gate" above is now implemented from the corpus: an
+ACK-precise trace of vgfull.pcap (tooling outside the repo,
+`$TEMP/vg_max/trace_after_lock.py`) decoded the full lock → loading →
+world-init exchange, and the normal stack now serves it: 1123 echo,
+1119 commit echo (the committed hash replaces the clicked one), bot hero
+assignment with the 8× locked-snapshot burst at 7.0 s, ~10 Hz countdown to
+0, final 1006×6 + 1132, and the world dump (1135, 1006×6, 1105,
+1011+1162×7 reverse, 1055×6, 1134/1137 echoes, 1116 ~1 Hz) once the client
+reports 1134/1137 — plus a 40 s dump fallback for clients that skip the
+tutorial-build flow. Sequence and field corrections are recorded in the
+wire leaf §15.8 "Post-lock world-init exchange closed"; the state machine
+lives in `server/match_server.py`.
+
+Corpus-side verification: 56/56 tests including byte-equality of the
+all-locked final 1113 and the final 1006 group against vgfull.pcap. Live
+verification is still outstanding. Next run's checklist, in order:
+
+1. Lock In → the client should leave the dark overlay into the locked
+   countdown (portraits populate, ~7 s).
+2. Loading screen (~23 s in the corpus) → c2s 1134 + 1137 in the local
+   match log.
+3. Map render. If it stays black: first suspect is the missing 1087
+   entity-allocation batch, then zero 1011 stat runs, then the derived
+   1055 tags — each has a measured corpus counterpart to rebuild from.

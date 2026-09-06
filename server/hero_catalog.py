@@ -1,20 +1,11 @@
-"""Hero-catalog names + join-opener payload fixtures (2026-09-06).
+"""Hero-catalog names + the 1107 payload builder (2026-09-06 corpus decode).
 
-Extracted from the match-1 corpus (vgfull.pcap / s2c.bin, match uuid
-b9f511e0-11cd-4cfa-ad62-dc8612b8d270): the s2c opener the real server
-sends between the route-ack and the join sequence. 1107 HERO_CATALOG
-carries *<name>* strings (275 at join, §15.8); 1001 GAME_SETUP and
-1108 GAME_MODE payloads are captured verbatim as hex. Structure is
-protocol; the strings are game constants (same class as the kit tables).
+1107 HERO_CATALOG carries ``*<name>*`` strings — 275 at join, §15.8. The
+names are game constants (same class as the kit tables); the payload shape
+is a protocol structure. The former verbatim 1001/1108 hex fixtures now
+live as field builders in server/roster.py (build_game_setup /
+build_game_mode) — no captured payload bytes are stored in the repo.
 """
-
-GAME_SETUP_1001_PAYLOAD = bytes.fromhex(
-    '000005dc000000010000ffff00000000030300000000000000000000000000002a47616d654d6f64655f48465f536f6c6f426f74732a0000000000000000000000000000000000000000000000000000000000000000000000000000000000003f8000000100'
-)
-
-GAME_MODE_1108_PAYLOAD = bytes.fromhex(
-    '000000002a47616d654d6f64655f48465f536f6c6f426f74732a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
-)
 
 HERO_CATALOG_1107_NAMES = (
     'Adagio', 'Alpha', 'Ardan', 'Baptiste', 'Baron',
@@ -75,7 +66,7 @@ HERO_CATALOG_1107_NAMES = (
 )
 
 
-CATALOG_1107_PAYLOAD_SIZE = 38   # captured: *<name>* + zero pad
+CATALOG_1107_PAYLOAD_SIZE = 38   # *<name>* + zero pad
 
 
 def catalog_payload(name: str) -> bytes:

@@ -63,6 +63,8 @@ class OP:
     TARGETLESS_CAST = 1041    # c2s, ff ff ff ff = null target
     ENTITY_STAT = 1053
     COMBAT_DELTA = 1054
+    PLAYER_TAG = 1055         # s2c world-init, one per player [u32][10B 0]
+    HERO_BLOCK = 1011         # s2c per-hero 750 B block (header mapped; stats open)
     ENTITY_STATE = 1067
     ENTITY_SUBSTATE = 1068
     POSITION = 1070
@@ -70,6 +72,7 @@ class OP:
     LEVELUP_B = 1078          # c2s ability point, slot B
     ENTITY_PROP = 1086
     ENTITY_DATA = 1087
+    MODE_PING_1105 = 1105     # s2c world-init filler, 6 B zeros
     HERO_CATALOG = 1107
     GAME_MODE = 1108
     SNAPSHOT = 1114
@@ -77,10 +80,14 @@ class OP:
     JOIN_1112 = 1112
     JOIN_1118 = 1118
     BUILD_LOCK = 1123
+    LOCK_COMMIT = 1119          # c2s [u32 committed hash][00 00]; s2c echoes it
     JOIN_1131 = 1131
+    SLOT_FLAGS_PING = 1116      # s2c ~1 Hz: 16 × [u32 eid][u16 flags] + 6B pad
     BUY_CLOSE = 1133
     SHOP_OPEN = 1134
-    HERO_READY = 1137         # [u16][u32 eid=1500][u16 0100]
+    ROSTER_FINAL = 1132         # s2c after the lock countdown: 6 B zeros
+    MODE_NAME = 1135            # s2c "*mode*" (70 B), no u32 prefix (vs 1108)
+    HERO_READY = 1137           # c2s/s2c [u16 0][u16 eid][u16 0100], echoed
     LEVELUP_A = 1157          # c2s ability point, slot A
     TIMER_TICK = 1162
 

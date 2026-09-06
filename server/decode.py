@@ -49,23 +49,30 @@ def _opcode_ok(cipher, stream: bytes, j: int, length: int) -> bool:
 def walk_stream(stream: bytes, cipher: wire.MatchCipher, start: int = 0):
     """Walk [u16 BE len][body] from `start`; returns (frames, consumed, total, missed).
 
-    frames: list of (opcode, payload). Small (<16 B) bodies that fail the
-    opcode check are kept raw as (0, body) — pre-key control frames.
+    frames: list of (opcode, payload). Small 8-aligned bodies are decrypted
+    too and named when they decode to a catalogue opcode — c2s actions
+    (1123/1119/1137…) and s2c echoes carry 6–8 B payloads. Only frames that
+    fail decryption stay raw as (0, body) — pre-key control frames.
     """
     frames, i, missed = [], start, 0
     n = len(stream)
     while i + 2 <= n:
         (length,) = struct.unpack_from(">H", stream, i)
-        if _opcode_ok(cipher, stream, i, length):
-            op, payload = wire.decode_body(cipher, stream[i + 2:i + 2 + length])
-            frames.append((op, payload))
-            i += 2 + length
-        elif 2 <= length < 16 and i + 2 + length <= n:
+        if length >= 8 and length % 8 == 0 and i + 2 + length <= n:
+            try:
+                op, payload = wire.decode_body(cipher, stream[i + 2:i + 2 + length])
+            except wire.WireError:
+                op = -1
+            if wire.DISPATCH_MIN <= op <= wire.DISPATCH_MAX:
+                frames.append((op, payload))
+                i += 2 + length
+                continue
+        if 2 <= length < 16 and i + 2 + length <= n:
             frames.append((0, stream[i + 2:i + 2 + length]))
             i += 2 + length
-        else:
-            missed += 1
-            i += 1
+            continue
+        missed += 1
+        i += 1
     return frames, i - start, n - start, missed
 
 
