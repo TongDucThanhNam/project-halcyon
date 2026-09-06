@@ -90,6 +90,11 @@ class Gateway:
                 pass
             return
         conn.settimeout(None)
+        # Route-ack: the real gateway answers the greeting with the 5 B
+        # plaintext frame [u16 3][00 06 00] (pcap t=+0.199 s). The client
+        # fires its encrypted c2s 1000 immediately after it — without it the
+        # client never speaks (2026-09-06 handshake decode, vgfull.pcap).
+        conn.sendall(wire.frame(wire.ROUTE_ACK_BODY))
 
         match = match_server.MatchServer(self.host, self.match_id, port=0,
                                          log=lambda m: self.log(f"[match:{self.match_id[:8]}] {m}"))

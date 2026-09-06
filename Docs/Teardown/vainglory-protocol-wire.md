@@ -69,6 +69,22 @@ Key structural findings:
   (134 B, zero-padded). That is a **route request to a gateway/relay
   frontend**: the client connects to a generic GCP endpoint and tells it
   which backend to join. 7034 is not "the game server" — it is the door.
+- **The gateway answers the greeting with a 5 B plaintext ack**:
+  `[u16 BE 3][00 06 00]` (vgfull.pcap t=+0.199 s). The client fires its
+  first encrypted c2s frame ~1 ms after receiving it; without the ack it
+  never speaks on the socket at all (2026-09-06 local-stack A/B, see the
+  mobile-local-stack leaf). Captured opener order, relative to the route
+  request: C route +0.000 → S ack +0.199 → C 1000 +0.200 → S 1001
+  +0.397 → C 1112 +0.400 → S 1108 + 1107×275 + 1113 +0.593.
+- **The match-key string is the `matchId` field of the platform `update`
+  reply whose `state` is `playing`** — the client writes it into
+  session+0xa8 before opening the match socket. [Observed] A/B on our own
+  client 2026-09-06: `playing` payload without `matchId` → the client
+  keys `MD5(SALT‖"")` (the session-string ctor default); adding
+  `matchId` flips it to `MD5(SALT‖matchId)`, the key this capture was
+  decoded with. The c2s 1000 payload is a different string — the
+  client's session id (a JWT in our local flow, a UUID in this capture)
+  — not the key input.
 - Match state does **not** flow over 2112 and does **not** flow over the
   TLS 443 connection. The 443 stream carries only ~24 KB for a whole
   match (platform chatter).

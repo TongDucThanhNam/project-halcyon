@@ -173,3 +173,29 @@ capture). Next bounded step: find the session+0xa8 writer; decode and
 replay the s2c handshake from the existing corpus. T3 movement slice
 starts only after this gate — the client must reach its join sequence
 (1000 → 1112/1131/1118/1123) before any spawn logic can be tested.
+
+## 8. Update 2026-09-06 (later) — handshake gate CLOSED
+
+Both §7 open questions are answered and verified live on the mobile CE
+client (evidence + implementation notes:
+`vainglory-mobile-local-stack.md` §"Post-route handshake closed";
+protocol facts added to `vainglory-protocol-wire.md` §15.1):
+
+- The gate was the **gateway route-ack** `[u16 3][00 06 00]` — one
+  5 B plaintext frame ~0.2 s after the route request; the client's c2s
+  1000 follows ~1 ms later. Client-first ordering was right all along
+  once that frame exists.
+- The **key input is the `playing` update's `matchId` field**
+  (proven by A/B: absent → `MD5(SALT‖"")`, present →
+  `MD5(SALT‖matchId)` = the vgfull.pcap key). The match server
+  auto-detects the client's key on its first frame either way.
+- Live result: c2s 1000 → opener burst (1001/1108/1107×275/1113) →
+  **c2s 1112 + 1131** → the client renders the match screen with the
+  countdown interpolating from our 1113 snapshot. The earlier "~30 s
+  EOF + retries" was our own read timeout (now 300 s).
+- **New gate: join completion = player roster.** The client renders no
+  hero select, sends no 1118/1123/keepalives, and the team panels are
+  empty — it has no slot/team/hero binding. Next bounded step: serve
+  the local player in 1006 PLAYER_INFO + the 1113 snapshot player
+  table (roster shapes exist in the corpus), then resume §2's build
+  order (spawn opcode discovery → movement-only slice).

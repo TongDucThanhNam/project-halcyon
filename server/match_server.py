@@ -2,12 +2,14 @@
 
 Speaks the match side of the wire via wire.py:
 
-  * accepts the (already gateway-proxied) client connection and runs the
-    encrypted frame loop: dispatch on opcode, log the c2s join sequence
-    (1000 → 1112/1131/1118/1123 → 1134/1137/1133 …), track keepalive ticks;
-  * answers PLAYER_UUID(1000) with GAME_SETUP(1001) then SNAPSHOT(1114) —
-    the flow the real client expects for a solo-bot lobby (phase0.md
-    acceptance 4) — plus GAME_MODE(1108);
+  * accepts the (already gateway-proxied) client connection, auto-detects
+    which key candidate the client derived (matchId / empty session string /
+    JWT sessionId — the session+0xa8 writer is still an open RE question),
+    and logs the c2s join sequence (1000 → 1112/1131/1118/1123 → 1134/1137/
+    1133 …), tracking keepalive ticks;
+  * answers PLAYER_UUID(1000) with the captured join-opener burst
+    (2026-09-06 corpus decode, pcap-ordered): GAME_SETUP(1001) fixture,
+    GAME_MODE(1108) fixture, HERO_CATALOG(1107) ×275, SNAPSHOT(1113) —
   * runs the §15.2 heartbeat relay as a SEPARATE listener (s2c ``89 00``
     every interval, c2s ``8a 80 12 34 56 78``), accepting any number of
     duplicated control connections like production.
@@ -32,8 +34,10 @@ import uuid as uuidlib
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import wire
+    import hero_catalog
 else:
     from . import wire
+    from . import hero_catalog
 
 
 # --------------------------------------------------------------------------
@@ -212,30 +216,29 @@ class MatchServer:
     # -- frame loop --------------------------------------------------------
 
     def _handle(self, conn):
-        conn.settimeout(30)
+        # Long idle read: after its join handshakes the client sits silent
+        # through the pre-join pick phase (keepalives only start in steady
+        # state); a 30 s timeout here killed the join and drove a 30 s
+        # client reconnect loop (observed 2026-09-06, gateway_log 10:06-10:09).
+        conn.settimeout(300)
         peer = conn.getpeername()
         try:
-            # Server-first diagnostic: the real client (4.13.4 mobile) sends
-            # nothing after the gateway route request and waits. Key-derive RE
-            # (2026-09-06): key = MD5(SALT || <session-singleton>+0xa8 string),
-            # updated via 0x00be262c. We don't know which string the client
-            # cached, so probe candidate key materials — a frame encrypted
-            # under the wrong key yields an opcode outside 1001–1168 and is
-            # dropped by the dispatch switch, so multiple probes are safe.
-            candidates = [
-                self.match_id,                           # matchId we serve in qPM/acceptMatch
-                "a92371d5-ef49-4cd0-959a-6a7042f074d9",  # sessionId inside the JWT sessionToken
-            ]
-            for cand in candidates:
-                probe = wire.MatchCipher(cand)
-                body = struct.pack(">H", wire.OP.GAME_SETUP) + cand.encode("ascii")
-                self.log(f"[match] {peer} probing key candidate {cand[:8]}…")
-                conn.sendall(wire.frame(probe.encrypt(body)))
+            key_named = False
             while not self._stop.is_set():
                 body = wire.read_frame(conn)
                 if body is None:
                     self.log(f"[match] {peer} EOF")
                     return
+                if not key_named:
+                    # The client's Blowfish key = MD5(SALT || <session+0xa8>),
+                    # and which platform write fills session+0xa8 is still an
+                    # open RE question. The client's FIRST encrypted frame
+                    # names the key it derived: adopt the candidate that
+                    # yields a dispatch-range opcode and log which one — the
+                    # match itself is the measurement.
+                    named = self._adopt_key(body)
+                    key_named = True
+                    self.log(f"[match] {peer} key candidate matched: {named!r}")
                 opcode, payload = wire.decode_body(self.cipher, body)
                 self.join_sequence.append((opcode, payload))
                 self._dispatch(conn, opcode, payload)
@@ -247,6 +250,31 @@ class MatchServer:
             except OSError:
                 pass
 
+    # Candidates for the string at session+0xa8, most likely first:
+    #   matchId  — the matchId our platform layer serves (qPM/acceptMatch)
+    #   ""       — the session string ctor default (empty SSO string)
+    #   JWT sid  — the sessionId inside the synthetic sessionToken
+    ALT_KEY_CANDIDATES = ("", "a92371d5-ef49-4cd0-959a-6a7042f074d9")
+
+    def _adopt_key(self, body: bytes) -> str:
+        """Pick the cipher whose key decrypts the first c2s frame into the
+        dispatch range; keep it for the whole match."""
+        for cand in (self.match_id,) + self.ALT_KEY_CANDIDATES:
+            probe = wire.MatchCipher(cand)
+            try:
+                opcode, _ = wire.decode_body(probe, body)
+            except wire.WireError:
+                continue
+            if (opcode == wire.OP.PLAYER_UUID
+                    or opcode == wire.OP.KEEPALIVE
+                    or wire.DISPATCH_MIN <= opcode <= wire.DISPATCH_MAX):
+                self.cipher = probe
+                return cand or "<empty string>"
+        # Nothing matched — keep the matchId key and let dispatch log the
+        # garbage opcode (never weaken the check to fake a pass).
+        self.cipher = wire.MatchCipher(self.match_id)
+        return "<none — dispatch garbage>"
+
     def _dispatch(self, conn, opcode, payload):
         if opcode == wire.OP.KEEPALIVE:
             tick = wire.parse_keepalive(payload)
@@ -255,10 +283,14 @@ class MatchServer:
         if opcode == wire.OP.PLAYER_UUID:
             self.session_uuid = payload.split(b"\x00", 1)[0].decode("ascii", "replace")
             self.log(f"[match] join: session uuid {self.session_uuid}")
-            # Stub GAME_SETUP payload = match id ASCII (true payload unmapped).
-            self._send(conn, wire.OP.GAME_SETUP, self.match_id.encode("ascii"))
-            self._send(conn, wire.OP.SNAPSHOT, build_snapshot())
-            self._send(conn, wire.OP.GAME_MODE, GAME_MODE_SOLO_BOTS)
+            # Faithful join-opener burst, pcap-ordered (2026-09-06 decode):
+            # 1001 GAME_SETUP → 1108 GAME_MODE → 1107 ×catalog → 1113
+            # snapshot; the client follows with 1112/1131/1118/1123.
+            self._send(conn, wire.OP.GAME_SETUP, hero_catalog.GAME_SETUP_1001_PAYLOAD)
+            self._send(conn, wire.OP.GAME_MODE, hero_catalog.GAME_MODE_1108_PAYLOAD)
+            for name in hero_catalog.HERO_CATALOG_1107_NAMES:
+                self._send(conn, wire.OP.HERO_CATALOG, hero_catalog.catalog_payload(name))
+            self._send(conn, 1113, build_snapshot(countdown=(298.86, 300.0)))
             return
         # Join handshakes (1112/1118/1123/1131/1119/1134/1137/1133/1157/1012/1081…)
         # are logged above; replies are T3 work.

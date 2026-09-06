@@ -260,3 +260,64 @@ write fills session+0xa8** (and what the client waits for before its c2s
 are the likely missing opener burst). Next bounded step: locate the
 session+0xa8 writer and decode the s2c handshake frames from the existing
 corpus, then replay that exact burst as the server-first opener.
+
+## Post-route handshake closed (2026-09-06)
+
+This section supersedes the T3 blocker paragraph above. The client now
+speaks first, on our stack, with the real key. Capture payload artifacts
+stay outside the repo (`$TEMP/halcyon_stack/`: `x1-*.png`, `x2-menu.png`,
+`gateway_log.txt` windows 10:06–10:13, `answers.json` rows).
+
+**1. The missing input was the gateway route-ack.** The real gateway
+answers the §15.1 plaintext route request with `[u16 BE 3][00 06 00]`
+~0.2 s later; the client sends its encrypted c2s 1000 ~1 ms after that.
+Without the ack the client sits silent forever — every earlier
+"client never speaks" observation reduced to this one missing frame.
+Implemented in `server/wire.py` (`ROUTE_ACK_BODY`) and `server/gateway.py`.
+
+**2. The encryption-key input is the `playing` update's `matchId` field.**
+A/B on this client, same session, only `answers.json`'s `update` row
+changed: `playing` payload without `matchId` → the client keys
+`MD5(SALT‖"")` (session-string ctor default; log
+`key candidate matched: '<empty string>'`); with
+`"matchId": "00000000-…-6666"` in the payload → the client keys
+`MD5(SALT‖matchId)`, the same key the vgfull.pcap capture decodes with.
+This closes the static-RE question "which write fills session+0xa8"
+operationally. The c2s 1000 payload is the client's session id string
+(JWT in our flow; a UUID in the real capture) — a different field from
+the key input.
+
+**3. The server must adopt the client's key, not assume it.**
+`server/match_server.py::_adopt_key` tries matchId / empty string / JWT
+sid on the client's first frame and keeps whichever decrypts into the
+dispatch range (both variants occur depending on platform answers).
+
+**4. Live-verified join exchange (client 4.13.4 CE, Solo Bots 5v5):**
+route request → our ack → c2s 1000 (session uuid) → our opener burst
+1001 GAME_SETUP + 1108 GAME_MODE + 1107 ×275 + 1113 snapshot (captured
+payloads, pcap order) → **c2s 1112 (6 B) + 1131 (6 B)** → the client
+leaves the menu and renders the match screen: team panels (blue/red) and
+a countdown interpolating from our 1113 values (set 298.86 s, observed
+ticking 4m28s → 4m6s across screenshots). The phase-0 "server-first"
+assumption is dead: the client sends 1000 first, once the ack exists.
+
+**5. The "~30 s EOF, ~11 retries" of the earlier blocker was our own
+read timeout.** After 1112/1131 the client idles (no keepalives yet), a
+30 s `conn.settimeout(30)` killed the join and drove a 30 s reconnect
+loop (gateway_log 10:06–10:09). Raised to 300 s
+(`server/match_server.py`); the connection then stays up. Keepalives
+(op 0 every 2 s) only start in steady state, not during the pick phase.
+
+**Still missing for a full join** (next gate, before §2's movement
+slice): the client sends no 1118 (token pair), no 1123 build-select, no
+keepalives, and the team panels stay empty — consistent with a missing
+player roster (1006 PLAYER_INFO records / player entries in the 1113
+snapshot). The client has no slot/team/hero binding to render hero
+select. Then: entity-spawn opcode discovery (next-steps.md §2).
+
+**Operational notes:** launch the stack with
+`python -m server.platform.local_stack` from the repo root — running the
+file as a script puts `server/platform/` on `sys.path` and shadows the
+stdlib `platform` module (pycryptodome import crash). Server-side test
+coverage: 26/26 (`python -m unittest discover -s server/test`), including
+auto-key adoption for both observed client key variants.

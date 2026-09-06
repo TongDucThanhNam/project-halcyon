@@ -73,6 +73,7 @@ class OP:
     HERO_CATALOG = 1107
     GAME_MODE = 1108
     SNAPSHOT = 1114
+    SNAPSHOT_JOIN = 1113       # the 2590 B full-state snapshot at join (§15.8 trio)
     JOIN_1112 = 1112
     JOIN_1118 = 1118
     BUILD_LOCK = 1123
@@ -89,6 +90,10 @@ DISPATCH_MAX = 1168
 
 ROUTE_TAG = 0x0005           # route-request body tag (§15.1)
 ROUTE_BODY_SIZE = 134         # route-request body size, zero-padded
+ROUTE_ACK_BODY = b"\x00\x06\x00"  # gateway route-ack: [u16 3][00 06 00], the
+#   5 B plaintext frame the real gateway answers ~0.2 s after the request
+#   (vgfull.pcap t=+0.199 s); the client sends its c2s 1000 immediately
+#   after it and sits silent forever without it (2026-09-06 handshake decode).
 
 HEARTBEAT_S2C = b"\x89\x00"                      # §15.2, every 10 s
 HEARTBEAT_C2S = b"\x8a\x80\x12\x34\x56\x78"      # §15.2, constant incl. literal
