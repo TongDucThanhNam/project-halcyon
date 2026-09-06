@@ -146,3 +146,30 @@ level-up thresholds.
 - **D3** — Determinism decisions in §3 are binding for all T3 code
   (checksum-in-1011, no client prediction assumption, fixed-point
   position/yaw, 1114-based late join, replay harness as CI gate).
+
+## 7. Update 2026-09-06 — T1 queue tier CLOSED; T3 handshake is the new gate
+
+**T1 (a) resolved.** The joinLobby→match exchange is mapped and verified
+on the mobile CE client (full evidence chain + reply shapes:
+`vainglory-mobile-local-stack.md` §"Match-entry exchange verified"):
+`joinLobby` acks `state:"pending_auto"`; the `update` long-poll drives the
+FSM (`menus→pending_auto→matched_partners→match_pending→playing`; the
+state `matched_partners` + `numQueuedEntries` is what triggers
+`queryPendingMatch` — not `match_pending`, not notify categories);
+`queryPendingMatch` reply shape decoded (`isValid/matchId/ttl/code/
+responses[]`); with a self-accept roster the client auto-fires
+`acceptMatch` (solo bots), and `update.state="playing"` with host/port
+makes it open the match TCP socket and send the §15.1 route request —
+verified end-to-end into our gateway.
+
+**New gate (replaces T1-a): the post-route handshake.** The real client
+sends nothing after the route request — the phase-0 assumption "client
+sends 1000 first" is wrong. Key-derivation RE: key =
+`MD5(SALT‖<session-singleton>+0xa8>)` (setter `0x00be262c`, salt
+0x1ac8e97, globals 0x304b220/238). Open questions: which write fills
+session+0xa8, and what s2c opener burst unlocks the client's c2s 1000
+(candidates: §15.5's 104/752/1,616 B handshake frames from the real
+capture). Next bounded step: find the session+0xa8 writer; decode and
+replay the s2c handshake from the existing corpus. T3 movement slice
+starts only after this gate — the client must reach its join sequence
+(1000 → 1112/1131/1118/1123) before any spawn logic can be tested.

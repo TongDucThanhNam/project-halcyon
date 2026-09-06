@@ -322,9 +322,20 @@ def main() -> None:
         with open(ANSWERS_PATH, "w", encoding="utf-8") as fh:
             json.dump(DEFAULT_ANSWERS, fh, indent=1)
 
-    gw = gateway.Gateway("127.0.0.1", port=7100,
+    gw_log_path = os.path.join(STACK_DIR, "gateway_log.txt")
+
+    def _gwlog(msg: str) -> None:
+        stamp = time.strftime("%H:%M:%S")
+        with open(gw_log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"[{stamp}] {msg}\n")
+
+    # Gateway ports are configurable: a stale elevated copy of an older stack
+    # can still hold :7100/:2112 (observed 2026-09-06, PID survives taskkill
+    # without elevation) — move to 7101/2113 by setting _gw_port/_hb_port.
+    cfg = _answers()
+    gw = gateway.Gateway("127.0.0.1", port=int(cfg.get("_gw_port", 7100)),
                          match_id="00000000-1111-4222-8333-444455556666",
-                         heartbeat_port=2112)
+                         heartbeat_port=int(cfg.get("_hb_port", 2112)), log=_gwlog)
     gw.start()
     httpd = ThreadingHTTPServer(("127.0.0.1", 80), Handler)
     print(f"[stack] http://127.0.0.1:80 (all SEMC hosts) — log {LOG_PATH}")
@@ -340,13 +351,18 @@ def main() -> None:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert, key)
 
-    if ctx is not None:
-        httpsd = TLSServer(("127.0.0.1", 443), Handler, ctx)
-        print("[stack] https://127.0.0.1:443 (platform RPC endpoint, TLS)", flush=True)
-    else:
-        httpsd = ThreadingHTTPServer(("127.0.0.1", 443), Handler)
-        print("[stack] http://127.0.0.1:443 (platform RPC endpoint, PLAIN)", flush=True)
-    threading.Thread(target=httpsd.serve_forever, daemon=True).start()
+    try:
+        if ctx is not None:
+            httpsd = TLSServer(("127.0.0.1", 443), Handler, ctx)
+            print("[stack] https://127.0.0.1:443 (platform RPC endpoint, TLS)", flush=True)
+        else:
+            httpsd = ThreadingHTTPServer(("127.0.0.1", 443), Handler)
+            print("[stack] http://127.0.0.1:443 (platform RPC endpoint, PLAIN)", flush=True)
+        threading.Thread(target=httpsd.serve_forever, daemon=True).start()
+    except OSError as exc:
+        # A stale elevated stack may still hold :443 — the client-facing
+        # endpoints are :8080/:8443 anyway; keep serving without :443.
+        print(f"[stack] :443 unavailable ({exc!r}) — skipping", flush=True)
 
     # Alternate ports. A stale elevated copy of this stack can still hold
     # :80/:443; with two SO_REUSEADDR listeners bound to the same port the

@@ -85,6 +85,7 @@ in the leaf; this entry point holds routes and brief status only.
 | Overall protocol, transport, crypto, join sequence | `Docs/Teardown/vainglory-protocol-wire.md` (§15) | `vainglory-netcode-backend.md` (§14) for topology |
 | Backend / gateway / relay architecture | `Docs/Teardown/vainglory-netcode-backend.md` (§14) | `vainglory-protocol-wire.md` §15.1–15.2 for the gateway route-request + heartbeat |
 | Mobile CE local-server startup, LDPlayer routing/TLS, or lobby entry | `Docs/Teardown/vainglory-mobile-local-stack.md` | `vainglory-runtime-reconstruction.md` only for additional emulator capture methods |
+| Evaluate external matchmaking/T3 advice or community-source leads | `Docs/Teardown/vainglory-implementation-brief-review.md` | Follow only the source or mechanics leaf needed for the claim under review |
 | Legacy PC menu replies, watchdog errors, or date workaround | `Docs/Teardown/vainglory-pc-client-internals.md` | The mobile leaf above when validating the target CE client |
 | What is known vs. what is the ceiling (which layer is "Hiểu" and which is not) | `Docs/Teardown/vainglory-knowledge-ledger.md` | The `## Ceiling` row 10 (server sim interior) |
 | Gameplay rule layer: combat math, wave/jungle timers, HP tiers, economy | `Docs/Teardown/vainglory-mechanics-matrix.md` (§8/§14/§19, `## Offline combat-math pass`) | `vainglory-3v3-map-structure.md` for placement/anchors |

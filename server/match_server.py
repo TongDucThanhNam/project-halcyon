@@ -215,6 +215,22 @@ class MatchServer:
         conn.settimeout(30)
         peer = conn.getpeername()
         try:
+            # Server-first diagnostic: the real client (4.13.4 mobile) sends
+            # nothing after the gateway route request and waits. Key-derive RE
+            # (2026-09-06): key = MD5(SALT || <session-singleton>+0xa8 string),
+            # updated via 0x00be262c. We don't know which string the client
+            # cached, so probe candidate key materials — a frame encrypted
+            # under the wrong key yields an opcode outside 1001–1168 and is
+            # dropped by the dispatch switch, so multiple probes are safe.
+            candidates = [
+                self.match_id,                           # matchId we serve in qPM/acceptMatch
+                "a92371d5-ef49-4cd0-959a-6a7042f074d9",  # sessionId inside the JWT sessionToken
+            ]
+            for cand in candidates:
+                probe = wire.MatchCipher(cand)
+                body = struct.pack(">H", wire.OP.GAME_SETUP) + cand.encode("ascii")
+                self.log(f"[match] {peer} probing key candidate {cand[:8]}…")
+                conn.sendall(wire.frame(probe.encrypt(body)))
             while not self._stop.is_set():
                 body = wire.read_frame(conn)
                 if body is None:

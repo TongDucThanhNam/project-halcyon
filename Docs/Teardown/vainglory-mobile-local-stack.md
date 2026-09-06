@@ -142,6 +142,12 @@ in this captured call. Do not invent a lobby response from this request alone.
 
 ## Revised next step — establish the match-entry exchange
 
+The external implementation brief has a focused review in
+`vainglory-implementation-brief-review.md`. It records source-backed
+`queryPendingMatch`/`update` field leads from VGReborn and separates them from
+unverified schemas and obsolete PC recommendations. Open it when using those
+leads; they have not yet been validated against this mobile client's consumer.
+
 The operator reports that current CE no longer exposes the original party/lobby
 feature. Historically, SEMC's
 [2020-07-01 CE update](https://www.vainglorygame.com/news/vainglory-community-edition-update-edtheshred/)
@@ -188,3 +194,69 @@ and remove each of the four reverse mappings with `adb reverse --remove`.
 The copied files can remain inert under `/data/local/tmp`; no filesystem
 deletion is needed to restore routing or trust. Restore the local-only rules
 before any subsequent active local-server test.
+
+## Match-entry exchange verified end-to-end (2026-09-06)
+
+Running investigation (§143) closed on the platform tier. With
+`server/platform/local_stack.py` + hot-reloaded `answers.json` (run dir
+`$TEMP/halcyon_stack/`, artifacts `m2-probe*.png`, journal `rpc.jsonl`):
+
+**The verified exchange (client 4.13.4 CE, Solo Bots 5v5):**
+
+1. `joinLobby` reply must ack the queue: `{"code":0,"returnValue":
+   {"state":"pending_auto","numPlayers":6}}`. An empty `returnValue:{}` is
+   never enough — the client just spins in `update` polls forever.
+2. `update` is the FSM driver. Verified state chain (string table
+   0x1af126d–0x1af12e8, parser 0x00dbebfc–0x00dbef10):
+   `menus→1, pending_auto→2, pending_custom→3, matched_partners→4,
+   match_pending→5, playing→6 (+host/port/proxy_host/proxy_port)`,
+   plus `spectating`/`post_match`. `matched_partners` is a real state, not a
+   payload variant — it is the only state that also parses
+   `numQueuedEntries` (int → ctx+0x108). **`match_pending` sent directly
+   while queued is ignored** (probe I, 255 polls, no reaction).
+3. `update.state="matched_partners"` + `numQueuedEntries` → the client fires
+   `queryPendingMatch` (params `[""]`, ~1/s retry loop) and renders the
+   MATCH FOUND / ACCEPT / DECLINE screen. This is the checkpoint trigger
+   the session goal asked for.
+4. `queryPendingMatch` reply shape (handler 0x00da7e88; key lookups are
+   `{ptr,len,len|0x100000}`): `returnValue` must be an object with
+   `code:int →+0x60`, `matchId:string →+0x28`, `ttl:float →+0x40`,
+   `isValid:bool →+0x58`, `responses:[{playerUUID:string, response:int,
+   acceptDelay:float}] →+0x48`. With `isValid:true` + a self entry
+   `response:1`, the client marks the local player accepted (green icon).
+5. Acceptance auto-advances (solo bots): the client sent `acceptMatch`
+   unprompted once the FSM ran menus→pending_auto→matched_partners with a
+   synced `matchId` and a valid qPM reply. (In probe K, with a stale
+   `matchId` and a mid-session FSM it never fired.)
+6. `update.state="playing"` with `host`/`port` → the client opens the match
+   TCP connection to that address (adb-reversed gateway) and sends the
+   §15.1 plaintext route request. Gateway log: `routed to backend
+   '127.0.0.1'`. **acceptMatch's reply was never consumed** — the client
+   connects purely from the `playing` update state.
+
+**Platform answers that work** (all in `$TEMP/halcyon_stack/answers.json`):
+session bootstrap (getPlayerForGuestAccount/startSessionForPlayer) unchanged;
+`joinLobby` = pending_auto ack; `update` = the state chain above (hot-flip
+per stage); `queryPendingMatch` = isValid:true + self roster;
+`acceptMatch` = session-bootstrap copy + `pingHostPortInfo:[{host,port,
+site,region}]` (shape from bootstrap parser 0x00d9f7c0–0x00d9fc4c — the
+array elements parse `host`, `port`, `site`, `region`).
+
+**T3 blocker (new, precisely bounded):** after routing, the real client
+sends **nothing** on the match socket (no PLAYER_UUID(1000), contrary to
+the phase-0 stub's assumption) and EOFs/aborts after ~30 s, retrying ~11×,
+then surfaces "Is your Wi-Fi still working?". Server-first single frames
+(GAME_SETUP 1001 or PLAYER_UUID 1000, encrypted under candidate keys
+matchId and JWT-sessionId) produced zero client reaction.
+
+Key-derivation RE (clean `libGameKindred.so`, 45,062,040 B): salt constant
+at 0x1ac8e97; `0x00be2540` = `MD5(SALT‖id) → Blowfish::SetKey16` into
+global 0x304b238; `0x00be262c` = update-key-if-changed (cache string at
+0x304b220), tail-called from `0x008195f8` which feeds
+`<session-singleton via 0xd829e0>()->+0xa8` — the match-key string lives
+at session offset 0xa8. The unresolved question is exactly one: **which
+write fills session+0xa8** (and what the client waits for before its c2s
+1000 — §15.5's s2c 104/752/1,616 B handshake frames from the real capture
+are the likely missing opener burst). Next bounded step: locate the
+session+0xa8 writer and decode the s2c handshake frames from the existing
+corpus, then replay that exact burst as the server-first opener.
