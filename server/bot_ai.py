@@ -37,30 +37,30 @@ class BotAI:
         self.last_decision_at = 0.0
         self.decision_interval = 0.5  # Evaluate AI state every 0.5s
 
-        # Determine lane path anchors depending on team
+        # Determine lane path anchors depending on team (aligned with STRUCTURE_TEMPLATES)
         if self.team == 1:
             self.lane_anchors = [
-                (-76.0, 0.88),   # Base
-                (-54.0, 0.0),    # Base Turret
-                (-35.0, 0.0),    # Middle Turret
-                (-17.0, 0.0),    # Outer Turret
-                (0.0, 0.0),      # Center lane
-                (17.0, 0.0),     # Enemy Outer
-                (35.0, 0.0),     # Enemy Middle
-                (54.0, 0.0),     # Enemy Base
-                (76.0, 0.88),    # Enemy Vain Crystal
+                (-76.0, 0.88),    # Base
+                (-54.0, 2.92),    # Base Turret
+                (-35.78, 1.17),   # Middle Turret
+                (-17.06, 1.93),   # Outer Turret
+                (0.0, 2.0),       # Center lane
+                (17.06, 1.93),    # Enemy Outer
+                (35.78, 1.17),    # Enemy Middle
+                (54.0, 2.92),     # Enemy Base
+                (76.12, 19.90),   # Enemy Vain Crystal
             ]
         else:
             self.lane_anchors = [
                 (76.0, 0.88),
-                (54.0, 0.0),
-                (35.0, 0.0),
-                (17.0, 0.0),
-                (0.0, 0.0),
-                (-17.0, 0.0),
-                (-35.0, 0.0),
-                (-54.0, 0.0),
-                (-76.0, 0.88),
+                (54.0, 2.92),
+                (35.78, 1.17),
+                (17.06, 1.93),
+                (0.0, 2.0),
+                (-17.06, 1.93),
+                (-35.78, 1.17),
+                (-54.0, 2.92),
+                (-76.12, 19.90),
             ]
 
     def step(
@@ -101,6 +101,27 @@ class BotAI:
             hero.clear_target()
             intents.append((wire.OP.MOVE_CAST, roster.build_move(spawn_x, spawn_y)))
             return intents
+
+        # 2.5 Turret Dive Safety: Avoid standing in enemy turret range without minion cover
+        for s in structures.values():
+            if s.is_alive and s.team != self.team and getattr(s, "attack_range", 0) > 0:
+                dist_s = math.hypot(s.x - hero.x, s.y - hero.y)
+                if dist_s <= s.attack_range:
+                    has_minion_cover = any(
+                        getattr(m, "alive", False) and getattr(m, "side", None) == self.team
+                        and math.hypot(m.x - s.x, m.y - s.y) <= s.attack_range
+                        for m in minions
+                    )
+                    if not has_minion_cover and hp_ratio < 0.65:
+                        dx = hero.x - s.x
+                        dy = hero.y - s.y
+                        dist = math.hypot(dx, dy)
+                        if dist > 0.01:
+                            safe_x = s.x + (dx / dist) * (s.attack_range + 2.0)
+                            safe_y = s.y + (dy / dist) * (s.attack_range + 2.0)
+                            hero.clear_target()
+                            intents.append((wire.OP.MOVE_CAST, roster.build_move(safe_x, safe_y)))
+                            return intents
 
         # 3. Find enemy targets in vision / threat range
         closest_enemy_hero: Optional[hero_movement.HeroMovement] = None

@@ -101,6 +101,8 @@ class Gateway:
         with self._match_lock:
             if (self.active_match is None or self.active_match.is_stopped()
                     or self.active_match.is_finished()):
+                if self.active_match is not None and not self.active_match.is_stopped():
+                    self.active_match.stop()
                 upstream_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
                 match = match_server.MatchServer(upstream_host, self.match_id, port=0,
                                                  log=lambda m: self.log(f"[match:{self.match_id[:8]}] {m}"))

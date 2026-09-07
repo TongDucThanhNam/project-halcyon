@@ -310,22 +310,30 @@ def ensure_firewall(serial, uid, http, https, host="127.0.0.1", redirect_lan=Fal
 
 # -- adb reverses ------------------------------------------------------------
 
-def ensure_reverses(serial, ports):
+def ensure_reverses(serial, ports, host_ports=None):
+    """Map guest ports to host ports via adb reverse. host_ports defaults to
+    the same port; the drift (guest 8080/8443 → host 9080/9443) routes
+    guests to the LIVE stack even when a stale elevated copy holds the
+    127.0.0.1-specific binds of the well-known ports (2026-09-07)."""
+    host_ports = host_ports or ports
     res = run(["adb", "-s", serial, "reverse", "--list"])
     listed = {part for line in res.stdout.splitlines()
               for part in line.split() if part.startswith("tcp:")}
     ok = True
-    for port in ports:
-        token = f"tcp:{port}"
-        if token in listed:
-            print(f"[reverse] ok (already mapped): {token}")
+    for gport, hport in zip(ports, host_ports):
+        token = f"tcp:{gport}"
+        wanted = f"tcp:{gport} tcp:{hport}"
+        if token in listed and wanted in res.stdout:
+            print(f"[reverse] ok (already mapped): {wanted}")
             continue
-        r = run(["adb", "-s", serial, "reverse", token, token])
+        if token in listed:
+            run(["adb", "-s", serial, "reverse", "--remove", token])
+        r = run(["adb", "-s", serial, "reverse", token, f"tcp:{hport}"])
         if r.returncode != 0:
-            print(f"[reverse] FAILED: {token} -> {r.stderr.strip()}")
+            print(f"[reverse] FAILED: {wanted} -> {r.stderr.strip()}")
             ok = False
         else:
-            print(f"[reverse] added: {token}")
+            print(f"[reverse] added: {wanted}")
     return ok
 
 
@@ -361,6 +369,14 @@ def main(argv=None):
                     help="host http port behind the 80 REDIRECT")
     ap.add_argument("--https", type=int, default=8443,
                     help="host https port behind the 443 REDIRECT")
+    ap.add_argument("--host-http", type=int, default=None,
+                    help="HOST-side port for the guest tcp:HTTP reverse "
+                         "(default: same as --http; drift to 9080 when a "
+                         "stale elevated stack holds 127.0.0.1:8080)")
+    ap.add_argument("--host-https", type=int, default=None,
+                    help="HOST-side port for the guest tcp:HTTPS reverse "
+                         "(default: same as --https; drift to 9443 when a "
+                         "stale elevated stack holds 127.0.0.1:8443)")
     ap.add_argument("--gateway-port", type=int, default=7102,
                     help="current match gateway port (drifts; see leaf)")
     ap.add_argument("--heartbeat-port", type=int, default=2114,
@@ -370,6 +386,11 @@ def main(argv=None):
     ap.add_argument("--skip-verify", action="store_true",
                     help="skip the guest DNS ping check")
     args = ap.parse_args(argv)
+
+    if args.host_http is None:
+        args.host_http = args.http
+    if args.host_https is None:
+        args.host_https = args.https
 
     if not preflight(args.serial):
         print(f"[adb] no shell service on {args.serial} — restart the "
@@ -388,9 +409,10 @@ def main(argv=None):
     ok &= ensure_firewall(args.serial, args.uid, args.http, args.https,
                           host=args.host, redirect_lan=args.redirect_lan)
     if args.host == "127.0.0.1":
-        ok &= ensure_reverses(args.serial,
-                              [args.http, args.https,
-                               args.gateway_port, args.heartbeat_port])
+        ok &= ensure_reverses(
+            args.serial,
+            [args.http, args.https, args.gateway_port, args.heartbeat_port],
+            [args.host_http, args.host_https, args.gateway_port, args.heartbeat_port])
     ok &= True if args.skip_verify else verify_dns(args.serial, args.host)
 
     print("[guest] RESULT:", "OK" if ok else "INCOMPLETE — see [..] FAILED/"

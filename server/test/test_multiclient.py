@@ -46,6 +46,10 @@ class TestMultiClientE2E(unittest.TestCase):
         shutil.rmtree(cls.tempdir, ignore_errors=True)
         (match_server.WORLD_TAPE_PATH, match_server.LOCK_COUNTDOWN) = cls._old
 
+    def _stop_last_match(self):
+        if self.gw.matches:
+            self.gw.matches[-1].stop()
+
     def _read_message(self, sock, timeout=5.0):
         sock.settimeout(max(0.05, timeout))
         body = wire.read_frame(sock)
@@ -61,6 +65,10 @@ class TestMultiClientE2E(unittest.TestCase):
         self.fail(f"expected opcode {want} not arrived on socket")
 
     def _connect_client(self, session_uuid):
+        # A WORLD-phase match survives zero clients now (world-entry dance),
+        # so stop the match this test used or the next test would reconnect
+        # into its leftover world.
+        self.addCleanup(self._stop_last_match)
         client = socket.create_connection((self.gw.host, self.gw.port), timeout=5)
         self.addCleanup(client.close)
         client.sendall(wire.build_route_request("127.0.0.1"))
@@ -174,6 +182,216 @@ class TestMultiClientE2E(unittest.TestCase):
 
         self.assertTrue(await_combat(c1))
         self.assertTrue(await_combat(c2))
+
+    def test_world_entry_second_connection_reconnects_same_slot(self):
+        """The 4.13 client opens a SECOND match connection for world entry
+        while its draft connection is still alive (2026-09-07 live log).
+        Same session uuid while the first socket is live must reconnect to
+        the SAME hero, never allocate a second slot."""
+        c1 = self._connect_client(SESSION_UUID_1)
+        setup1 = self._await_op(c1, wire.OP.GAME_SETUP)
+        self.assertEqual(struct.unpack_from(">I", setup1, 0)[0], 1500)
+
+        c_world = self._connect_client(SESSION_UUID_1)   # same uuid, c1 live
+        setup_w = self._await_op(c_world, wire.OP.GAME_SETUP)
+        self.assertEqual(struct.unpack_from(">I", setup_w, 0)[0], 1500)
+
+        # No new slot was consumed: the next distinct client gets slot 3
+        c2 = self._connect_client(SESSION_UUID_2)
+        setup2 = self._await_op(c2, wire.OP.GAME_SETUP)
+        self.assertEqual(struct.unpack_from(">I", setup2, 0)[0], 1517)
+
+    def test_new_uuid_midworld_join_gets_world_dump(self):
+        """A distinct device (own session uuid) joining while the match is
+        already in the world phase receives a full world dump for its own
+        new eid instead of the lobby opener."""
+        c1 = self._connect_client(SESSION_UUID_1)
+        self._await_op(c1, wire.OP.GAME_SETUP)
+        c2 = self._connect_client(SESSION_UUID_2)
+        setup2 = self._await_op(c2, wire.OP.GAME_SETUP)
+        self.assertEqual(struct.unpack_from(">I", setup2, 0)[0], 1517)
+
+        for sock in (c1, c2):
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.JOIN_1118,
+                          struct.pack(">II", 925, 0x2fd7245d) + bytes(6)))
+            self._await_op(sock, wire.OP.JOIN_1118)
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.BUILD_LOCK, bytes(6)))
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.LOCK_COMMIT,
+                          struct.pack(">I", 0x2fd7245d)))
+        # ROSTER_FINAL arrives once every human has locked
+        self._await_op(c1, wire.OP.ROSTER_FINAL)
+        self._await_op(c2, wire.OP.ROSTER_FINAL)
+        for sock in (c1, c2):
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.SHOP_OPEN, bytes(6)))
+            self._await_op(sock, wire.OP.SHOP_OPEN)
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.HERO_READY,
+                          bytes.fromhex("000005dc0100")))
+            self.assertEqual(self._await_op(sock, wire.OP.HERO_READY),
+                             bytes.fromhex("000005dc0100"))
+
+        # Match is now in the world phase; a third device joins
+        c3 = self._connect_client("55555555-5555-4555-8555-555555555555")
+        setup3 = self._await_op(c3, wire.OP.GAME_SETUP)
+        eid3 = struct.unpack_from(">I", setup3, 0)[0]
+        self.assertNotIn(eid3, (1500, 1517))
+        self._await_op(c3, wire.OP.MODE_NAME)
+        self._await_op(c3, wire.OP.HERO_BLOCK)
+        self._await_op(c3, wire.OP.POSITION)
+
+        # The existing clients stay in the world stream (movement → 1070)
+        c1.sendall(wire.encode_message(
+            self.cipher, wire.OP.MOVE_CAST,
+            struct.pack(">ff", roster.SPAWN_X + 2.0, roster.SPAWN_Y) + bytes(6)))
+        self._await_op(c1, wire.OP.POSITION)
+
+    def test_second_mapready_client_gets_own_world_dump(self):
+        """In a duo the second 1134 arrives after the first client's dump
+        flipped the phase to WORLD; the second client must still get its own
+        world-init dump (2026-09-07 live duo: one "world init dumped" line
+        for two 1134 pairs — the undumped client quit to menu)."""
+        c1 = self._connect_client(SESSION_UUID_1)
+        self._await_op(c1, wire.OP.GAME_SETUP)
+        c2 = self._connect_client(SESSION_UUID_2)
+        self._await_op(c2, wire.OP.GAME_SETUP)
+        for sock in (c1, c2):
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.JOIN_1118,
+                          struct.pack(">II", 925, 0x2fd7245d) + bytes(6)))
+            self._await_op(sock, wire.OP.JOIN_1118)
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.BUILD_LOCK, bytes(6)))
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.LOCK_COMMIT,
+                          struct.pack(">I", 0x2fd7245d)))
+        self._await_op(c1, wire.OP.ROSTER_FINAL)
+        self._await_op(c2, wire.OP.ROSTER_FINAL)
+
+        ready = bytes.fromhex("000005dc0100")
+        c1.sendall(wire.encode_message(self.cipher, wire.OP.SHOP_OPEN, bytes(6)))
+        c1.sendall(wire.encode_message(self.cipher, wire.OP.HERO_READY, ready))
+        self._await_op(c1, wire.OP.HERO_READY)
+
+        # c2's 1134 lands after the phase flipped to WORLD — it must carry
+        # its own init dump (MODE_NAME is the dump's first frame) before the
+        # no-tape echo of 1134.
+        c2.sendall(wire.encode_message(self.cipher, wire.OP.SHOP_OPEN, bytes(6)))
+        saw_dump = False
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            op, _ = self._read_message(c2, timeout=deadline - time.monotonic())
+            if op == wire.OP.MODE_NAME:
+                saw_dump = True
+            if op == wire.OP.SHOP_OPEN:
+                break
+        self.assertTrue(saw_dump, "second map-ready client got no world dump")
+
+    def test_hero_1010_full_updates_cover_every_human(self):
+        """With the hero-1010 layer enabled, every HUMAN hero gets its own
+        1010 full update stream — solo legacy emitted players[0] only, so a
+        duo's second hero would never render movement."""
+        os.environ["HALCYON_HERO_1010"] = "1"
+        self.addCleanup(os.environ.pop, "HALCYON_HERO_1010", None)
+        c1 = self._connect_client(SESSION_UUID_1)
+        self._await_op(c1, wire.OP.GAME_SETUP)
+        c2 = self._connect_client(SESSION_UUID_2)
+        self._await_op(c2, wire.OP.GAME_SETUP)
+        for sock in (c1, c2):
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.JOIN_1118,
+                          struct.pack(">II", 925, 0x2fd7245d) + bytes(6)))
+            self._await_op(sock, wire.OP.JOIN_1118)
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.BUILD_LOCK, bytes(6)))
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.LOCK_COMMIT,
+                          struct.pack(">I", 0x2fd7245d)))
+        self._await_op(c1, wire.OP.ROSTER_FINAL)
+        self._await_op(c2, wire.OP.ROSTER_FINAL)
+        ready = bytes.fromhex("000005dc0100")
+        for sock in (c1, c2):
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.SHOP_OPEN, bytes(6)))
+            self._await_op(sock, wire.OP.SHOP_OPEN)
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.HERO_READY, ready))
+            self._await_op(sock, wire.OP.HERO_READY)
+
+        seen = set()
+        deadline = time.monotonic() + roster.HERO_1010_PERIOD + 4.0
+        while time.monotonic() < deadline and seen != {1500, 1517}:
+            op, p = self._read_message(c1, timeout=deadline - time.monotonic())
+            if op == wire.OP.ENTITY_FULL_UPDATE:
+                seen.add(struct.unpack_from(">I", p, 0)[0])
+        self.assertEqual(seen, {1500, 1517},
+                         "1010 full updates did not cover both human heroes")
+
+    def test_same_player_two_token_encodings_one_slot(self):
+        """The client presents its identity under different JSON encodings of
+        the same JWT payload (live 2026-09-07 08:26: draft join and its
+        second connection carried spaced vs compact encodings and were
+        counted as two players). Identity = the player_id claim, so both
+        encodings must map to ONE slot."""
+        import base64
+        import json
+
+        def b64(obj):
+            raw = json.dumps(obj, separators=(",", ":")).encode()
+            return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+        pid = "3642548e-0bf8-4407-b20b-6c4cdb921cee"
+        compact = f"hdr.{b64({'player_id': pid, 'session_id': 's1'})}.sig"
+        spaced_payload = json.dumps({"player_id": pid, "session_id": "s2"},
+                                    separators=(", ", ": ")).encode()
+        spaced_b64 = base64.urlsafe_b64encode(spaced_payload).decode().rstrip("=")
+        spaced = f"hdr.{spaced_b64}.sig"
+        self.assertNotEqual(compact, spaced)
+        self.assertEqual(match_server.identity_from_token(compact), pid)
+        self.assertEqual(match_server.identity_from_token(spaced), pid)
+
+        c1 = self._connect_client(compact)
+        setup1 = self._await_op(c1, wire.OP.GAME_SETUP)
+        self.assertEqual(struct.unpack_from(">I", setup1, 0)[0], 1500)
+        # the same device's second connection must reconnect, not eat a slot
+        c1b = self._connect_client(spaced)
+        setup1b = self._await_op(c1b, wire.OP.GAME_SETUP)
+        self.assertEqual(struct.unpack_from(">I", setup1b, 0)[0], 1500)
+        # and the next DISTINCT player still gets the second slot
+        c2 = self._connect_client(SESSION_UUID_2)
+        setup2 = self._await_op(c2, wire.OP.GAME_SETUP)
+        self.assertEqual(struct.unpack_from(">I", setup2, 0)[0], 1517)
+
+    def test_world_survives_full_disconnect_for_world_conn(self):
+        """The client's world-entry dance closes its draft connection BEFORE
+        opening the world connection (live 2026-09-07: drafts EOF 07:02:39,
+        world conn 07:02:47). A WORLD-phase match with zero clients must
+        survive so the world conn reconnects into it — never a fresh draft
+        opener (which made the client quit to menu)."""
+        c1 = self._connect_client(SESSION_UUID_1)
+        self._await_op(c1, wire.OP.GAME_SETUP)
+        c2 = self._connect_client(SESSION_UUID_2)
+        self._await_op(c2, wire.OP.GAME_SETUP)
+        for sock in (c1, c2):
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.JOIN_1118,
+                          struct.pack(">II", 925, 0x2fd7245d) + bytes(6)))
+            self._await_op(sock, wire.OP.JOIN_1118)
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.BUILD_LOCK, bytes(6)))
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.LOCK_COMMIT,
+                          struct.pack(">I", 0x2fd7245d)))
+        self._await_op(c1, wire.OP.ROSTER_FINAL)
+        self._await_op(c2, wire.OP.ROSTER_FINAL)
+        ready = bytes.fromhex("000005dc0100")
+        for sock in (c1, c2):
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.SHOP_OPEN, bytes(6)))
+            self._await_op(sock, wire.OP.SHOP_OPEN)
+            sock.sendall(wire.encode_message(self.cipher, wire.OP.HERO_READY, ready))
+            self._await_op(sock, wire.OP.HERO_READY)
+
+        ms = self.gw.matches[-1]
+        self.assertEqual(ms.session.phase, ms.session.WORLD)
+
+        # both draft conns drop; 8 s later the world conn arrives
+        c1.close()
+        c2.close()
+        time.sleep(0.3)
+        c1w = self._connect_client(SESSION_UUID_1)
+        setup = self._await_op(c1w, wire.OP.GAME_SETUP)
+        self.assertEqual(struct.unpack_from(">I", setup, 0)[0], 1500)
+        self.assertEqual(self._read_message(c1w)[0], wire.OP.GAME_MODE)
+        # next frame discriminates reconnect (MODE_NAME world dump) from a
+        # fresh draft opener (HERO_CATALOG 1107 burst)
+        self.assertEqual(self._read_message(c1w)[0], wire.OP.MODE_NAME)
 
     def test_reconnection_resumes_match_with_state_dump(self):
         """Client disconnects and reconnects with the same session UUID; receives state dump."""

@@ -58,7 +58,8 @@ class OP:
     PLAYER_INFO = 1006
     ENTITY_FULL_UPDATE = 1010
     MOVE_CAST = 1012          # c2s move tap / targeted cast [f32 x][f32 y][6B 0]
-    ENTITY_FLOAT = 1016
+    MOVE_TO = 1016            # s2c ActionMoveTo: [u8 compact actor id][f32 x][f32 y][5B pad]
+    ENTITY_FLOAT = MOVE_TO    # legacy name retained for minion encoders
     DESPAWN = 1035
     TARGETLESS_CAST = 1041    # c2s, ff ff ff ff = null target
     POSITION_EVENT = 1046     # s2c position-tagged event / ability impact (22 B)
@@ -69,7 +70,8 @@ class OP:
     TARGET_ENTITY = 1060      # c2s target acquisition / basic attack intent [u32 target_eid][u16 0]
     PLAYER_TAG = 1055         # s2c world-init, one per player [u32][10B 0]
     HERO_BLOCK = 1011         # s2c per-hero 750 B block (header mapped; stats open)
-    ENTITY_STATE = 1067
+    ENTITY_VISIBILITY = 1067  # ActionModifyVisibility; NOT a locomotion state command
+    ENTITY_STATE = ENTITY_VISIBILITY  # legacy name retained for measured visibility builders
     ENTITY_SUBSTATE = 1068
     POSITION = 1070
     ENTITY_CLEAR = 1072       # s2c clear target/state [u32 eid][u16 0]

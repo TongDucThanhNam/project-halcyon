@@ -114,3 +114,21 @@ them.
    any future scan: a discriminator (values outside parameter-cube + distinct
    `(x,z)` multiplicity) is what separates signal from shader noise, not
    raw in-bounds counts.
+
+## 8. Dynamic Instrumentation via Rooted LDPlayer & The Differential Oracle (2026-09-07)
+
+### 8.1 Active Instrumentation Stack (Rooted LDPlayer)
+While static analysis of `libGameKindred.so` is blocked by stripped symbols, the rooted Android 9 environment on LDPlayer supports runtime dynamic instrumentation:
+- **`frida-server` (Android x86_64 / arm64 translation)**: Runs under `su` inside the emulator.
+- **In-Memory Opcode Hooking**: Intercepts the 167-case opcode dispatch loop (`vainglory-protocol-wire.md` §15.8) after Blowfish decryption and length framing, capturing in-flight payloads directly before C++ struct deserialization.
+- **JSON-RPC Extraction (T1)**: Hooks HTTPS payload constructors or memory strings immediately before encryption to capture the live `joinLobby` and matchmaking queue schemas without requiring root certificate CA installation.
+- **Entity Lifecycle Capture (T3)**: Hooks component allocators to observe the exact in-memory layout produced by the six early `1087` frames emitted at `+0.194s` after map load.
+
+### 8.2 The Differential Oracle Methodology
+To guarantee authoritative server simulation parity with zero mathematical drift:
+1. **Recording Phase**: Execute scripted hero actions (attack, move, ability cast, level-up) against an active session on the official/community server. Record the synchronized C2S input stream (`1012`, `1041`, `1060`, `1157`) and the resulting S2C event stream (`1010`, `1054`, `1067`, `1070`).
+2. **Replay Phase**: Inject the exact recorded C2S input stream into the Halcyon test server.
+3. **Automated Diffing**: Compare the emitted S2C event frames between Halcyon and Official:
+   - Satisifies parity if combat deltas (`1054`), arrival timestamps, and animation states (`1067`) match within machine precision.
+   - Any divergence flags an explicit tick or formula error in the server's authoritative simulation.
+

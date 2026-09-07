@@ -1,0 +1,154 @@
+Created At: 2026-09-07T11:52:59+07:00
+Completed At: 2026-09-07T11:53:00+07:00
+
+The command exited with code 0.
+Output:
+<truncated 231 lines>
++        base_send = send_fn if send_fn is not None else (
++            lambda op, p: self._send_to(conn, op, p))
++        dumped_frames = []   # (op, size) histogram evidence for live diffs
++        def send(op, p):
++            base_send(op, p)
++            dumped_frames.append((op, len(p)))
+         send(wire.OP.MODE_NAME, roster.build_mode_name())
+         for p in self.players:
+             send(wire.OP.PLAYER_INFO, roster.build_player_info(p, self.match_id))
+@@ -600,7 +690,12 @@ class SnapshotStream(threading.Thread):
+                 send(sop, sp)
+         mode = "tape carries 1055/1087/deltas/echoes" if tape else \
+                "1055 derived tags; static structures spawned; no 1087 spawn batch"
+-        self.log(f"[match] world init dumped to client; {mode}")
++        hist = {}
++        for op, size in dumped_frames:
++            hist[op] = hist.get(op, 0) + 1
++        self.log(f"[match] world init dumped to client; {mode}; "
++                 f"{len(dumped_frames)} frames: "
++                 + " ".join(f"{op}x{n}" for op, n in sorted(hist.items())))
+ 
+     def _dump_world(self):
+         """1135, 1006×6, 1105, (1011 + 1162×7) reverse — corpus order."""
+@@ -672,12 +767,21 @@ class SnapshotStream(threading.Thread):
+                 if self.emit_hero_1010 and now >= next_full_update:
+                     next_full_update = now + roster.HERO_1010_PERIOD
+                     self.world_tick += 1
+-                    self.seq_1010 = (self.seq_1010 + 1) & 0xFF
+-                    self._broadcast(wire.OP.ENTITY_FULL_UPDATE,
+-                                    roster.build_entity_full_update(
+-                                        self.players[0].eid, self.world_tick,
+-                                        self.hero_x, self.hero_y,
+-                                        self.seq_1010, self.hero_facing))
++                    for p in self.players:
++                        # every HUMAN hero needs its own 1010 stream (solo
++                        # legacy emitted players[0] only; in a duo the second
++                        # client's hero would never render movement)
++                        if p.is_bot:
++                            continue
++                        hsim = self.hero_sims.get(p.eid)
++                        if hsim is None:
++                            continue
++                        self.seq_1010 = (self.seq_1010 + 1) & 0xFF
++                        self._broadcast(wire.OP.ENTITY_FULL_UPDATE,
++                                        roster.build_entity_full_update(
++                                            p.eid, self.world_tick,
++                                            hsim.x, hsim.y,
++                                            self.seq_1010, hsim.facing))
+                 if now >= next_ping:
+                     next_ping = now + 1.0
+                     self._broadcast(wire.OP.SLOT_FLAGS_PING,
+@@ -709,6 +813,25 @@ class SnapshotStream(threading.Thread):
+ 
+             if now >= next_move_tick:
+                 next_move_tick = now + roster.MOVE_TICK
++                if self.enable_bots:
++                    for bot_eid, bot in list(self.bot_controllers.items()):
++                        bsim = self.hero_sims.get(bot_eid)
++                        if bsim is None or not bsim.is_alive:
++                            continue
++                        bkit = self.hero_kits.get(bot_eid)
++                        becon = self.economy.get_or_create(bot_eid)
++                        intents = bot.step(
++                            now=now,
++                            hero=bsim,
++                            all_heroes=self.hero_sims,
++                            minions=self.wave_director.minions if self.wave_director else [],
++                            structures=self.structures.structures,
++                            hero_kit=bkit,
++                            econ=becon,
++                        )
++                        for bop, bpayload in intents:
++                            self._apply_event(bop, bpayload, bot_eid=bot_eid)
++
+                 self._step_heroes(roster.MOVE_TICK, now)
+                 econ_frames = self.economy.step(
+                     roster.MOVE_TICK, now, self.hero_sims, emit_trickle=self.emit_trickle
+@@ -756,11 +879,10 @@ class SnapshotStream(threading.Thread):
+                     budget -= 1
+                     self.sparse_budget[eid] = budget
+                 self._broadcast(op, p)
+-                # 1018 3D pose rides every hero 1070 while moving (bot-
+-                # measured layout; the real local hero never receives it
+-                # because its client walks itself — ours does not)
++                # 1018 3D pose rides bot heroes while moving (measured layout
++                # in corpus: local hero receives zero 1018, only bots receive 1018).
+                 if (op == wire.OP.POSITION and self.hero_keepalive
+-                        and eid == self.players[0].eid):
++                        and eid != self.players[0].eid):
+                     self.keep_seq = (self.keep_seq + 1) & 0xFFFF
+                     self._broadcast(wire.OP.ENTITY_POSE_3D,
+                                     roster.build_entity_pose_3d(
+@@ -902,6 +1024,9 @@ class SnapshotStream(threading.Thread):
+                     self._run_world()
+         except OSError:
+             pass
++        except Exception as exc:
++            import traceback
++            self.log(f"[match] SnapshotStream unhandled error: {exc!r}\n{traceback.format_exc()}")
+         finally:
+             with self._clients_lock:
+                 for c in list(self.clients.keys()):
+@@ -957,10 +1082,18 @@ class MatchServer:
+         if self.session is not None:
+             if not self.session.is_alive():
+                 return True
+-            if len(self.session.clients) == 0:
+-                return True
+             if getattr(self.session, "structures", None) and self.session.structures.match_finished:
+                 return True
++            # A WORLD-phase match with zero attached clients is NOT finished:
++            # the 4.13 client's world-entry dance closes its draft connection
++            # and only then opens the world connection (live 2026-09-07:
++            # drafts EOF 07:02:39, world conn 07:02:47). Dropping the match
++            # in that window served the reconnect a FRESH draft opener and
++            # the client quit to menu. Bots keep the world warm; zero
++            # clients still ends PICK/LOCKED/FINAL lobbies.
++            if (self.session.phase != self.session.WORLD
++                    and len(self.session.clients) == 0):
++                return True
+         return False
+ 
+     # -- lifecycle ---------------------------------------------------------
+@@ -1029,8 +1162,11 @@ class MatchServer:
+         finally:
+             if self.session is not None:
+                 self.session.remove_client(conn)
+-                if self.session.phase == SnapshotStream.WORLD and len(self.session.clients) == 0:
+-                    self.session.stop()
++                # NOTE: a zero-client WORLD is deliberately left running —
++                # the client's world-entry dance closes the draft conn before
++                # the world conn opens (live 2026-09-07 07:02:39→47), and the
++                # headless bot world is the M3 stability scenario. The match
++                # ends via structures.match_finished or stack shutdown.
+             self._streams_by_conn.pop(conn, None)
+             try:
+                 conn.shutdown(socket.SHUT_RDWR)
+@@ -1099,7 +1235,8 @@ class MatchServer:
+         with self._session_lock:
+             send = self._sender(conn)
+             if self.session is None or not self.session.is_alive():
+-                players = roster.default_solo_bots(self.session_uuid, self.match_id)
++                players = roster.default_solo_bots(
++                    identity_from_token(self.session_uuid), self.match_id)
+                 self.session = SnapshotStream(conn, players, self.match_id, send, self.log)
+                 self.streams = [self.session]
+                 self._streams_by_conn[conn] = self.session
+

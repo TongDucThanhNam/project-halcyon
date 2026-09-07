@@ -34,6 +34,7 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 if __package__ in (None, ""):
@@ -54,6 +55,7 @@ DEFAULT_ANSWERS = {
     "rpc_default": {"error": {"code": -32601, "message": "halcyon: method not scripted yet"}},
 }
 
+_active_gateway = None
 _log_lock = threading.Lock()
 
 
@@ -80,6 +82,205 @@ def _answers() -> dict:
 
 
 MATCH_ID = "00000000-1111-4222-8333-444455556666"
+
+# -- per-device guest identity ------------------------------------------------
+# The client mints nothing: a FRESH install (no stored token) calls
+# createGuestPlayer with its hardware id (last param), and every identity
+# it presents afterwards is whatever THIS stack served. Serving one fixed
+# identity made two cloned installs indistinguishable at the match gateway
+# (2026-09-07: the second device hijacked the first's slot). Identity is
+# therefore minted per hardware id and every identity-bearing answer is
+# rewritten to the player_id inside the CLIENT's own session token.
+#
+# Listener-tag layer (2026-09-07, duo live): cloned LDPlayer images share
+# their hardware id (8/8 createGuestPlayer calls carried the same hwid) AND
+# adopt the canned static sessionToken from answers.json verbatim (measured:
+# the match-join JWT was byte-identical to the served startSession answer) —
+# so per-hwid minting never reaches the match join and the client-pid rewrite
+# self-defeats for default-presenting clients. Each device gets its own TLS
+# listener (HALCYON_DEVICE_PORTS, wired per-serial by live_up); the listener
+# tag keys a stable identity and EVERY answer on that listener is rewritten
+# to it, default-presenting clients included. LAN machines need no tag —
+# their RPC source IP is already device-unique.
+DEFAULT_PLAYER_UUID = "3642548e-0bf8-4407-b20b-6c4cdb921cee"
+_IDENTITY_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "halcyon-guest-identity")
+
+
+def _device_player_id(tag: str) -> str | None:
+    """Stable identity behind one listener tag (None = legacy untagged flow)."""
+    if not tag:
+        return None
+    return str(uuid.uuid5(_IDENTITY_NAMESPACE, f"device:{tag}"))
+
+
+def _token_player_id(token: str) -> str | None:
+    """player_id inside a client-presented sessionToken JWT (None if not a
+    decodable token)."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        return data.get("player_id")
+    except Exception:
+        return None
+
+
+def _client_token_payload(params) -> dict | None:
+    """Payload of the first JWT-looking param, if any."""
+    if not isinstance(params, list):
+        return None
+    for p in params:
+        if isinstance(p, str) and p.count(".") == 2 and len(p) > 40:
+            parts = p.split(".")
+            try:
+                padded = parts[1] + "=" * (-len(parts[1]) % 4)
+                return json.loads(base64.urlsafe_b64decode(padded))
+            except Exception:
+                return None
+    return None
+
+
+def _client_player_id(params) -> str | None:
+    """The player_id from the first JWT-looking param, if any."""
+    payload = _client_token_payload(params)
+    return payload.get("player_id") if payload else None
+
+
+def _mint_token(player_id: str, region: str = "sg") -> str:
+    """Session-token JWT for one player id. The client never verifies the
+    signature (measured: it accepts the static token) — the payload shape
+    is what the 4.13 client parses.
+
+    The 'd' claim stands FIRST and carries a per-identity 12-hex tag: the
+    client's PLAYER_UUID frame truncates the token to its first 63 bytes
+    (measured live 2026-09-07 — the frame holds `token[:63]` + nulls), and
+    with the shared header that exposes only ~19 payload bytes. Without a
+    distinguishing claim inside that window every minted token presented
+    the SAME truncated prefix at the match gateway and all devices mapped
+    to one roster slot. The client parses claims by name, so a leading
+    unknown claim is inert ([Unverified] against the 4.13 parser — but the
+    static shape without 'd' keeps working, so the risk is bounded)."""
+    now = time.time()
+    session_id = uuid.uuid5(_IDENTITY_NAMESPACE, f"{player_id}/session")
+    device_tag = uuid.uuid5(_IDENTITY_NAMESPACE, f"device-tag:{player_id}").hex[:12]
+    payload = {
+        "d": device_tag,
+        "_entropy": "84f8ba2e-fc34-415d-8d7c-6fdebbc83eec",
+        "time": now,
+        "session_id": str(session_id),
+        "sessionId": str(session_id),
+        "player_id": player_id,
+        "playerUuid": player_id,
+        "game_id": "kindred",
+        "gameId": "kindred",
+        "region": region,
+        "account_id": None,
+        "accountId": None,
+        "expiry": 0,
+        "extra_data": None,
+        "extraData": None,
+        "provider_id": player_id,
+        "provider_type": "Player",
+        "client_revision": None,
+        "device": None,
+        "os_family": None,
+        "distributor": None,
+        "language": None,
+        "context_type": "player",
+    }
+    header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    body = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+    sig = "hbGciOiJIUzI1NiJ9halcyonstaticsignature0123456789ABCDEF"[:43]
+    return f"{header}.{body}.{sig}"
+
+
+def _create_guest_player(params, device_tag: str = "") -> dict:
+    """Real response shape (HackedGlory mitm capture 2026-04-03): the
+    returnValue's 'playerUUID' field carries a freshly minted session
+    TOKEN whose player_id becomes the new guest's identity.
+
+    Default: mint per hardware id. HALCYON_MINT_IDENTITY=0 serves the
+    real-signed static token instead — A/B probe for client-side JWT
+    signature checks (2026-09-07).
+
+    On a tagged device listener the hwid is IGNORED (cloned images share
+    it — 8/8 identical calls across two emulators) and the mint keys on
+    the listener tag instead."""
+    hwid = params[-1] if isinstance(params, list) and params else "unknown"
+    static_token = ""
+    if os.environ.get("HALCYON_MINT_IDENTITY") == "0" and not device_tag:
+        answers = _answers()
+        for key in ("getPlayerForGuestAccount", "startSessionForPlayer"):
+            row = answers.get(key) or {}
+            tok = (row.get("returnValue") or {}).get("sessionToken", "")
+            if tok:
+                static_token = tok
+                break
+    if static_token:
+        token = static_token
+        _log(f"[identity] serving REAL static token for hwid {hwid} (A/B probe)")
+    elif device_tag:
+        player_id = _device_player_id(device_tag)
+        token = _mint_token(player_id)
+        _log(f"[identity] minted {player_id} for device {device_tag} (hwid shared: {hwid[-13:]})")
+    else:
+        player_id = str(uuid.uuid5(_IDENTITY_NAMESPACE, f"hwid:{hwid}"))
+        token = _mint_token(player_id)
+        _log(f"[identity] minted {player_id} for hwid {hwid}")
+    return {
+        "sessionToken": "",
+        "returnValue": {
+            "playerUUID": token,
+            "startSessionUrl": "https://rpc.kindred-live.net",
+        },
+        "code": 0,
+    }
+
+
+def _rebuild_jwt(token: str, player_id: str, session_id: str | None = None) -> str:
+    """One JWT with its payload's player identity (and optionally session)
+    swapped. Unchanged tokens pass through byte-identical."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return token
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return token
+    if (data.get("player_id") == player_id
+            and (session_id is None or data.get("session_id") == session_id)):
+        return token
+    for key in ("player_id", "playerUuid", "provider_id"):
+        if key in data:
+            data[key] = player_id
+    if session_id is not None:
+        for key in ("session_id", "sessionId"):
+            if key in data:
+                data[key] = session_id
+    body = base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+    return f"{parts[0]}.{body}.{parts[2]}"
+
+
+def _rewrite_identity(obj, player_id: str, session_id: str | None = None):
+    """Deep-rewrite an answer: every JWT gets its player identity swapped
+    and every bare default-uuid string is replaced. session_id, when given,
+    is swapped too — the client compares the session in a startSession
+    response against the token it presented (the static flow echoes it).
+    A no-op for answers that carry no identity (update, manifests, ...)."""
+    if isinstance(obj, dict):
+        return {k: _rewrite_identity(v, player_id, session_id)
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_rewrite_identity(v, player_id, session_id) for v in obj]
+    if isinstance(obj, str):
+        if obj.count(".") == 2 and len(obj) > 40:
+            return _rebuild_jwt(obj, player_id, session_id)
+        return obj.replace(DEFAULT_PLAYER_UUID, player_id)
+    return obj
 
 
 def _fsm_update_state(answers_path: str, state_obj: dict,
@@ -138,9 +339,21 @@ def fsm_on_rpc(rpc_method: str, answers_path: str = ANSWERS_PATH,
              "matchId": MATCH_ID},
             gw_port=port)
         _log(f"FSM joinLobby -> update=playing (host {host}, port {port})")
+        if _active_gateway is not None and _active_gateway.active_match is not None:
+            ms = _active_gateway.active_match
+            if ms.is_finished() or (ms.session is not None and ms.session.phase == ms.session.WORLD and len(ms.session.clients) == 0):
+                _log(f"FSM joinLobby: terminating stale match {ms.match_id[:8]} on port {ms.port}")
+                ms.stop()
+                _active_gateway.active_match = None
     elif rpc_method == "exitLobby":
         _fsm_update_state(answers_path, {"state": "menus"})
         _log("FSM exitLobby -> update=menus")
+        if _active_gateway is not None and _active_gateway.active_match is not None:
+            ms = _active_gateway.active_match
+            if ms.session is not None and len(ms.session.clients) == 0:
+                _log(f"FSM exitLobby: terminating idle match {ms.match_id[:8]} on port {ms.port}")
+                ms.stop()
+                _active_gateway.active_match = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -320,12 +533,35 @@ class Handler(BaseHTTPRequestHandler):
                       "headers": dict(self.headers)})
             key = f"{service}/{rpc_method}"
             answer = None
-            if key in answers:
+            device_tag = getattr(self.server, "device_tag", "")
+            if rpc_method == "createGuestPlayer":
+                # Fresh install: mint this device's identity from its hwid
+                # (or from the listener tag — cloned images share the hwid).
+                answer = _create_guest_player(payload.get("params"), device_tag)
+            elif key in answers:
                 answer = answers[key]
             elif rpc_method in answers:
                 answer = answers[rpc_method]
             else:
                 answer = answers.get("rpc_default", DEFAULT_ANSWERS["rpc_default"])
+            # Identity-bearing answers follow the CLIENT's own token: the
+            # default identity is served unchanged; any other player_id is
+            # substituted everywhere (tokens + bare uuids), keeping the
+            # client's session id so echoed tokens stay self-consistent.
+            client_payload = _client_token_payload(payload.get("params"))
+            client_pid = client_payload.get("player_id") if client_payload else None
+            if client_pid and client_pid != DEFAULT_PLAYER_UUID and rpc_method != "createGuestPlayer":
+                answer = _rewrite_identity(
+                    answer, client_pid,
+                    client_payload.get("session_id"))
+            if device_tag and rpc_method != "createGuestPlayer":
+                # Tagged listener: THIS device's identity wins even when the
+                # client presents the default/static token — otherwise every
+                # cloned device stays on the canned identity and hijacks the
+                # first device's match slot (2026-09-07 duo live evidence).
+                answer = _rewrite_identity(
+                    answer, _device_player_id(device_tag),
+                    client_payload.get("session_id") if client_payload else None)
             fsm_on_rpc(rpc_method)
             # The client parses the body as a STREAM of JSON values
             # (FUN_00ebfddc: while(*cursor) parse_next). A trailing newline
@@ -422,10 +658,17 @@ def main(argv=None) -> None:
         with open(ANSWERS_PATH, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, indent=1)
 
+    if cfg.get("_bots", True) and not os.environ.get("HALCYON_NO_BOTS"):
+        os.environ["HALCYON_BOTS"] = "1"
+    elif os.environ.get("HALCYON_NO_BOTS"):
+        os.environ.pop("HALCYON_BOTS", None)
+
     gw = gateway.Gateway(bind_host, port=gw_port,
                          match_id=MATCH_ID,
                          heartbeat_port=hb_port, log=_gwlog)
     gw.start()
+    global _active_gateway
+    _active_gateway = gw
     fsm_on_boot(gw_port=gw.port)   # a stale `playing` answer must not poison boot
     print(f"[stack] FSM auto {'ON' if _answers().get('_fsm_auto', True) else 'OFF'} "
           f"(boot=menus; joinLobby->playing:{gw.port} on {match_host}; exitLobby->menus)")
@@ -476,6 +719,46 @@ def main(argv=None) -> None:
         alt_tls = TLSServer((bind_host, 8443), Handler, ctx)
         threading.Thread(target=alt_tls.serve_forever, daemon=True).start()
         print(f"[stack] https://{bind_host}:8443 (alternate TLS)", flush=True)
+
+    # Drift ports (9080/9443). When a stale elevated copy holds the
+    # 127.0.0.1-specific binds of 8080/8443, the wildcard binds above lose
+    # every LOOPBACK connection (most-specific bind wins) — including the
+    # adb reverses. Guests are reversed to these drifted ports instead, so
+    # code-bearing endpoints (createGuestPlayer, identity rewrite) are
+    # always the LIVE stack, never the answers-only zombie (2026-09-07).
+    alt_drift = ThreadingHTTPServer((bind_host, 9080), Handler)
+    threading.Thread(target=alt_drift.serve_forever, daemon=True).start()
+    print(f"[stack] http://{bind_host}:9080 (drift plain — guest 8080 lands here)", flush=True)
+    if ctx is not None:
+        alt_tls_drift = TLSServer((bind_host, 9443), Handler, ctx)
+        threading.Thread(target=alt_tls_drift.serve_forever, daemon=True).start()
+        print(f"[stack] https://{bind_host}:9443 (drift TLS — guest 8443 lands here)", flush=True)
+
+    # Per-device listeners (HALCYON_DEVICE_PORTS="9444=emulator-5556,...").
+    # Each adb-reverse guest lands on its own TLS port; the listener tag keys
+    # the device identity (see _device_player_id) — the ONLY discriminator
+    # that survives cloned images: shared hwid, shared baked-in token, and
+    # identical loopback source via adb reverse. live_up wires the second
+    # emulator's reverse to its port (guest_setup --host-https).
+    for spec in filter(None, os.environ.get("HALCYON_DEVICE_PORTS", "").split(",")):
+        port_s, sep, tag = spec.partition("=")
+        tag = tag or "d1"
+        try:
+            port = int(port_s)
+        except ValueError:
+            print(f"[stack] device listener spec {spec!r}: bad port", flush=True)
+            continue
+        if ctx is None:
+            print(f"[stack] device listener {tag} :{port} skipped (no TLS context)", flush=True)
+            continue
+        try:
+            dev_tls = TLSServer((bind_host, port), Handler, ctx)
+        except OSError as exc:
+            print(f"[stack] device listener {tag} :{port} unavailable ({exc!r})", flush=True)
+            continue
+        dev_tls.device_tag = tag
+        threading.Thread(target=dev_tls.serve_forever, daemon=True).start()
+        print(f"[stack] https://{bind_host}:{port} (device {tag} TLS — identity keyed per device)", flush=True)
 
     try:
         if httpd is not None:

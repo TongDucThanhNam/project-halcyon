@@ -138,9 +138,8 @@ class HeroMovement:
             self.target_eid = None
             self.waypoints = []
             self.move_target = None
-            self.is_moving = False
-            # Death chain: 1073 DESTROY + 1067 ENTITY_STATE (dead) + 1162 TIMER_TICK (respawn countdown)
-            frames.append((wire.OP.DESTROY, roster.build_destroy(self.eid)))
+            # Death chain: 1067 ENTITY_STATE (dead corpse) + 1162 TIMER_TICK (respawn countdown).
+            # Note: Heroes never get 1073 DESTROY (destroying a hero actor crashes the client on tick).
             frames.append((wire.OP.ENTITY_STATE, roster.build_hero_death_state(self.eid)))
             frames.append((wire.OP.TIMER_TICK, roster.build_timer_tick(
                 self.eid, 0xb855d752, self.respawn_duration)))
@@ -209,6 +208,8 @@ class HeroMovement:
         if not was_moving:
             # Emit start anchor frame
             frames.append((wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y)))
+            # The session emits slot-addressed 1016 to activate navigation.
+            # 1067 modifies visibility and must not be invented for movement.
             self._start_emitted = True
 
         return frames
@@ -330,7 +331,7 @@ class HeroMovement:
                     self.is_moving = False
                     self.move_target = None
                     pos_frame = roster.build_position(self.eid, self.x, self.y)
-                    # Measured corpus behavior: duplicate 1070 on arrival confirmation
+                    # Confirm arrival without changing the actor's visibility.
                     frames.append((wire.OP.POSITION, pos_frame))
                     frames.append((wire.OP.POSITION, pos_frame))
                     return frames
@@ -356,7 +357,10 @@ class HeroMovement:
         self.waypoints = []
         self.move_target = None
         pos_frame = roster.build_position(self.eid, self.x, self.y)
-        return [(wire.OP.POSITION, pos_frame), (wire.OP.POSITION, pos_frame)]
+        return [
+            (wire.OP.POSITION, pos_frame),
+            (wire.OP.POSITION, pos_frame),
+        ]
 
     def teleport(self, x: float, y: float) -> List[Tuple[int, bytes]]:
         """Teleport hero to exact position (e.g. spawn, respawn)."""
@@ -365,4 +369,6 @@ class HeroMovement:
         self.waypoints = []
         self.move_target = None
         self.is_moving = False
-        return [(wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y))]
+        return [
+            (wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y)),
+        ]

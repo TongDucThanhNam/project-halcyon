@@ -360,3 +360,233 @@ def create_ringo_kit(hero: HeroMovement) -> HeroKit:
     ))
 
     return kit
+
+
+# ---------------------------------------------------------------------------
+# Catherine-class Hero Kit (Captain / Tank)
+# ---------------------------------------------------------------------------
+
+
+def _execute_merciless_pursuit(
+    caster: HeroMovement,
+    ability: AbilityDefinition,
+    target_eid: Optional[int],
+    target_pos: Optional[Tuple[float, float]],
+    now: float,
+    status_manager: Optional[StatusManager],
+    damage_queue: Optional[DamageModifierQueue],
+    all_heroes: Dict[int, HeroMovement],
+    all_minions: List[Any],
+) -> List[Tuple[int, bytes]]:
+    """Ability A: Merciless Pursuit — dashes toward target, deals 110 dmg and applies 1.2s STUN."""
+    frames: List[Tuple[int, bytes]] = []
+    tgt_hero = all_heroes.get(target_eid) if target_eid else None
+    tgt_minion = next((m for m in all_minions if m.eid == target_eid and m.alive), None) if target_eid else None
+
+    tx, ty = caster.x, caster.y
+    if tgt_hero:
+        tx, ty = tgt_hero.x, tgt_hero.y
+    elif tgt_minion:
+        tx, ty = tgt_minion.x, tgt_minion.y
+    elif target_pos:
+        tx, ty = target_pos
+
+    dist = math.hypot(tx - caster.x, ty - caster.y)
+    if dist > ability.range + 0.5:
+        return frames
+
+    # Dash close to target
+    if dist > 1.5:
+        dx, dy = (tx - caster.x) / dist, (ty - caster.y) / dist
+        caster.x = tx - dx * 1.0
+        caster.y = ty - dy * 1.0
+        frames.append((wire.OP.POSITION, roster.build_position(caster.eid, caster.x, caster.y)))
+
+    # Emit impact event
+    frames.append((wire.OP.POSITION_EVENT, roster.build_position_event(
+        caster.eid, tx, ty, z=0, kind=0
+    )))
+
+    # Apply 1.2s STUN
+    if status_manager is not None and target_eid is not None:
+        status_manager.apply_effect(StatusEffect(
+            effect_id=f"merciless_stun_{caster.eid}_{now}",
+            effect_type=StatusType.STUN,
+            source_eid=caster.eid,
+            target_eid=target_eid,
+            duration=1.2,
+            applied_at=now,
+            expires_at=now + 1.2,
+        ))
+
+    # Apply damage
+    wp = getattr(caster, "attack_damage", 70.0)
+    dmg = ability.base_damage + wp * 0.5
+    if tgt_hero:
+        frames.append((wire.OP.COMBAT_DELTA, roster.build_combat_delta(
+            caster.eid, tgt_hero.eid, -dmg, tail=roster.COMBAT_DELTA_HERO_TAIL
+        )))
+        dmg_frames = tgt_hero.apply_damage(
+            dmg, caster.eid, now,
+            damage_type="weapon",
+            status_manager=status_manager,
+            modifier_queue=damage_queue,
+        )
+        frames.extend(dmg_frames)
+    elif tgt_minion:
+        frames.append((wire.OP.COMBAT_DELTA, roster.build_combat_delta(
+            caster.eid, tgt_minion.eid, -dmg, tail=roster.COMBAT_DELTA_TAIL
+        )))
+        tgt_minion.hp -= dmg
+        if tgt_minion.hp <= 0:
+            tgt_minion.alive = False
+            frames.append((wire.OP.DESTROY, roster.build_destroy(tgt_minion.eid)))
+            frames.append((wire.OP.DESPAWN, roster.build_despawn(tgt_minion.eid)))
+
+    return frames
+
+
+def _execute_stormguard(
+    caster: HeroMovement,
+    ability: AbilityDefinition,
+    target_eid: Optional[int],
+    target_pos: Optional[Tuple[float, float]],
+    now: float,
+    status_manager: Optional[StatusManager],
+    damage_queue: Optional[DamageModifierQueue],
+    all_heroes: Dict[int, HeroMovement],
+    all_minions: List[Any],
+) -> List[Tuple[int, bytes]]:
+    """Ability B: Stormguard — grants a 300 HP barrier shield for 4.0s."""
+    frames: List[Tuple[int, bytes]] = []
+    frames.append((wire.OP.POSITION_EVENT, roster.build_position_event(
+        caster.eid, caster.x, caster.y, z=0, kind=0
+    )))
+    if status_manager is not None:
+        status_manager.apply_effect(StatusEffect(
+            effect_id=f"stormguard_{caster.eid}_{now}",
+            effect_type=StatusType.BARRIER,
+            source_eid=caster.eid,
+            target_eid=caster.eid,
+            duration=4.0,
+            applied_at=now,
+            expires_at=now + 4.0,
+            magnitude=300.0,
+        ))
+    return frames
+
+
+def _execute_blast_tremor(
+    caster: HeroMovement,
+    ability: AbilityDefinition,
+    target_eid: Optional[int],
+    target_pos: Optional[Tuple[float, float]],
+    now: float,
+    status_manager: Optional[StatusManager],
+    damage_queue: Optional[DamageModifierQueue],
+    all_heroes: Dict[int, HeroMovement],
+    all_minions: List[Any],
+) -> List[Tuple[int, bytes]]:
+    """Ability C (Ult): Blast Tremor — AoE blast dealing 320 CP damage and 2.5s SILENCE."""
+    frames: List[Tuple[int, bytes]] = []
+    frames.append((wire.OP.POSITION_EVENT, roster.build_position_event(
+        caster.eid, caster.x, caster.y, z=0, kind=3
+    )))
+
+    cp = getattr(caster, "crystal_power", 0.0)
+    dmg = ability.base_damage + cp * 1.0
+
+    # Hit all enemy heroes in range
+    for h in all_heroes.values():
+        if h.is_alive and h.team != caster.team:
+            dist = math.hypot(h.x - caster.x, h.y - caster.y)
+            if dist <= ability.range:
+                frames.append((wire.OP.COMBAT_DELTA, roster.build_combat_delta(
+                    caster.eid, h.eid, -dmg, tail=roster.COMBAT_DELTA_HERO_TAIL
+                )))
+                dmg_frames = h.apply_damage(
+                    dmg, caster.eid, now,
+                    damage_type="crystal",
+                    status_manager=status_manager,
+                    modifier_queue=damage_queue,
+                )
+                frames.extend(dmg_frames)
+                if status_manager is not None:
+                    status_manager.apply_effect(StatusEffect(
+                        effect_id=f"blast_silence_{caster.eid}_{h.eid}_{now}",
+                        effect_type=StatusType.SILENCE,
+                        source_eid=caster.eid,
+                        target_eid=h.eid,
+                        duration=2.5,
+                        applied_at=now,
+                        expires_at=now + 2.5,
+                    ))
+
+    # Hit enemy minions in range
+    for m in all_minions:
+        if getattr(m, "alive", False) and getattr(m, "side", None) != caster.team:
+            dist = math.hypot(m.x - caster.x, m.y - caster.y)
+            if dist <= ability.range:
+                frames.append((wire.OP.COMBAT_DELTA, roster.build_combat_delta(
+                    caster.eid, m.eid, -dmg, tail=roster.COMBAT_DELTA_TAIL
+                )))
+                m.hp -= dmg
+                if m.hp <= 0:
+                    m.alive = False
+                    frames.append((wire.OP.DESTROY, roster.build_destroy(m.eid)))
+                    frames.append((wire.OP.DESPAWN, roster.build_despawn(m.eid)))
+
+    return frames
+
+
+def create_catherine_kit(hero: HeroMovement) -> HeroKit:
+    """Factory creating Catherine Captain/Tank hero ability kit."""
+    kit = HeroKit(hero)
+
+    # A: Merciless Pursuit (Stun)
+    kit.register_ability(AbilityDefinition(
+        slot=AbilitySlot.A,
+        name="Merciless Pursuit",
+        ability_type=AbilityType.TARGET_ENEMY,
+        cooldown=8.0,
+        range=6.5,
+        base_damage=110.0,
+        damage_type=DamageType.WEAPON,
+        tag_inst=0xb855d762,
+        execute_fn=_execute_merciless_pursuit,
+    ))
+
+    # B: Stormguard (Barrier Shield)
+    kit.register_ability(AbilityDefinition(
+        slot=AbilitySlot.B,
+        name="Stormguard",
+        ability_type=AbilityType.SELF_BUFF,
+        cooldown=8.0,
+        range=0.0,
+        base_damage=0.0,
+        tag_inst=0xb855d763,
+        execute_fn=_execute_stormguard,
+    ))
+
+    # C: Blast Tremor (AoE Silence)
+    kit.register_ability(AbilityDefinition(
+        slot=AbilitySlot.ULT,
+        name="Blast Tremor",
+        ability_type=AbilityType.POINT_AOE,
+        cooldown=35.0,
+        range=9.0,
+        base_damage=320.0,
+        damage_type=DamageType.CRYSTAL,
+        tag_inst=0xb855d764,
+        execute_fn=_execute_blast_tremor,
+    ))
+
+    return kit
+
+
+def create_hero_kit(hero: HeroMovement, hero_id: int = 924) -> HeroKit:
+    """Factory selecting the appropriate hero kit based on hero_id."""
+    if hero_id in (245, 244):  # Catherine, Adagio (Protector/Captain)
+        return create_catherine_kit(hero)
+    return create_ringo_kit(hero)
+

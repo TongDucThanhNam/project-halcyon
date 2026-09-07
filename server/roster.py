@@ -295,10 +295,9 @@ def build_hero_block(p: Player) -> bytes:
 
 
 # Live evidence 2026-09-07: a hero served with a zeroed stat run renders but
-# GLIDES — the client never enters its walk animation (hero id 265, user
-# report + gateway log). The measured runs animate correctly (hero 244 A/B).
-# So unmeasured heroes reuse a measured DONOR run: bytes stay corpus-measured,
-# only the per-hero numbers are the donor's. [Open: capture real 1011 runs.]
+# GLIDES. Donor run restores rendering and level display, but walk-on-move
+# animation requires locomotion state activation (see Docs/Teardown/vainglory-movement-anatomy.md §13.6).
+# Unmeasured heroes reuse a measured DONOR run for valid stats and rendering.
 HERO_INIT_DONOR_ID = 244
 
 def hero_init_for(hero_id: int):

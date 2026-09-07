@@ -57,6 +57,12 @@ def main(argv=None) -> int:
                     help="Host IP returned in playing state (default 127.0.0.1 or LAN IP)")
     ap.add_argument("--serial", default="emulator-5554",
                     help="ADB serial of the local emulator to configure (default emulator-5554)")
+    ap.add_argument("--device-serial", default=None,
+                    help="second local emulator; its guest 8443 reverse maps to "
+                         "--device-host-https where the stack keys a per-device "
+                         "identity (cloned images share hwid + token)")
+    ap.add_argument("--device-host-https", type=int, default=9444,
+                    help="host TLS port of the per-device listener (default 9444)")
     ap.add_argument("--skip-guest", action="store_true",
                     help="Skip running guest_setup after stack startup")
     args = ap.parse_args(argv)
@@ -73,18 +79,26 @@ def main(argv=None) -> int:
     ports = [int(answers.get("_gw_port", 7100)),
              int(answers.get("_hb_port", 2112)),
              8080, 8443]
+    if args.device_serial:
+        ports.append(args.device_host_https)
     log_path = os.path.join(local_stack.STACK_DIR, "live-stdout.txt")
     os.makedirs(local_stack.STACK_DIR, exist_ok=True)
 
-    cmd = [sys.executable, "-B", "-m", "server.platform.local_stack"]
+    cmd = [sys.executable, "-B", "-u", "-m", "server.platform.local_stack"]
     if args.bind_host:
         cmd += ["--bind-host", args.bind_host]
     if args.match_host:
         cmd += ["--match-host", args.match_host]
 
+    env = dict(os.environ)
+    if args.device_serial:
+        # Tag = device serial → identity survives port drift across restarts.
+        env["HALCYON_DEVICE_PORTS"] = f"{args.device_host_https}={args.device_serial}"
+        print(f"[live] device listener: {args.device_serial} -> TLS :{args.device_host_https}")
+
     with open(log_path, "ab") as log_fh:
         proc = subprocess.Popen(
-            cmd,
+            cmd, env=env,
             stdout=log_fh, stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP |
             subprocess.DETACHED_PROCESS)
@@ -105,10 +119,22 @@ def main(argv=None) -> int:
         print("[live] guest setup skipped as requested")
         return 0
 
-    guest_argv = ["--serial", args.serial]
+    guest_argv = ["--serial", args.serial,
+                  "--gateway-port", str(ports[0]),
+                  "--heartbeat-port", str(ports[1]),
+                  "--host-http", "9080", "--host-https", "9443"]
     if args.match_host and args.match_host != "127.0.0.1":
         guest_argv += ["--host", args.match_host]
     rc = guest_setup.main(guest_argv)
+    if args.device_serial:
+        device_argv = ["--serial", args.device_serial,
+                       "--gateway-port", str(ports[0]),
+                       "--heartbeat-port", str(ports[1]),
+                       "--host-http", "9080",
+                       "--host-https", str(args.device_host_https)]
+        if args.match_host and args.match_host != "127.0.0.1":
+            device_argv += ["--host", args.match_host]
+        rc = guest_setup.main(device_argv) and rc
     print("[live] host side ready — relaunch the game and drive the taps")
     return rc
 

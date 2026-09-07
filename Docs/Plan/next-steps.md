@@ -750,3 +750,126 @@ layer 1067/1045/1052, hoặc memory-scan anim-state flag trên client chạy.
 
 **Suite**: 118 tests — 112+4 green (thêm 2 test sweep: shape 8 hero mới +
 entry 258 timers=None), 4 đỏ CŨ y nguyên (slice-6 WIP).
+
+## 21. Update 2026-09-07 — Locomotion Dual-Contract Discovery (Local Predictive vs Replicated Puppet)
+
+**Bối cảnh**: Hero di chuyển tọa độ nhưng client không kích hoạt animation chạy (glide). Điều tra sâu so sánh cùng hero (Hero 925 Amael / EID 1500) giữa capture gốc `vgfull.pcap` và local server:
+
+1. **Khám phá cấu trúc: Hai hợp đồng di chuyển tách biệt hoàn toàn**:
+   - **Hợp đồng A: Local Hero (EID 1500)**: Client tự dự đoán (client-predictive), tự giải navmesh và blend tree `idle` → `run_start` → `run`. Trên wire cả trận 353 s chỉ nhận đúng **37 gói 1070** (2–5 gói mỗi lệnh, bước 1.55 u @ 5 Hz làm checkpoint), **0 gói 1018**, **0 gói 1067** khi di chuyển thuần. Khi ngắt 1070, hero vẫn tiếp tục đi đến đích.
+   - **Hợp đồng B: Remote / Bot Heroes (EID 1515–1519)**: Client không tự mô phỏng; server điều khiển toàn bộ: **350–606 gói 1070** dày đặc + **1018** liên tục (12–66 gói) + **1067 kích hoạt animation tường minh**:
+     - Bắt đầu đi: `1067 [eid][team][03|01][0x0F]` (`0x0F = ENTITY_STATE_MOVING`).
+     - Dừng lại: `1067 [eid][other_team][01|03][0x00]` (`0x00 = ENTITY_STATE_IDLE`).
+
+2. **Root Cause của Glide**:
+   - Local server đẩy tọa độ liên tục bằng `1070` (giống bot puppet), nhưng **không gửi lệnh kích hoạt animation 1067** (`0x0F` / `0x00`).
+   - Đồng thời, client chưa kích hoạt được quyền tự dự đoán (Contract A) — có thể do thiếu chuỗi bootstrap component ban đầu (6 gói `1087` cấp phát gán cho `owner=1500` ở `+0.194s`).
+
+3. **Thu hồi claim cũ**:
+   - Sửa comment lỗi thời tại `server/roster.py:297`: các hero đo thật (như 244) cũng bị glide nếu thiếu state locomotion, không phải "animate correctly" như nhận định nhầm từ video 3 fps.
+
+## 22. Strategy & Architecture Findings (2026-09-07) — Official Parity via Runtime Introspection, Differential Oracle & Dual-Wield (PC vs Mobile)
+
+### 22.1 The Architectural Ceiling (Engine Asymmetry Reality Check)
+- **EVIL Engine Client vs Dedicated Server Separation**:
+  - The client binary (`libGameKindred.so` ARM64 / `Vainglory.exe` PE32) is strictly a **Thin Presentation Engine + Local Predictor**.
+  - Authoritative simulation logic (Minion Wave Director, Turret Aggro FSM, Combat Math resolution, Jungle camp respawn timers, Fog-of-War line-of-sight, Matchmaking arbiter) resides solely on the remote GCP server infrastructure (e.g. `136.66.77.13:7095`).
+  - Even **"Solo Bot"** matches connect via encrypted Blowfish TCP sockets to remote game servers; the client has **zero offline game-server loop** compiled in.
+  - **Conclusion**: Parity cannot be achieved by "running the client as a server" or flipping an offline flag. The authoritative server must be reconstructed, with ground truth synthesized directly from live runtime observations.
+
+### 22.2 The "Hardest but Highest-Yield" Strategy: Runtime Introspection & Differential Synthesis
+To reach 100% mathematical and tick-level parity with the official server:
+1. **Three Core Obstacles**:
+   - **Dynamic Heap RE on Stripped ARM64/PE32**: Reverse-engineering actor component graphs and buff managers in runtime heap without class symbols.
+   - **IEEE 754 Float Precision & Deterministic Tick Drift**: Preventing cumulative floating-point divergence between ARM64 client registers and x86_64 server simulation.
+   - **Data-Driven ECS Synthesis**: Translating 111 blueprints, 768 ability nodes, and 1,336 buff state machines into an authoritative server ECS rather than hardcoding logic.
+2. **The Differential Oracle Pipeline**:
+   - Log synchronized C2S input streams and S2C event frames (`1010/1054/1070`) from live official server matches on rooted LDPlayer.
+   - Feed identical C2S input streams into the Halcyon server.
+   - Automated tick-by-tick diffing: Flag any discrepancy in damage deltas (`1054`), entity states (`1067`), or positions (`1070`) down to sub-float tolerance.
+
+### 22.3 The Dual-Wield Acceleration Strategy: "PC Dissection Lab, Mobile Target"
+Leveraging the Windows client (`Vainglory.exe` / `VaingloryLocal.exe`) accelerates discovery by 10–20x compared to working solely within Android/LDPlayer:
+1. **Why the PC Client Accelerates Discovery**:
+   - **No Emulator Overhead**: Native x86 PE32 execution directly on Windows host; zero ADB socket latency (eliminates 50–100 ms command lag).
+   - **`__thiscall` Convention**: On 32-bit x86, the `ECX` register always holds the `this` pointer for C++ member functions. Hooking network or combat dispatchers immediately yields root object pointers (`HeroObject*`, `BuffManager*`).
+   - **Flat 32-bit Memory Space**: 4-byte pointers are dramatically easier to trace than 64-bit tagged heaps.
+   - **Direct Windows Tooling**: Hardware breakpoints in x32dbg / Cheat Engine, zero-latency C++ DLL injection (MinHook/Detours), and simple bypass of TLS/certificate pinning via Windows Certificate Store (bypassing Android's `UNKNOWN_CA` blocker).
+   - **Mapped Anchors Available**: Pre-identified RPC router (`0x99d720`), loader tick (`0x4f1320`), notification ingest (`0x509390`), and friend parser (`0x4bbc80`).
+2. **Asymmetry Guardrails (PC cannot fully replace Mobile)**:
+   - **Build Revision Divergence**: PC is Revision 102405 (PE32), Mobile is Revision 147219 (ARM64). Field padding and sub-opcode formats must be cross-verified.
+   - **CRT Date Bug**: PC client requires the 14-byte `_localtime64_s` epoch patch (`repack_ftol_edx.py`).
+   - **Locomotion Presentation**: PC mouse-clicks vs Mobile touch-taps drive different orientation and gesture dispatchers.
+3. **Execution Division**:
+   - **PC**: Rapid extraction of T1 Matchmaking JSON-RPC schemas and engine struct reverse-engineering.
+   - **LDPlayer (Android Root)**: Canonical wire validation, mobile presentation verification, and production acceptance testing.
+
+
+
+## 23. Dual-Wield completion report (2026-09-07; operator-supplied acceptance)
+
+The operator supplied a completion report covering PC actor dissection and
+mobile locomotion QA. Detailed additions are recorded in
+`../Teardown/vainglory-pc-client-internals.md` section 7.5 and
+`../Teardown/vainglory-mobile-local-stack.md` under "Dual-Wield mobile QA".
+
+- **Mobile acceptance reported:** Amael visibly plays a run/stride animation
+  while moving on the lane in the isolated LDPlayer session. This updates the
+  earlier open acceptance status in sections 18-20 for that reported scenario;
+  it does not establish every hero, skin, remote player, or combat scenario.
+- **Crash isolation reported:** an old WORLD session emitted combat involving
+  minions absent from the reconnecting client's spawn state. The report links
+  this to SIGSEGV at 0x260 and isolates locomotion with HALCYON_NO_BOTS=1 and
+  HALCYON_NO_WAVE=1 in a fresh server/match session. This is a diagnostic setup,
+  not a repair of late-join entity synchronization.
+- **Evidence scope:** these results are recorded from the operator's supplied
+  report, not independently reproduced during this documentation update.
+  The report names tombstone_09 and gateway_log.txt but provides no absolute
+  artifact paths, instruction/register trace, or acceptance-video reference.
+- **Still open:** reconcile conflicting PC handler addresses and flag meanings
+  (PC leaf section 7.5); retain the exact successful server configuration and
+  locomotion event sequence; reproduce acceptance with bots/waves enabled and
+  verify that late join delivers required entities before combat references.
+
+The PC discovery strategy and tools are documented; "complete" here describes
+this reported investigation round, not complete engine RE or gameplay parity.
+
+## 24. Walking-animation acceptance withdrawn; skill handshake repaired (2026-09-07)
+
+The operator supplied a newer review retracting the section 23 Amael run/stride
+acceptance: the apparent pose changes were rotation/displacement, not a proven
+leg cycle. Walking animation is **OPEN**, including Amael. Section 23 remains a
+historical report, not current acceptance.
+
+A live input check during this follow-up also falsified the claim that the
+visible skill tutorial necessarily prevents movement input: two skill-button
+taps produced 1078 and two ground taps produced 1012 plus server move targets,
+while the tutorial arrow remained visible. See the mobile leaf's follow-up.
+
+A bounded prerequisite repair now routes network 1157/1078 to the session
+writer. Live A/B taps identify 1078 as [slot][5 zero bytes]. Accepted upgrades
+use the existing ability-point check, echo the request, and publish the
+corpus-measured 1082 [eid][u32 slot][6 zero bytes] update. The measured zero
+1157 request receives its echo plus 1160 [eid][u16 zero]. These network
+messages are not routed into the bot's internal combat-cast handler.
+Acknowledgement alone was tested live and did not clear the tutorial. This
+repair does not establish locomotion activation or retail ability-rank math.
+Sparse 1070 is not enabled by this change. The disputed predictor-bit semantics,
+1067 local-player ignore behavior, and nav-velocity explanation remain hypotheses
+without the corresponding instruction/runtime evidence.
+
+**Section 24 live result:** the complete skill reply cleared Amael's tutorial
+arrow/plus buttons (12:42:59). With that UI cleared, a short server-silence test
+still stopped movement after queued updates settled, while the client clock
+continued. Therefore the proposed "dismiss overlay, then sparse 1070" fix is
+not established. Captures remained below 5 FPS and do not prove a run cycle.
+Skill UI is fixed; walking animation/local locomotion activation remains OPEN.
+38 targeted tests passed. Detailed evidence and the experiment's all-message
+pause limitation are in the mobile leaf's "Live outcome of the skill-state
+repair" subsection. No sparse-mode default or disputed client flag was changed.
+> **Latest locomotion handoff (2026-09-07):** the operator confirms visible
+> walking/leg animation in LDPlayer after the cancellation-only bootstrap
+> candidate; movement remains choppy. Earlier locomotion status entries below
+> are historical. Do not mark the work complete: causal isolation, a durable
+> bootstrap fix, smoothness, and two networking regressions remain open. See
+> [the consolidated evidence and next work](../Teardown/vainglory-locomotion-handoff.md).

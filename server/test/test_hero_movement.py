@@ -16,12 +16,13 @@ class TestHeroMovement(unittest.TestCase):
         target = (roster.SPAWN_X + 2.0, roster.SPAWN_Y)
         start_frames = hero.set_target(*target)
 
-        # Initial start anchor emitted when starting from idle
+        # Spatial anchor only; the session owns compact-id ActionMoveTo.
         self.assertEqual(len(start_frames), 1)
-        op, payload = start_frames[0]
-        self.assertEqual(op, wire.OP.POSITION)
-        eid, px, py, pad = struct.unpack(">IffH", payload)
+        op_pos, payload_pos = start_frames[0]
+        self.assertEqual(op_pos, wire.OP.POSITION)
+        eid, px, py, pad = struct.unpack(">IffH", payload_pos)
         self.assertEqual((eid, px, py, pad), (1500, roster.SPAWN_X, roster.SPAWN_Y, 0))
+
         self.assertTrue(hero.is_moving)
 
         # Step at MOVE_TICK = 0.2s; speed = 5.0 u/s -> 1.0 unit per step
@@ -36,17 +37,17 @@ class TestHeroMovement(unittest.TestCase):
 
         # Step 2: moves remaining 1.0 unit -> reaches target (roster.SPAWN_X + 2.0)
         step2 = hero.step(roster.MOVE_TICK)
-        # Arrival emits duplicate 1070 confirmation
+        # Arrival must not change visibility (1067 was misidentified as idle).
         self.assertEqual(len(step2), 2)
-        for op, payload in step2:
-            self.assertEqual(op, wire.OP.POSITION)
-            eid, px, py, pad = struct.unpack(">IffH", payload)
-            self.assertEqual(eid, 1500)
-            self.assertAlmostEqual(px, target[0], places=4)
-            self.assertAlmostEqual(py, target[1], places=4)
+        self.assertEqual(step2[0][0], wire.OP.POSITION)
+        self.assertEqual(step2[1][0], wire.OP.POSITION)
+        for _, body in step2:
+            self.assertEqual(struct.unpack(">IffH", body)[0], 1500)
+            self.assertAlmostEqual(struct.unpack(">IffH", body)[1], target[0], places=4)
+            self.assertAlmostEqual(struct.unpack(">IffH", body)[2], target[1], places=4)
         self.assertFalse(hero.is_moving)
 
-        # Subsequent steps while stationary: silence (zero 1070s)
+        # Subsequent steps while stationary: silence (zero frames)
         idle_frames = hero.step(roster.MOVE_TICK)
         self.assertEqual(idle_frames, [])
 
@@ -125,15 +126,21 @@ class TestHeroMovement(unittest.TestCase):
         self.assertAlmostEqual(hero.y, 5.0, places=4)
         self.assertFalse(hero.is_moving)
 
-    def test_zero_1016_emitted(self):
+    def test_simulation_never_changes_visibility_for_locomotion(self):
         hero = HeroMovement(eid=1500, team=1)
         frames = hero.set_target(hero.x + 5.0, hero.y)
         for _ in range(10):
             frames.extend(hero.step(roster.MOVE_TICK))
 
         opcodes = [op for op, _ in frames]
-        self.assertNotIn(1016, opcodes, "Hero movement must NEVER emit opcode 1016")
+        self.assertNotIn(wire.OP.ENTITY_VISIBILITY, opcodes)
         self.assertTrue(all(op == wire.OP.POSITION for op in opcodes))
+
+    def test_stop_and_teleport_do_not_hide_hero(self):
+        hero = HeroMovement(eid=1500)
+        hero.set_target(hero.x + 20, hero.y)
+        frames = hero.stop() + hero.teleport(hero.spawn_x, hero.spawn_y)
+        self.assertTrue(all(op == wire.OP.POSITION for op, _ in frames))
 
 
 if __name__ == "__main__":

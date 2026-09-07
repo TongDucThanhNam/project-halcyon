@@ -173,5 +173,68 @@ class TestRingoKit(unittest.TestCase):
         self.assertTrue(self.kit.can_cast(AbilitySlot.A, now=13.5, status_manager=self.sm))
 
 
+class TestCatherineKit(unittest.TestCase):
+
+    def setUp(self):
+        self.sm = StatusManager()
+        self.queue = DamageModifierQueue()
+        self.hero = hero_movement.HeroMovement(eid=1500, team=1, x=0.0, y=0.0)
+        self.enemy = hero_movement.HeroMovement(eid=1517, team=2, x=5.0, y=0.0)
+        self.kit = abilities.create_catherine_kit(self.hero)
+        self.heroes = {1500: self.hero, 1517: self.enemy}
+
+    def test_merciless_pursuit_stun(self):
+        """Ability A applies damage and 1.2s STUN."""
+        now = 10.0
+        init_hp = self.enemy.hp
+        frames = self.kit.cast_ability(
+            slot=AbilitySlot.A,
+            now=now,
+            target_eid=1517,
+            status_manager=self.sm,
+            damage_queue=self.queue,
+            all_heroes=self.heroes,
+        )
+        ops = [f[0] for f in frames]
+        self.assertIn(wire.OP.ABILITY_CAST, ops)
+        self.assertIn(wire.OP.POSITION, ops)  # dash position
+        self.assertIn(wire.OP.COMBAT_DELTA, ops)
+        self.assertLess(self.enemy.hp, init_hp)
+        self.assertTrue(self.sm.has_effect(1517, StatusType.STUN, now=10.5))
+
+    def test_stormguard_barrier(self):
+        """Ability B applies 300 HP barrier."""
+        now = 10.0
+        frames = self.kit.cast_ability(
+            slot=AbilitySlot.B,
+            now=now,
+            status_manager=self.sm,
+            damage_queue=self.queue,
+            all_heroes=self.heroes,
+        )
+        self.assertTrue(self.sm.has_effect(1500, StatusType.BARRIER, now=11.0))
+        self.assertEqual(self.sm.get_barrier(1500, now=11.0), 300.0)
+
+    def test_blast_tremor_aoe_silence(self):
+        """Ult damages and silences all enemies in 9.0u radius."""
+        now = 10.0
+        init_hp = self.enemy.hp
+        frames = self.kit.cast_ability(
+            slot=AbilitySlot.ULT,
+            now=now,
+            status_manager=self.sm,
+            damage_queue=self.queue,
+            all_heroes=self.heroes,
+        )
+        self.assertLess(self.enemy.hp, init_hp)
+        self.assertTrue(self.sm.has_effect(1517, StatusType.SILENCE, now=11.0))
+
+    def test_create_hero_kit_factory(self):
+        c_kit = abilities.create_hero_kit(self.hero, hero_id=245)
+        self.assertEqual(c_kit.abilities[AbilitySlot.A].name, "Merciless Pursuit")
+        r_kit = abilities.create_hero_kit(self.hero, hero_id=924)
+        self.assertEqual(r_kit.abilities[AbilitySlot.A].name, "Achilles Shot")
+
+
 if __name__ == "__main__":
     unittest.main()

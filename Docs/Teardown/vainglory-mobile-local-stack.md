@@ -509,3 +509,138 @@ This single command automatically:
 4. Configures iptables firewall: permits traffic to `192.168.1.3`, while strictly rejecting any non-loopback traffic to prevent leakage to SEMC public servers.
 5. Verifies guest DNS resolution: `rpc.kindred-live.net` -> `192.168.1.3`.
 
+
+## Dual-Wield mobile QA (2026-09-07; operator-supplied report)
+
+### Reported locomotion acceptance
+
+On LDPlayer 9 (emulator-5554), the operator's supplied completion report states
+that hero Amael visibly enters a run/stride animation while moving on the lane,
+eliminating the observed gliding in that isolated session. This is reported
+visual acceptance, not a new independent observation in this documentation
+pass. Earlier low-frame-rate recordings were insufficient to distinguish idle
+animation plus displacement from walking; those earlier retractions remain
+valid. Do not generalize this result to all heroes, skins, or multiplayer roles.
+
+### Reported crash and isolation
+
+The report cites tombstone_09 and gateway_log.txt and describes this sequence:
+
+1. Old match session 00000000 remained in WORLD with bot AI and lane waves.
+2. A joining client had not received spawn state (1010/1087) for existing
+   minions, including entities 4612 and 4614.
+3. Combat events referenced those entities; the report attributes GLThread
+   SIGSEGV at fault address 0x260 to a failed actor lookup followed by a null
+   pointer dereference at offset 0x260.
+4. Locomotion QA proceeded in a fresh session with bots and waves disabled:
+
+```powershell
+$env:HALCYON_NO_BOTS = "1"
+$env:HALCYON_NO_WAVE = "1"
+```
+
+Set these variables in the shell that launches the server, then start a fresh
+server/match session. They do not reset an already running WORLD session.
+Disabling the producers isolates QA; it does not fix late-join synchronization.
+
+The exact null-pointer chain is a **reported diagnosis**, not independently
+verified here. Fault address 0x260 alone does not identify a particular actor
+field or prove which combat operand was missing. Absolute artifact paths and
+faulting instruction/register evidence were not included in the supplied
+report. PC field offsets must not be transferred to the different mobile build.
+
+### Follow-up evidence and remaining scope
+
+Retain the successful launch configuration, selected hero/skin, match identity,
+wire trace, and a sufficiently high-frame-rate acceptance recording with their
+external artifact paths. Reconcile the PC animation handler/flag discrepancies
+in vainglory-pc-client-internals.md section 7.5. The supplied report does not
+identify the exact server change or packet sequence responsible for successful
+walking, so this entry is not a reproducible fix recipe. Acceptance with bots,
+waves, combat, and late joins remains separate work; ensure a joining client
+receives entity creation/state before events reference those entities.
+
+## Dual-Wield QA follow-up: acceptance withdrawn and live input evidence (2026-09-07)
+
+**Supersedes the reported acceptance above:** the operator's later review says
+Amael remained in an idle pose while translating/rotating. No successful
+walking-animation acceptance should be inferred from the earlier report.
+
+Fresh host gateway evidence from emulator-5554:
+
+- 12:30:15: skill-button tap -> c2s 1078 (6 B).
+- 12:30:17: ground tap -> c2s 1012 (14 B), target (-61.04, 1.20), EID 1500.
+- 12:30:58: another skill-button tap -> c2s 1078 (6 B).
+- 12:30:59: ground tap -> c2s 1012 (14 B), target (-58.32, -0.04), EID 1500.
+
+The tutorial arrow remained visible. Thus input reaches the server despite
+that arrow; dismissing the overlay alone is not an established locomotion fix.
+Evidence lives outside the repository in
+C:/Users/terasumi/AppData/Local/Temp/halcyon_stack/gateway_log.txt and screenshots
+locomotion_current.png, locomotion_after_input.png, locomotion_skill_a.png.
+These still images establish UI state only, not an animation cycle.
+
+The existing vgfull.pcap / c2s.bin corpus was decoded with match
+b9f511e0-11cd-4cfa-ad62-dc8612b8d270: both directions contain one 1157 and two
+1078 messages, each with a six-zero-byte payload. In the 32,640-frame s2c walk,
+these occur at zero-based indices 1895, 1999, and 12921. The server had logged
+these network requests without forwarding them to the session writer.
+
+Live follow-up on the patched server: at 12:37:34 the B plus button emitted
+1078 with payload 010000000000; at 12:38:00 the A plus emitted six zero bytes.
+The A echo was delivered, but the tutorial persisted. Thus the earlier
+1157=A / 1078=B label is not an accurate description of these observed inputs,
+and a bare echo is insufficient. The 1157 request also appeared independently
+at 12:37:17; its UI meaning is not established by the A/B experiment.
+
+The final repair accepts 1078 [slot 0..2][5 zeros], uses the existing economy
+ability-point check, echoes accepted requests, and broadcasts 1082
+[eid][u32 slot][6 zeros]. The original capture contains 1082 slots 0, 1, 2 for
+heroes and directly follows local 1078 acknowledgements with this update.
+The measured zero-payload 1157 exchange also includes 1160 [eid][u16 zero],
+now sent to the requester after the echo. Invalid payloads and upgrades with
+no points do not publish success. This does not establish retail rank limits
+or balance formulas; the existing economy implementation remains provisional.
+Network 1078 does not invoke the bot's internal combat-cast handler. Movement
+cadence is unchanged.
+
+Validation: 38 tests passed with
+`python -B -m unittest server.test.test_skill_handshake server.test.test_hero_movement server.test.test_abilities server.test.test_economy`.
+Live animation acceptance remains required after this prerequisite repair.
+
+### Live outcome of the skill-state repair (same follow-up)
+
+At host 12:42:59, a fresh Amael match on emulator-5554 accepted the B skill
+upgrade and received the complete reply. The tutorial arrow and both plus
+buttons disappeared. This verifies the skill-UI prerequisite fix, not walking
+animation. Screenshot: skill_state_after_b.png in the external evidence folder
+above. The isolated local stack was restarted with HALCYON_NO_BOTS=1 and
+HALCYON_NO_WAVE=1; corpus bootstrap remained enabled. Sparse 1070 was not enabled.
+
+Two Android screenrecord runs measured only 4.06 FPS (skill_state_walk.mp4) and
+3.82 FPS (skill_state_foreground.mp4), even after foregrounding LDPlayer. They
+are not accepted as proof of a leg cycle. Do not upscale their nominal frame
+rate or treat extracted duplicate frames as additional temporal evidence.
+
+A bounded server-silence experiment was then performed after clearing the
+prompt: the isolated server process was suspended briefly and resumed in a
+finally block (successful resume status 0). In the repeat, one second was
+allowed for queued motion to settle before the first screenshot, followed by
+another two seconds before the second. Amael stayed at the same world location
+while the client clock/ambient effects advanced; movement resumed when server
+updates returned. Evidence: silence_settled.png, silence_later.png, and the first
+trial's silence_start.png / silence_end.png / silence_resumed.png, outside repo.
+This pauses all server messages, not just 1070, so it does not isolate a
+particular opcode. It does falsify the claim that clearing the tutorial alone
+makes this setup autonomously finish a move during server silence.
+
+**Current status:** skill UI fixed live; walking-animation acceptance and the
+local locomotion activation contract remain OPEN. Sparse delivery is not a
+validated remedy. The server was resumed and left running for the local match.
+> **Latest locomotion status (2026-09-07):** after activation of the
+> cancellation-only bootstrap candidate, the operator observed walking/leg
+> animation in LDPlayer, with remaining choppiness. This supersedes the earlier
+> pre-candidate "walking remains OPEN" status, not its historical observations.
+> No post-candidate agent video or causal isolation is claimed. See
+> [the consolidated handoff](vainglory-locomotion-handoff.md) for ADB-only
+> reproduction state, external artifacts, and remaining acceptance limits.

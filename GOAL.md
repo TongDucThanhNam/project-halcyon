@@ -23,12 +23,14 @@ crystal — tất cả deterministic, measure-trước-build-sau.
 | T3-S1 movement layer (1016/1070/1067); hero sim gated OFF (1010 hero từng crash client) | commit d6f8fb6 |
 | T3-S2 lane-minion wave spawn (1010 126-B, 25 s grid, 5 cặp × 2 phe) | commit e708303, live |
 | T3-S3 minion combat (1054/1073/1035, range 2.0, dmg 19.4, cadence 0.6 s) | commit 3950b5b, live 5:48+ không crash |
-| T3-S4 hero movement server-authoritative (1070 0.2s cadence, anti-rubberband, zero-1016, duplicate arrival) | live 2026-09-06, `next-steps.md` §17, screenshots `$TEMP/halcyon_stack/slice4-verify/` |
+| T3-S4 hero movement & locomotion animation (1070 0.2s cadence, anti-rubberband, zero-1016, duplicate arrival + 1067 MOVING 0x0F / IDLE 0x00 animation FSM, gated 1018 bots-only) | live 2026-09-07, `vainglory-movement-anatomy.md` §13.6, `next-steps.md` §21 |
 | T3-S5 hero basic attack + HP + death/respawn + minion/turret aggro | live 2026-09-06, `server/test/test_hero_combat.py`, `$TEMP/halcyon_stack/slice5-verify/` |
 | T3-S6 multi-client one match (routing, alternating team slots, ready-barrier, multi-hero sim, PvP combat, reconnect) | `server/match_server.py`, `server/test/test_multiclient.py` |
 | QoL: `live_up` 1 lệnh, guest_setup idempotent, FSM lobby tự động | suite 104/104 |
+| M2 mechanics: Turrets, Minion classes, Status scaffold, Abilities (Ringo), Economy/Shop, Jungle/Kraken, Vision/Brush | `server/*.py`, suite 193/193 |
+| M3 logic: Bots AI (lane/combat/retreat/shop), Replay determinism verify (SHA-256 byte-exact) | `server/bot_ai.py`, `server/replay.py`, suite 200/200 |
 
-Suite: `python -B -W error::ResourceWarning -m unittest discover -s server/test -t .` = **120/120**.
+Suite: `python -B -W error::ResourceWarning -m unittest discover -s server/test -t .` = **226/226 (green 2026-09-07)**.
 
 ## Constraints (ràng buộc nghiêm ngặt, thừa kế từ AGENTS.md)
 
@@ -47,12 +49,14 @@ Suite: `python -B -W error::ResourceWarning -m unittest discover -s server/test 
 > Đích: 2–3 người, mỗi người 1 emulator trên máy mình, vào cùng 1 match, đi được, đánh
 > nhau được, minion đánh nhau, không crash. Ước tính **10–16 buổi**. [ước lượng]
 
-### Slice 4 — Hero movement server-authoritative (1–2 buổi) — [ĐÃ XONG 2026-09-06]
+### Slice 4 — Hero movement & locomotion animation (1–2 buổi) — [ĐÃ XONG 2026-09-06, CẬP NHẬT ANIMATION 2026-09-07]
 
 - [x] Measure: hành vi 1070/1016 cho hero từ corpus (nhịp echo ~70-260ms, 0.20s cadence, zero-1016 across all 32k frames match 1 + 170k frames match 5, duplicate arrival 1070) — evidence `vainglory-protocol-wire.md` §15.8
+- [x] Measure: Dual-contract locomotion (Contract A local predictive vs Contract B puppet). Root-cause lỗi trượt (gliding): thiếu 1067 MOVING (0x0F) / IDLE (0x00) — evidence `vainglory-movement-anatomy.md` §13.6, `next-steps.md` §21
 - [x] Build: consume `c2s 1012` move-target, server đi hero theo path, emit 1070 (+1016 falsified: hero gets 0) — evidence `server/hero_movement.py`, `server/match_server.py`
+- [x] Build: kích hoạt locomotion animation state qua `1067 ENTITY_STATE` (0x0F khi start, 0x00 khi arrive/stop), chặn 1018 thừa trên local hero — evidence `server/hero_movement.py`, `server/match_server.py`
 - [x] Thiết kế chống rubberband: echo 1070 nhả nhịp 0.20s, retarget seamless từ current position không giật lùi, duplicate arrival anchor — evidence `server/hero_movement.py`
-- [x] Test unit: walk path, arrives, stop; hero eid đúng phe — evidence `server/test/test_hero_movement.py` (5/5 passed, suite 109/109)
+- [x] Test unit: walk path, arrives, stop; hero eid đúng phe; assert 1070 + 1067 state — evidence `server/test/test_hero_movement.py` (5/5 passed, suite 226/226)
 - [x] Live: joystick thật di chuyển hero mượt ≥30 s, không snap, không crash — evidence `screen_lane_walk.png` (hero walked down lane, 35s test loop, 1:14+ in-match, zero EOF/crash, log in `gateway_log.txt`)
 
 ### Slice 5 — Hero basic attack + HP + chết/respawn (3–5 buổi) — [ĐÃ XONG 2026-09-06]
@@ -159,6 +163,17 @@ Suite: `python -B -W error::ResourceWarning -m unittest discover -s server/test 
 | 2 | M2 xong: trận 3v3 đầy đủ kết thúc bằng vain crystal | live full match + docs slice tương ứng |
 | 3 | M3 xong: replay lại match cho ra event stream identical | script verify determinism exit 0 |
 | 4 | Suite xanh qua mọi milestone | `unittest discover` OK |
+| 5 | Official Parity: đối soát vi phân (differential diff) C2S replay vs official S2C deltas | tick/combat diff within float tolerance (`next-steps.md` §22) |
+
+## Strategy & Acceleration Framework (Cập nhật 2026-09-07)
+
+Chiến lược thực thi đạt chuẩn 100% Official Parity (chi tiết tại `next-steps.md` §22 và `vainglory-pc-client-internals.md` §6):
+1. **Dual-Wield Acceleration (Phòng thí nghiệm PC, Chiến trường Mobile)**:
+   - **PC Dissection Lab (`VaingloryLocal.exe`, PE32 x86)**: Tận dụng môi trường native không độ trễ ADB, quy ước gọi hàm `__thiscall` (`ECX = this`), x32dbg, và Win32 TLS bypass để giải mã tức thì T1 Matchmaking schemas và structures C++ nội tại (Actor/Buff).
+   - **Mobile Production Target (`libGameKindred.so`, ARM64 trên LDPlayer Root)**: Mục tiêu nghiệm thu chuẩn cuối cùng cho friend-group (touch presentation, multi-client LAN, mobile network packet validation).
+2. **Differential Oracle Pipeline (Đối soát Chân lý)**:
+   - Thu lại synchronized C2S input intents và S2C event frames (`1010/1054/1070`) từ official server session.
+   - Bơm C2S intents vào Halcyon server, so sánh diff từng float/tick (sát thương `1054`, vị trí `1070`, animation state `1067`). Bất kỳ sai lệch nào sẽ khoanh vùng chính xác công thức sim bị lỗi.
 
 ## Out of Scope
 

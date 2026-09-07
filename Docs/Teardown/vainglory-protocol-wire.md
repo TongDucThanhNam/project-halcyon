@@ -383,9 +383,9 @@ our samples).** Their `FUN_100123fa0` switch names the decimal range
 | 1001 | GAME_SETUP | setup burst only |
 | 1005 | PLAYER_HANDLE | names (`Guest`, bot names) |
 | 1006 | PLAYER_INFO | setup burst |
-| 1016 | ENTITY_FLOAT (16 B) | velocity/distance-class floats |
+| 1016 | ActionMoveTo (historically ENTITY_FLOAT) | actor navigation index + target coordinates; corrected hero mapping below |
 | 1053 | **ENTITY_STAT** `[2B][2B eid][4B BE f32][1B stat_type]` | stat_type 3 = move speed (2.5–3.5), 6 = **HP delta = the wire's damage event**, 8 = cooldown/attack speed (0.2–4.8), 0 = attack 0–90 |
-| 1067 | ENTITY_STATE | id + state enum |
+| 1067 | ActionModifyVisibility (historically ENTITY_STATE) | entity id + visibility fields; not a proven animation command |
 | 1070 | POSITION `[2B][2B eid][4B X][4B Y][2B]` | ~20 Hz per active entity; X −90…+90, Y −10…+20 — our 0x03f8 stream (two in-map f32, no id) is the observer variant of this |
 | 1086 | ENTITY_PROP | gold/XP counters |
 | 1087 | ENTITY_DATA (40 B) | per-entity blob |
@@ -410,7 +410,7 @@ frames. Field maps [Observed]:
 | 1053 | HERO_STAT | `[u32 eid][f32 value][u8 type][5B tail]` — hero-family eids only; type 6 = HP delta (−600…+402), 8 = cooldown/atk-speed (1…16.8), 4 = range events (turret ±800 at siege moments), 2 = −150…+30, 0 = −10000…+6 |
 | 1054 | COMBAT_DELTA | `[u32 src][u32 tgt][f32 delta][8B tail]` — negative = damage (typical minion hit −27.8; spread −11…−70), positive small = regen-class; **kill blow = giant overkill (−10000.0 on the 3563 death)**; attribution verified: heroes 1515/1516 + minions 6xxx–8xxx vs turret 3539 |
 | 1086 | ENTITY_PROP | `[u32 eid][u32 src][f32 amount][u8 0x0c][u8 seq][u16]` — property increments; dominant 3.594 (passive XP-class trickle), bursts 2048/512/32 = scaled counters [partial] |
-| 1067/1068 | ENTITY_STATE | `[u32 eid][u8 state][u8 flag]…` / 8 B sub-state — the state machine around deaths |
+| 1067/1068 | historical ENTITY_STATE | 1067 is ActionModifyVisibility: `[u32 eid][4B visibility fields]...`; 1068 remains separately interpreted. Observed around deaths; this does not establish locomotion semantics |
 | 1073 / 1035 | DESTROY / DESPAWN | `[u32 eid][u16]` — entity lifetime end |
 | 1162 | TIMER_TICK | `[u32 eid][u32 instance][u32][f32 timer][6B state]` — per-entity countdowns (clock, respawn-class values 5.0/0.5) |
 | 1011 | HERO_BLOCK | 748/752 B per-hero binary block (eid + counts + f32 run) — ability/level data [partial] |
@@ -845,8 +845,9 @@ per wave in five mirrored right/left pairs:
   left-first): 1010(right) → 1016(right) → 1070(right @ spawn point B,
   71.280/12.930) → 1010(left) → 1016(left) → 1070(left @ −B) →
   1070(left @ lane point A, ±70.841/12.788) → 1070(right @ A) →
-  1067(left, state 00) → 1067(right, state 00); each pair's two 1067s
-  flip to state `0f` **+0.10 s** after its own spawn.
+  1067(left, value 00) → 1067(right, value 00); each pair's two 1067s
+  change the measured value to `0f` **+0.10 s** after its own spawn.
+  These are visibility-field observations, not proof of idle/run states.
 - **Minion 1010 id-map (126-B)**: +0 = **spawner eid** (wave-1 pairs use
   366, 366, 367, 365, 365 — both sides of a pair share the spawner eid),
   +4 = class `eb39ce55` (the same class the §15.6 static table mapped to
@@ -855,12 +856,17 @@ per wave in five mirrored right/left pairs:
   the seq byte continues the global 1010 counter. Side-dependent bytes:
   +96..98 (`00 00 01` right / `00 01 00` left) and +119..121
   (`01 01 02` right / `01 00 01` left).
-- **1016 ENTITY_FLOAT (14 B)**: `[u8 seq][f32 x][f32 y][5×0]` — the seq
-  byte is its own per-entity counter; the target is the walker's first
-  lane point.
-- **1067 ENTITY_STATE (14 B)**: `[u32 eid][u8 side][u8 01][u8
-  state][7×0]` — side `01`=left / `02`=right (unvalidated values
-  rejected by the builder), state `00`=spawned, `0f`=moving.
+- **1016 ActionMoveTo (decoded 14 B)**: `[u8 actor_index][f32 x][f32 y][5×0]`.
+  The index identifies the actor's navigation slot, not a per-entity
+  counter; the target is the walker's first lane point. Hero indices
+  are mapped below; nonhero allocation still needs its own mapping.
+- **1067 ActionModifyVisibility (decoded 14 B)**: `[u32 eid][4B fields][6×0]`.
+  The measured minion fields are `[01 or 02][01][00 or 0f][00]`.
+  The first byte correlates with left/right in this sample, but does
+  not establish a team selector: local hero traffic uses channels
+  `0/2/3/4/5/6/7`. The former `spawned`/`moving` labels for the third
+  byte are withdrawn. PC RTTI identifies this action as visibility;
+  individual field meanings require further evidence.
 - **Walk**: 1070 heartbeat every **1.33 s** along the team lane polyline
   (right: 17 points from B to (1.500, 5.500); left: 18 mirrored points;
   list in `server/roster.py` `LANE_PATH_*`), measured ground speed
@@ -913,20 +919,78 @@ fight, for the T3 combat slice:
 - **1046** (22 B, sparse): `[u32 eid][f32 x][u32 0][f32 y][u8 kind][3×0]`
   — position-tagged event (projectile/impact-class), kind 00/03 seen
   [Open].
-- **1016 during combat**: retargets arrive as `[u8 seq][f32 x][f32 y]`
-  with **no eid field** — association is stream-context (the entity the
-  surrounding frames speak about), e.g. retarget points at −0.5/5.5 =
-  the victim's held position. Frame-order context rule [Open].
+- **1016 during combat**: retargets arrive as `[u8 actor_index][f32 x][f32 y]`
+  with **no full eid field**. Association uses the actor navigation
+  index, not merely whichever entity surrounding frames mention.
+  Retarget coordinates such as −0.5/5.5 remain measured observations;
+  nonhero index allocation remains open.
 
-**Hero movement & 1070/1016 measured on the wire (2026-09-06 late night, vgfull.pcap match 1 + match 5 vgr, tools `trace_after_lock.py` and `measure_hero_movement.py` in `$TEMP/vg_max/`).** For T3 Slice 4 (hero movement server-authoritative):
+**Hero movement contract corrected (2026-09-07, independent decode of
+`vgfull.pcap`, match `b9f511e0-11cd-4cfa-ad62-dc8612b8d270`).** The former
+"1016 census for heroes is EXACT ZERO" conclusion was false: it searched
+for a full hero eid in a packet that carries a one-byte actor index.
+The corresponding match-5 zero claim is withdrawn pending an index-aware
+recount. PC RTTI identifies 1016 as **ActionMoveTo** and 1067 as
+**ActionModifyVisibility**; neither the earlier 1067 animation labels nor
+claims that local heroes ignore it are established by this census.
 
-- **1016 census for heroes is EXACT ZERO**: 0 of 32,640 frames in match 1 (`vgfull.pcap`), and 0 of 169,963 frames in match 5 (`vgr5frames.pkl`) carry opcode 1016 for any hero eid (1500, 1515–1519). 1016 is *never* emitted for heroes on the wire; it is strictly an entity-waypoint float block for minions, monsters, and camp statics.
-- **Hero 1070 POSITION (14 B)**: `[u32 eid][f32 x][f32 y][u16 0]`
-  - *Start anchor*: When `c2s 1012` is received from idle, the server emits the hero's current position as an initial 1070 anchor (measured reaction ~70–260 ms depending on packet arrival vs server tick).
-  - *Monotone Cadence*: While moving, 1070 frames are emitted strictly every **0.20 s** (5 Hz). Speed is ~5.0 u/s (corpus spans 4.8–6.6 u/s).
-  - *Arrival confirmation*: On reaching the destination, the server emits the exact target `(tx, ty)` with duplicate 1070 frames in the same instant (e.g. `pos=(-74.993, -2.195)` duplicated at `t=9.762s`).
-  - *Idle silence*: Once arrived, **zero** 1070 frames are sent while stationary. (Corpus shows silence between tap segments).
-  - *Anti-rubberband retargeting*: Subsequent `1012` taps during motion update the target seamlessly without snapping back to previous positions or re-emitting outdated start anchors.
+- **Hero index mapping:** 1016 byte +0 values `0/1/2/3/4/5` map to eids
+  `1500/1515/1516/1517/1518/1519`, respectively, in this match. This is
+  the actor navigation index; the general nonhero allocator remains open.
+- **Local target census:** 18 slot-0 1016s and 39 eid-1500 1070s among
+  32,640 decoded s2c frames. The 18 targets, bytes +1..8, match the last
+  18 of 21 c2s 1012 coordinate pairs, bytes +0..7, exactly and in order.
+  The first three c2s targets have no corresponding accepted-target
+  sequence here; their rejection reason is not established by this count.
+- **Start and retarget:** one 1016 per accepted target precedes a current
+  position 1070. Sixteen pairs are adjacent; two have one intervening
+  packet. Retargeting sends the new target and the current position,
+  rather than reusing an old starting position.
+- **Arrival:** 1070 confirms the target without repeating 1016. Isolated
+  frames `9742 -> 9743 -> 9776` are target, current position, arrival.
+  Receive times relative to this s2c flow are `118.940 / 119.007 / 119.203 s`.
+  Repeated equal-position corrections also occur; duplicates are not a
+  mandatory arrival handshake.
+- **Correction cadence:** event-associated and variable, not a faithful
+  fixed-5-Hz specification. Frames `7258..7427` cover a 0.950 s move
+  with one intermediate position correction; `7436..7501` cover a
+  0.507 s move with none. Later stationary corrections occur at frames
+  11922 and 15499, so absolute "idle silence" is also withdrawn.
+  These are packet receive times, not reconstructed simulation ticks.
+- **Local 1067:** channels `0/2/3/4/5/6/7` occur; channel `1` does not.
+  This supports removing the invented local locomotion-channel command,
+  not suppressing legitimate visibility messages.
+
+Reproduce the count from the repository root with external corpus files
+(PowerShell; change the external directory if necessary). This reads the
+capture without creating or committing proprietary payload fixtures:
+
+```powershell
+@'
+from pathlib import Path
+from server import decode, wire
+
+root = Path.home() / 'AppData/Local/Temp/vg_max'
+match = 'b9f511e0-11cd-4cfa-ad62-dc8612b8d270'
+frames, info = decode.decode_pcap(str(root / 'vgfull.pcap'), match)
+c2s, _, _, missed = decode.walk_stream(
+    (root / 'c2s.bin').read_bytes(), wire.MatchCipher(match), start=136)
+targets = [p[1:9] for op, p in frames if op == 1016 and p[0] == 0]
+inputs = [p[:8] for op, p in c2s if op == 1012]
+positions = [p for op, p in frames
+             if op == 1070 and int.from_bytes(p[:4], 'big') == 1500]
+channels = {p[4] for op, p in frames
+            if op == 1067 and int.from_bytes(p[:4], 'big') == 1500}
+assert info['missed'] == 0
+# This C2S walk resynchronizes past 74 bytes; do not claim lossless C2S coverage.
+assert missed == 74
+assert len(frames) == 32640
+assert (len(targets), len(positions), len(inputs)) == (18, 39, 21)
+assert targets == inputs[-18:]
+assert channels == {0, 2, 3, 4, 5, 6, 7}
+print('18 accepted targets, 39 positions; exact C2S target correspondence')
+'@ | python -
+```
 
 **Their open problems vs our local artifacts** — the two archives are
 complementary, not redundant:
@@ -975,3 +1039,10 @@ Artifacts referenced by this leaf (TEMP, not committed):
 `vgr/frames.pkl` (31,266-frame parsed log), `vgc2s.pcap` (1,237,245 B,
 match 2), `actions4.log` (labelled action timeline), `vgr2/` (match-2
 recordings, 21 chunks), `mock_gcp.py` (round-trip proof).
+> **Locomotion corpus follow-up (2026-09-07):** the retained bootstrap omitted
+> six later `1093` startup-buff cancellations. The activated cancellation-only
+> extension is associated with operator-confirmed walking, still choppy; causality
+> is not isolated. A newer complete-framing regression avoids the older C2S
+> reproduction's 74-byte resync limitation. See
+> [the consolidated handoff](vainglory-locomotion-handoff.md) for exact IDs,
+> timestamps, external candidate details, and the two outstanding E2E failures.

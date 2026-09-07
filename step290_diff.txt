@@ -1,0 +1,162 @@
+Created At: 2026-09-07T10:57:41+07:00
+Completed At: 2026-09-07T10:57:42+07:00
+
+The command exited with code 0.
+Output:
+<truncated 459 lines>
+         finally:
+             with self._clients_lock:
+                 for c in list(self.clients.keys()):
+@@ -957,10 +1082,18 @@ class MatchServer:
+         if self.session is not None:
+             if not self.session.is_alive():
+                 return True
+-            if len(self.session.clients) == 0:
+-                return True
+             if getattr(self.session, "structures", None) and self.session.structures.match_finished:
+                 return True
++            # A WORLD-phase match with zero attached clients is NOT finished:
++            # the 4.13 client's world-entry dance closes its draft connection
++            # and only then opens the world connection (live 2026-09-07:
++            # drafts EOF 07:02:39, world conn 07:02:47). Dropping the match
++            # in that window served the reconnect a FRESH draft opener and
++            # the client quit to menu. Bots keep the world warm; zero
++            # clients still ends PICK/LOCKED/FINAL lobbies.
++            if (self.session.phase != self.session.WORLD
++                    and len(self.session.clients) == 0):
++                return True
+         return False
+ 
+     # -- lifecycle ---------------------------------------------------------
+@@ -1029,8 +1162,11 @@ class MatchServer:
+         finally:
+             if self.session is not None:
+                 self.session.remove_client(conn)
+-                if self.session.phase == SnapshotStream.WORLD and len(self.session.clients) == 0:
+-                    self.session.stop()
++                # NOTE: a zero-client WORLD is deliberately left running —
++                # the client's world-entry dance closes the draft conn before
++                # the world conn opens (live 2026-09-07 07:02:39→47), and the
++                # headless bot world is the M3 stability scenario. The match
++                # ends via structures.match_finished or stack shutdown.
+             self._streams_by_conn.pop(conn, None)
+             try:
+                 conn.shutdown(socket.SHUT_RDWR)
+@@ -1099,7 +1235,8 @@ class MatchServer:
+         with self._session_lock:
+             send = self._sender(conn)
+             if self.session is None or not self.session.is_alive():
+-                players = roster.default_solo_bots(self.session_uuid, self.match_id)
++                players = roster.default_solo_bots(
++                    identity_from_token(self.session_uuid), self.match_id)
+                 self.session = SnapshotStream(conn, players, self.match_id, send, self.log)
+                 self.streams = [self.session]
+                 self._streams_by_conn[conn] = self.session
+diff --git a/server/roster.py b/server/roster.py
+index 5c55e56..9fe3cc3 100644
+--- a/server/roster.py
++++ b/server/roster.py
+@@ -295,10 +295,9 @@ def build_hero_block(p: Player) -> bytes:
+ 
+ 
+ # Live evidence 2026-09-07: a hero served with a zeroed stat run renders but
+-# GLIDES — the client never enters its walk animation (hero id 265, user
+-# report + gateway log). The measured runs animate correctly (hero 244 A/B).
+-# So unmeasured heroes reuse a measured DONOR run: bytes stay corpus-measured,
+-# only the per-hero numbers are the donor's. [Open: capture real 1011 runs.]
++# GLIDES. Donor run restores rendering and level display, but walk-on-move
++# animation requires locomotion state activation (see Docs/Teardown/vainglory-movement-anatomy.md §13.6).
++# Unmeasured heroes reuse a measured DONOR run for valid stats and rendering.
+ HERO_INIT_DONOR_ID = 244
+ 
+ def hero_init_for(hero_id: int):
+diff --git a/server/test/test_hero_movement.py b/server/test/test_hero_movement.py
+index bea5d81..4c9d30d 100644
+--- a/server/test/test_hero_movement.py
++++ b/server/test/test_hero_movement.py
+@@ -16,12 +16,17 @@ class TestHeroMovement(unittest.TestCase):
+         target = (roster.SPAWN_X + 2.0, roster.SPAWN_Y)
+         start_frames = hero.set_target(*target)
+ 
+-        # Initial start anchor emitted when starting from idle
+-        self.assertEqual(len(start_frames), 1)
+-        op, payload = start_frames[0]
+-        self.assertEqual(op, wire.OP.POSITION)
+-        eid, px, py, pad = struct.unpack(">IffH", payload)
++        # Initial start anchor + 1067 MOVING emitted when starting from idle
++        self.assertEqual(len(start_frames), 2)
++        op_pos, payload_pos = start_frames[0]
++        self.assertEqual(op_pos, wire.OP.POSITION)
++        eid, px, py, pad = struct.unpack(">IffH", payload_pos)
+         self.assertEqual((eid, px, py, pad), (1500, roster.SPAWN_X, roster.SPAWN_Y, 0))
++
++        op_state, payload_state = start_frames[1]
++        self.assertEqual(op_state, wire.OP.ENTITY_STATE)
++        eid_s, side, marker, state = struct.unpack_from(">IBBB", payload_state, 0)
++        self.assertEqual((eid_s, side, marker, state), (1500, 1, 1, roster.ENTITY_STATE_MOVING))
+         self.assertTrue(hero.is_moving)
+ 
+         # Step at MOVE_TICK = 0.2s; speed = 5.0 u/s -> 1.0 unit per step
+@@ -36,17 +41,16 @@ class TestHeroMovement(unittest.TestCase):
+ 
+         # Step 2: moves remaining 1.0 unit -> reaches target (roster.SPAWN_X + 2.0)
+         step2 = hero.step(roster.MOVE_TICK)
+-        # Arrival emits duplicate 1070 confirmation
+-        self.assertEqual(len(step2), 2)
+-        for op, payload in step2:
+-            self.assertEqual(op, wire.OP.POSITION)
+-            eid, px, py, pad = struct.unpack(">IffH", payload)
+-            self.assertEqual(eid, 1500)
+-            self.assertAlmostEqual(px, target[0], places=4)
+-            self.assertAlmostEqual(py, target[1], places=4)
++        # Arrival emits duplicate 1070 confirmation + 1067 IDLE
++        self.assertEqual(len(step2), 3)
++        self.assertEqual(step2[0][0], wire.OP.POSITION)
++        self.assertEqual(step2[1][0], wire.OP.POSITION)
++        self.assertEqual(step2[2][0], wire.OP.ENTITY_STATE)
++        eid_idle, side_i, marker_i, state_i = struct.unpack_from(">IBBB", step2[2][1], 0)
++        self.assertEqual((eid_idle, side_i, marker_i, state_i), (1500, 1, 1, roster.ENTITY_STATE_SPAWNED))
+         self.assertFalse(hero.is_moving)
+ 
+-        # Subsequent steps while stationary: silence (zero 1070s)
++        # Subsequent steps while stationary: silence (zero frames)
+         idle_frames = hero.step(roster.MOVE_TICK)
+         self.assertEqual(idle_frames, [])
+ 
+@@ -54,7 +58,7 @@ class TestHeroMovement(unittest.TestCase):
+         hero = HeroMovement(eid=1500, team=1, x=0.0, y=0.0)
+         waypoints = [(0.0, 3.0), (4.0, 3.0)]  # Total path: 3 units North, 4 units East = 7 units
+         start_frames = hero.set_path(waypoints)
+-        self.assertEqual(len(start_frames), 1)
++        self.assertEqual(len(start_frames), 2)  # 1070 anchor + 1067 MOVING
+ 
+         # Step 1: 0.5s * 5.0 = 2.5 units along first segment (0, 0) -> (0, 3)
+         hero.step(0.5)
+@@ -70,7 +74,7 @@ class TestHeroMovement(unittest.TestCase):
+ 
+         # Step 3: 0.5s * 5.0 = 2.5 units (only 2.0 units left to (4, 3) -> arrives!)
+         arrival_frames = hero.step(0.5)
+-        self.assertEqual(len(arrival_frames), 2)
++        self.assertEqual(len(arrival_frames), 3)  # duplicate 1070 + 1067 IDLE
+         self.assertAlmostEqual(hero.x, 4.0, places=4)
+         self.assertAlmostEqual(hero.y, 3.0, places=4)
+         self.assertFalse(hero.is_moving)
+@@ -120,7 +124,7 @@ class TestHeroMovement(unittest.TestCase):
+ 
+         # Step 1 second (5 units) towards (5, 5) -> arrives!
+         arrival = hero.step(1.0)
+-        self.assertEqual(len(arrival), 2)
++        self.assertEqual(len(arrival), 3)  # duplicate 1070 + 1067 IDLE
+         self.assertAlmostEqual(hero.x, 5.0, places=4)
+         self.assertAlmostEqual(hero.y, 5.0, places=4)
+         self.assertFalse(hero.is_moving)
+@@ -133,7 +137,7 @@ class TestHeroMovement(unittest.TestCase):
+ 
+         opcodes = [op for op, _ in frames]
+         self.assertNotIn(1016, opcodes, "Hero movement must NEVER emit opcode 1016")
+-        self.assertTrue(all(op == wire.OP.POSITION for op in opcodes))
++        self.assertTrue(all(op in (wire.OP.POSITION, wire.OP.ENTITY_STATE) for op in opcodes))
+ 
+ 
+ if __name__ == "__main__":
+

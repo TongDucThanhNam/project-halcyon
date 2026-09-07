@@ -110,6 +110,10 @@ class TestGatewayFlow(unittest.TestCase):
 
     def tearDown(self):
         match_server.WORLD_TAPE_PATH = self._old_tape_path
+        # a WORLD match now survives zero clients (world-entry dance) — stop
+        # it so the next test gets a fresh draft, not a reconnect dump
+        if self.gw.matches:
+            self.gw.matches[-1].stop()
 
     def _read_message(self, sock, timeout=5.0):
         """One encrypted message → (opcode, payload); skips nothing."""
@@ -133,7 +137,7 @@ class TestGatewayFlow(unittest.TestCase):
         """No-tape world with the hero-1010 sim slice enabled (the
         HALCYON_HERO_1010 path; here via a missing tape file — same live
         layer): join → lock → dump → no tape, then the fake client
-        receives 1116 pings + 1010 hero full updates and the 1012 → 1070
+        receives 1116 pings + 1010 hero full updates and the 1012 → 1016/1070
         movement stays position-consistent with the 1010s."""
         old_period = roster.HERO_1010_PERIOD
         old_countdown = match_server.LOCK_COUNTDOWN
@@ -176,7 +180,8 @@ class TestGatewayFlow(unittest.TestCase):
                         return op, payload
                     self.assertIn(op, (wire.OP.SLOT_FLAGS_PING,
                                        wire.OP.ENTITY_FULL_UPDATE,
-                                       wire.OP.POSITION))
+                                       wire.OP.POSITION,
+                                       wire.OP.ENTITY_STATE))
                     if op == wire.OP.SLOT_FLAGS_PING:
                         self.assertEqual(len(payload),
                                          roster.SLOT_FLAGS_PAYLOAD_SIZE)
@@ -244,11 +249,19 @@ class TestGatewayFlow(unittest.TestCase):
                 self.cipher, wire.OP.MOVE_CAST,
                 struct.pack(">ff", *target) + bytes(6)))
             positions = []
+            move_targets = []
             last_1010 = (tick, first[116])
 
             def _collect(op, payload):
                 nonlocal last_1010
+                if op == wire.OP.MOVE_TO:
+                    self.assertEqual(positions, [], "1016 must precede the first correction")
+                    self.assertEqual(payload, struct.pack(">Bff", 0, *target) + bytes(5))
+                    move_targets.append(payload)
+                    self.assertEqual(len(move_targets), 1, "one activation per input")
+                    return True
                 if op == wire.OP.POSITION:
+                    self.assertEqual(len(move_targets), 1)
                     peid, px, py, pad = struct.unpack(">IffH", payload)
                     self.assertEqual((peid, pad), (1500, 0))
                     positions.append((px, py))
@@ -265,7 +278,12 @@ class TestGatewayFlow(unittest.TestCase):
                     return px == target[0] and py == target[1]
                 return False
 
-            read_world(_collect, timeout=5.0)
+            # Consume and validate the activation explicitly; subsequent 1016s
+            # remain unexpected rather than being added to a skip whitelist.
+            op, _ = read_world(_collect, timeout=5.0)
+            self.assertEqual(op, wire.OP.MOVE_TO)
+            op, _ = read_world(_collect, timeout=5.0)
+            self.assertEqual(op, wire.OP.ENTITY_FULL_UPDATE)
             self.assertTrue(positions, "no 1070 frames after 1012")
             self.assertEqual(positions[0], (roster.SPAWN_X, roster.SPAWN_Y))
             self.assertEqual(positions[-1], target)
@@ -496,19 +514,29 @@ class TestGatewayFlow(unittest.TestCase):
                 self.cipher, wire.OP.MOVE_CAST,
                 struct.pack(">ff", *target) + bytes(6)))
             seen = []
+            move_targets = []
             deadline = time.monotonic() + 4.0
             while time.monotonic() < deadline:
                 try:
                     op, payload = self._read_message(client, timeout=0.8)
                 except (AssertionError, TimeoutError):
                     break                       # quiet: movement finished
-                if op == wire.OP.POSITION:
+                if op == wire.OP.MOVE_TO:
+                    self.assertEqual(seen, [], "1016 must precede the first correction")
+                    self.assertEqual(payload, struct.pack(">Bff", 0, *target) + bytes(5))
+                    move_targets.append(payload)
+                    self.assertEqual(len(move_targets), 1, "one activation per input")
+                elif op == wire.OP.POSITION:
+                    self.assertEqual(len(move_targets), 1)
                     self.assertEqual(len(payload), roster.POSITION_PAYLOAD_SIZE)
                     eid, x, y, pad = struct.unpack(">IffH", payload)
                     self.assertEqual((eid, pad), (1500, 0))
                     seen.append((x, y))
+                elif op == wire.OP.ENTITY_STATE:
+                    pass
                 else:
                     self.assertEqual(op, wire.OP.SLOT_FLAGS_PING)  # 1116-only world
+            self.assertEqual(len(move_targets), 1)
             self.assertTrue(seen, "no 1070 position frames after 1012")
             self.assertEqual(seen[0], (roster.SPAWN_X, roster.SPAWN_Y))
             self.assertEqual(seen[-1], target)
@@ -626,6 +654,12 @@ class TestWaveE2E(unittest.TestCase):
          roster.WAVE_FIRST_SPAWN_AT, roster.WAVE_PAIR_OFFSETS,
          roster.WAVE_STATE_DELAY, roster.MINION_POSITION_PERIOD,
          roster.MINION_SPEED, roster.WAVE_INTERVAL) = cls._old
+
+    def tearDown(self):
+        # same isolation as TestGatewayFlow: world matches outlive their
+        # clients now, so each test stops the match it used
+        if self.gw.matches:
+            self.gw.matches[-1].stop()
 
     def _read_message(self, sock, timeout=5.0):
         """One encrypted message → (opcode, payload); skips nothing."""

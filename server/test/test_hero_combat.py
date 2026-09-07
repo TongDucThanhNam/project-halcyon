@@ -89,7 +89,7 @@ class TestHeroCombat(unittest.TestCase):
         self.assertAlmostEqual(self.hero.hp, 0.0)
 
         opcodes = [f[0] for f in frames]
-        self.assertIn(wire.OP.DESTROY, opcodes)
+        self.assertNotIn(wire.OP.DESTROY, opcodes)
         self.assertIn(wire.OP.ENTITY_STATE, opcodes)
         self.assertIn(wire.OP.TIMER_TICK, opcodes)
 
