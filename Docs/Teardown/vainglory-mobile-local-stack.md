@@ -481,3 +481,31 @@ verification is still outstanding. Next run's checklist, in order:
 3. Map render. If it stays black: first suspect is the missing 1087
    entity-allocation batch, then zero 1011 stat runs, then the derived
    1055 tags — each has a measured corpus counterpart to rebuild from.
+
+## LAN Exposure and Remote Client Configuration (Slice 7, 2026-09-07)
+
+To allow physical devices or separate emulators on the same local area network (LAN) to join matches together:
+
+### 1. Host side (Server machine)
+- The stack listens on `0.0.0.0` by default (`--bind-host 0.0.0.0`), accepting connections from loopback as well as the host's LAN adapter (e.g. `192.168.1.3`).
+- Inbound Windows Firewall rules for TCP ports `80, 443, 8080, 8443, 7100-7102, 2112-2114` can be installed via:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File server/platform/setup_firewall.ps1
+  ```
+- The gateway IP announced to clients during `joinLobby` is configured via `--match-host <LAN_IP>`:
+  ```powershell
+  python -m server.platform.live_up --match-host 192.168.1.3
+  ```
+
+### 2. Guest side on remote friend machine
+Run the idempotent setup script pointing to the host machine's LAN IP:
+```sh
+python -m server.platform.guest_setup --host 192.168.1.3
+```
+This single command automatically:
+1. Generates `/data/local/tmp/halcyon-hosts-20260905` mapping `rpc.kindred-live.net`, `platform.superevil.net`, etc. to `192.168.1.3`.
+2. Clones system CA certificates and installs the Halcyon root certificate `41e9eb4e.0`.
+3. Bind-mounts the overlays over `/system/etc/hosts` and `/system/etc/security/cacerts`.
+4. Configures iptables firewall: permits traffic to `192.168.1.3`, while strictly rejecting any non-loopback traffic to prevent leakage to SEMC public servers.
+5. Verifies guest DNS resolution: `rpc.kindred-live.net` -> `192.168.1.3`.
+

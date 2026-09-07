@@ -26,6 +26,7 @@ mechanics; damage per class / ranged minions stay [Open].
 """
 from __future__ import annotations
 
+from . import jungle
 from . import roster
 
 OP_SPAWN_1010 = 1010
@@ -38,25 +39,39 @@ OP_DESPAWN_1035 = 1035
 
 
 class Minion:
-    """One lane minion: spawn schedule, walk state, publish cadence, hp."""
+    """One lane minion: spawn schedule, walk state, publish cadence, class stats, hp."""
 
     __slots__ = ("eid", "side", "spawn_at", "x", "y", "path", "seg",
-                 "next_position_at", "_last_step", "hp", "target",
-                 "next_attack_at", "alive")
+                 "next_position_at", "_last_step", "hp", "max_hp", "target",
+                 "target_hero", "next_attack_at", "alive", "pair_index",
+                 "minion_class", "attack_damage", "attack_range",
+                 "attack_cooldown", "stop_offset")
 
-    def __init__(self, eid: int, side: int, spawn_at: float):
+    def __init__(self, eid: int, side: int, spawn_at: float, pair_index: int = 0):
         self.eid = eid
         self.side = side                        # 1067 side byte (01|02)
         self.spawn_at = spawn_at
+        self.pair_index = pair_index
+
+        cfg = roster.MINION_PAIR_CLASSES[pair_index % len(roster.MINION_PAIR_CLASSES)]
+        self.minion_class = cfg[0]
+        self.max_hp = cfg[1]
+        self.hp = self.max_hp
+        self.attack_damage = cfg[2]
+        self.attack_range = cfg[3]
+        self.attack_cooldown = cfg[4]
+        self.stop_offset = cfg[5]
+
         right = side == roster.ENTITY_STATE_SIDE_RIGHT
         self.x, self.y = (roster.LANE_SPAWN_RIGHT if right
                           else roster.LANE_SPAWN_LEFT)
-        self.path = roster.LANE_PATH_RIGHT if right else roster.LANE_PATH_LEFT
+        raw_path = roster.LANE_PATH_RIGHT if right else roster.LANE_PATH_LEFT
+        self.path = roster.trim_polyline(raw_path, self.stop_offset)
         self.seg = 0                            # walking toward path[seg]
         self.next_position_at = spawn_at + roster.MINION_POSITION_PERIOD
         self._last_step = spawn_at
-        self.hp = roster.MINION_HP
         self.target: "Minion | None" = None
+        self.target_hero = None                 # hero attacker (aggro phản đòn)
         self.next_attack_at: float | None = None
         self.alive = True
 
@@ -120,7 +135,7 @@ class Director:
         pair_minions = []
         for side in (roster.ENTITY_STATE_SIDE_RIGHT,
                      roster.ENTITY_STATE_SIDE_LEFT):
-            m = Minion(self.next_minion, side, due)
+            m = Minion(self.next_minion, side, due, pair_index=pair)
             self.next_minion += 1
             self.minions.append(m)
             pair_minions.append(m)
@@ -149,7 +164,7 @@ class Director:
 
     # -- pump ----------------------------------------------------------------
 
-    def pump(self, now: float):
+    def pump(self, now: float, hero: "Any | None" = None):
         """Return every frame due at `now`, in corpus emission order."""
         out: list[tuple[int, bytes]] = []
         self._last_now = now
@@ -176,7 +191,13 @@ class Director:
         for m in self.minions:
             if not m.alive or now < m.spawn_at:
                 continue
-            if not m.arrived:
+            in_hero_melee = (m.target_hero is not None and hero is not None
+                             and self._dist_pos(m, hero.x, hero.y) <= m.attack_range)
+            in_minion_combat = (m.target is not None and m.target.alive
+                                and self._dist(m, m.target) <= m.attack_range)
+            in_combat = in_hero_melee or in_minion_combat
+
+            if not m.arrived and not in_combat:
                 prev_seg = m.seg
                 m.step_to(now)
                 if m.seg != prev_seg or now >= m.next_position_at:
@@ -190,16 +211,16 @@ class Director:
                             roster.build_position(m.eid, m.x, m.y)))
                 m.next_position_at = now + roster.MINION_POSITION_PERIOD
 
-        out += self._combat(now)
+        out += self._combat(now, hero)
         return out
 
-    # -- combat (slice 3, corpus-measured constants) -------------------------
+    # -- combat (slice 3 & 5, corpus-measured constants) --------------------
 
-    def _combat(self, now: float):
-        """Nearest-enemy-in-range acquisition, 1054 damage ticks on the
-        measured 0.6 s cadence, and the measured two-frame death: 1073 then
-        1035 in the same batch. Deterministic: acquisition order is spawn
-        order, ties break on eid."""
+    def _combat(self, now: float, hero: "Any | None" = None):
+        """Nearest-enemy-in-range acquisition, 1054 damage ticks on per-class
+        cadence/range, and the measured two-frame death: 1073 then 1035 in the
+        same batch. Deterministic: acquisition order is spawn order, ties break
+        on eid. Supports hero retaliatory aggro (Slice 5) and ranged combat."""
         if not self.combat:
             return []
         fighters = [m for m in self.minions
@@ -207,25 +228,42 @@ class Director:
         deaths: list[Minion] = []
         out: list[tuple[int, bytes]] = []
         for m in fighters:
+            # 1. Retaliatory aggro against hero (Slice 5)
+            if hero is not None and m.target_hero is not None:
+                if not hero.is_alive or jungle.JungleManager.is_in_brush(hero.x, hero.y):
+                    m.target_hero = None
+                else:
+                    dist_hero = self._dist_pos(m, hero.x, hero.y)
+                    if dist_hero <= m.attack_range:
+                        if m.next_attack_at is None or now >= m.next_attack_at:
+                            m.next_attack_at = now + m.attack_cooldown
+                            out.append((OP_COMBAT_1054, roster.build_combat_delta(
+                                m.eid, hero.eid, -m.attack_damage)))
+                            out.extend(hero.apply_damage(m.attack_damage, m.eid, now))
+                        continue
+                    elif dist_hero > 6.0:
+                        m.target_hero = None
+
+            # 2. Lane minion-vs-minion combat
             if m.target is not None and (
                     not m.target.alive
-                    or self._dist(m, m.target) > roster.MINION_ATTACK_RANGE):
+                    or self._dist(m, m.target) > m.attack_range):
                 m.target = None
                 m.next_attack_at = None
             if m.target is None:
                 foes = [f for f in fighters
                         if f.side != m.side
-                        and self._dist(m, f) <= roster.MINION_ATTACK_RANGE]
+                        and self._dist(m, f) <= m.attack_range]
                 if foes:
                     m.target = min(foes, key=lambda f: (self._dist(m, f),
                                                         f.eid))
                     m.next_attack_at = now       # strike on acquisition
             if m.target is None or now < m.next_attack_at:
                 continue
-            m.next_attack_at = now + roster.MINION_ATTACK_COOLDOWN
+            m.next_attack_at = now + m.attack_cooldown
             out.append((OP_COMBAT_1054, roster.build_combat_delta(
-                m.eid, m.target.eid, -roster.MINION_ATTACK_DAMAGE)))
-            m.target.hp -= roster.MINION_ATTACK_DAMAGE
+                m.eid, m.target.eid, -m.attack_damage)))
+            m.target.hp -= m.attack_damage
             if m.target.hp <= 0:
                 deaths.append(m.target)
         for victim in deaths:
@@ -235,6 +273,34 @@ class Director:
             out.append((OP_DESTROY_1073, roster.build_destroy(victim.eid)))
             out.append((OP_DESPAWN_1035, roster.build_despawn(victim.eid)))
         return out
+
+    def on_minion_damaged_by_hero(self, victim_eid: int, hero: "Any"):
+        """Aggro phản đòn: minion attacked by hero (and nearby allies within 4u) switch target to hero."""
+        victim = next((m for m in self.minions if m.eid == victim_eid and m.alive), None)
+        if victim is None:
+            return
+        victim.target_hero = hero
+        for m in self.minions:
+            if m.alive and m.side == victim.side and self._dist(m, victim) <= 4.0:
+                m.target_hero = hero
+
+    def apply_hero_damage_to_minion(self, victim_eid: int, damage: float, hero: "Any") -> list[tuple[int, bytes]]:
+        """Apply damage from hero to minion. Triggers retaliatory aggro. Emits 1073+1035 if minion dies."""
+        out = []
+        victim = next((m for m in self.minions if m.eid == victim_eid and m.alive), None)
+        if victim is None:
+            return out
+        victim.hp -= damage
+        self.on_minion_damaged_by_hero(victim_eid, hero)
+        if victim.hp <= 0 and victim.alive:
+            victim.alive = False
+            out.append((OP_DESTROY_1073, roster.build_destroy(victim.eid)))
+            out.append((OP_DESPAWN_1035, roster.build_despawn(victim.eid)))
+        return out
+
+    @staticmethod
+    def _dist_pos(m: Minion, x: float, y: float) -> float:
+        return ((m.x - x) ** 2 + (m.y - y) ** 2) ** 0.5
 
     @staticmethod
     def _dist(a: Minion, b: Minion) -> float:

@@ -918,6 +918,16 @@ fight, for the T3 combat slice:
   surrounding frames speak about), e.g. retarget points at −0.5/5.5 =
   the victim's held position. Frame-order context rule [Open].
 
+**Hero movement & 1070/1016 measured on the wire (2026-09-06 late night, vgfull.pcap match 1 + match 5 vgr, tools `trace_after_lock.py` and `measure_hero_movement.py` in `$TEMP/vg_max/`).** For T3 Slice 4 (hero movement server-authoritative):
+
+- **1016 census for heroes is EXACT ZERO**: 0 of 32,640 frames in match 1 (`vgfull.pcap`), and 0 of 169,963 frames in match 5 (`vgr5frames.pkl`) carry opcode 1016 for any hero eid (1500, 1515–1519). 1016 is *never* emitted for heroes on the wire; it is strictly an entity-waypoint float block for minions, monsters, and camp statics.
+- **Hero 1070 POSITION (14 B)**: `[u32 eid][f32 x][f32 y][u16 0]`
+  - *Start anchor*: When `c2s 1012` is received from idle, the server emits the hero's current position as an initial 1070 anchor (measured reaction ~70–260 ms depending on packet arrival vs server tick).
+  - *Monotone Cadence*: While moving, 1070 frames are emitted strictly every **0.20 s** (5 Hz). Speed is ~5.0 u/s (corpus spans 4.8–6.6 u/s).
+  - *Arrival confirmation*: On reaching the destination, the server emits the exact target `(tx, ty)` with duplicate 1070 frames in the same instant (e.g. `pos=(-74.993, -2.195)` duplicated at `t=9.762s`).
+  - *Idle silence*: Once arrived, **zero** 1070 frames are sent while stationary. (Corpus shows silence between tap segments).
+  - *Anti-rubberband retargeting*: Subsequent `1012` taps during motion update the target seamlessly without snapping back to previous positions or re-emitting outdated start anchors.
+
 **Their open problems vs our local artifacts** — the two archives are
 complementary, not redundant:
 

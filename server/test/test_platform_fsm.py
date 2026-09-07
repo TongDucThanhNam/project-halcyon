@@ -89,6 +89,25 @@ class TestFsm(unittest.TestCase):
         self.assertEqual(answers["joinLobby"], {"code": 0, "returnValue": {}})
         self.assertEqual(answers["_gw_port"], 7102)
 
+    def test_join_lobby_custom_match_host_argument(self):
+        local_stack.fsm_on_rpc("joinLobby", answers_path=self.path,
+                               gw_port=7102, match_host="192.168.1.50")
+        upd = self._update()
+        self.assertEqual(upd["state"], "playing")
+        self.assertEqual(upd["host"], "192.168.1.50")
+        self.assertEqual(upd["port"], 7102)
+
+    def test_join_lobby_falls_back_to_answers_match_host(self):
+        with open(self.path, "r+", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+            cfg["_match_host"] = "192.168.1.99"
+            fh.seek(0)
+            json.dump(cfg, fh)
+            fh.truncate()
+        local_stack.fsm_on_rpc("joinLobby", answers_path=self.path, gw_port=7102)
+        upd = self._update()
+        self.assertEqual(upd["host"], "192.168.1.99")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,6 +49,18 @@ def _ports_listening(ports: list[int]) -> bool:
 
 
 def main(argv=None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="One command for the host side of a live run")
+    ap.add_argument("--bind-host", default=None,
+                    help="IP to bind stack listeners to (default 0.0.0.0)")
+    ap.add_argument("--match-host", default=None,
+                    help="Host IP returned in playing state (default 127.0.0.1 or LAN IP)")
+    ap.add_argument("--serial", default="emulator-5554",
+                    help="ADB serial of the local emulator to configure (default emulator-5554)")
+    ap.add_argument("--skip-guest", action="store_true",
+                    help="Skip running guest_setup after stack startup")
+    args = ap.parse_args(argv)
+
     pids = _running_pids()
     for pid in pids:
         subprocess.run(["taskkill", "/PID", str(pid), "/F"],
@@ -63,9 +75,16 @@ def main(argv=None) -> int:
              8080, 8443]
     log_path = os.path.join(local_stack.STACK_DIR, "live-stdout.txt")
     os.makedirs(local_stack.STACK_DIR, exist_ok=True)
+
+    cmd = [sys.executable, "-B", "-m", "server.platform.local_stack"]
+    if args.bind_host:
+        cmd += ["--bind-host", args.bind_host]
+    if args.match_host:
+        cmd += ["--match-host", args.match_host]
+
     with open(log_path, "ab") as log_fh:
         proc = subprocess.Popen(
-            [sys.executable, "-B", "-m", "server.platform.local_stack"],
+            cmd,
             stdout=log_fh, stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP |
             subprocess.DETACHED_PROCESS)
@@ -82,7 +101,14 @@ def main(argv=None) -> int:
               f"see {log_path}")
         return 2
 
-    rc = guest_setup.main()
+    if args.skip_guest:
+        print("[live] guest setup skipped as requested")
+        return 0
+
+    guest_argv = ["--serial", args.serial]
+    if args.match_host and args.match_host != "127.0.0.1":
+        guest_argv += ["--host", args.match_host]
+    rc = guest_setup.main(guest_argv)
     print("[live] host side ready — relaunch the game and drive the taps")
     return rc
 

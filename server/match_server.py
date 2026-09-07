@@ -49,12 +49,24 @@ if __package__ in (None, ""):
     import wave
     import wire
     import world_tape
+    import hero_movement
+    import structures
+    import status_effects
+    import abilities
+    import economy
+    import jungle
 else:
     from . import hero_catalog
     from . import roster
     from . import wave
     from . import wire
     from . import world_tape
+    from . import hero_movement
+    from . import structures
+    from . import status_effects
+    from . import abilities
+    from . import economy
+    from . import jungle
 
 # Re-exports kept for callers of the old stub API (tests, tools).
 SNAPSHOT_PAYLOAD_SIZE = roster.SNAPSHOT_PAYLOAD_SIZE
@@ -85,7 +97,7 @@ WORLD_PUMP_TICK = 0.05            # s, world-loop pump/tick granularity
 
 
 class SnapshotStream(threading.Thread):
-    """Owns per-connection pick/lock state and all s2c writes after the opener."""
+    """Owns shared pick/lock/world simulation state and client streams."""
 
     PICK, LOCKED, FINAL, WORLD = "pick", "locked", "final", "world"
 
@@ -106,48 +118,222 @@ class SnapshotStream(threading.Thread):
         self.lock_deadline = None
         self.dump_fallback_at = None
         self.dumped = False
-        # movement slice state (local hero entity)
-        self.hero_x = roster.SPAWN_X
-        self.hero_y = roster.SPAWN_Y
+
+        # Multi-client tracking: conn -> (player, send_fn)
+        self.clients = {}
+        self.ready_clients = set()
+        self.dumped_conns = set()
+        self.hero_sims = {}
+        self._clients_lock = threading.Lock()
+
+        # Initialize local hero / slot 0
+        local_p = self.players[0]
+        local_p.is_bot = False
+        spawn_pos = roster.HERO_SPAWNS.get(local_p.eid, (roster.SPAWN_X, roster.SPAWN_Y))
+        self.hero_sims[local_p.eid] = hero_movement.HeroMovement(
+            eid=local_p.eid, team=local_p.team,
+            x=spawn_pos[0], y=spawn_pos[1])
+        self.hero_sim = self.hero_sims[local_p.eid]
+        self.hero_x = self.hero_sim.x
+        self.hero_y = self.hero_sim.y
         self.move_target = None           # (x, y) or None
-        self.hero_facing = roster.FACING_DEFAULT   # (cos, sin), unit pair
-        # Hero-1010 emission is OFF by default: all 6645 corpus 1010s
-        # (matches 1+5) carry non-hero eids only, and the live client
-        # closed the match socket 1 s after our first hero-1010 (2026-09-06
-        # 14:58:18→19, re-queue followed). HALCYON_HERO_1010=1 re-enables
-        # the sim slice for A/B work.
+        self.hero_facing = self.hero_sim.facing   # (cos, sin), unit pair
+
+        if conn is not None and send is not None:
+            self.clients[conn] = (local_p, send)
+
         self.emit_hero_1010 = bool(os.environ.get("HALCYON_HERO_1010"))
-        # shared entity-write counters, 1010-carried (roster layout map):
+        # corpus evidence 2026-09-07: the real server sends only ~37 hero
+        # 1070s per match (5 Hz bursts after orders, then silence) while the
+        # client walks its own hero locally; a continuous 5 Hz stream may be
+        # suppressing the client's locomotion anim. Sparse mode emits a short
+        # burst per order and then goes quiet, mirroring the capture.
+        self.sparse_1070 = bool(os.environ.get("HALCYON_SPARSE_1070"))
+        self.sparse_budget: dict[int, int] = {}
+        # corpus keepalive layer (2026-09-07) — default off behind HALCYON_HERO_KEEPALIVE
+        # so test_e2e and pure-sim world loops don't see unexpected 1086/1053 frames
+        self.hero_keepalive = bool(os.environ.get("HALCYON_HERO_KEEPALIVE"))
+        self.keep_seq = 3203              # measured seq range in the capture
+        self.next_ka_45 = 0.0
+        self.next_ka_3e = 0.0
+        self.next_ka_stat = 0.0
         self.world_tick = 0               # u32 at +8 (1086 deltas will share it)
         self.seq_1010 = 0                 # u8 at +116, +1 per 1010 emitted
         self.tape_frames = None           # loaded lazily on WORLD entry
         self.tape_i = 0
-        self.tape_done = False
-        # lane-minion waves (T3 slice 2): measured vg5_final spawn sequence,
-        # scheduled from the world anchor; HALCYON_NO_WAVE=1 disables the
-        # whole wave layer (live falsification must be env-switchable)
+        self.structures = structures.StructureManager()
+        self.world_entities: dict[int, tuple[float, float]] = {}
+        for eid, s in self.structures.structures.items():
+            self.world_entities[eid] = (s.x, s.y)
+        self.status_manager = status_effects.StatusManager()
+        self.damage_queue = status_effects.DamageModifierQueue()
+        self.economy = economy.EconomyManager()
+        self.emit_trickle = bool(os.environ.get("HALCYON_ECONOMY_TRICKLE")) or self.hero_keepalive
+        self.jungle = jungle.JungleManager(open_time=0.0)
+        self.hero_kits: dict[int, abilities.HeroKit] = {}
+        for eid, sim in self.hero_sims.items():
+            self.hero_kits[eid] = abilities.create_ringo_kit(sim)
         self.emit_waves = not os.environ.get("HALCYON_NO_WAVE")
         self.wave_director = None
+        self._last_snapshot_at = 0.0
+        self._pick_deadline = time.monotonic() + PICK_COUNTDOWN_START
 
     def stop(self):
         self._stop_event.set()
 
-    def submit(self, opcode, payload):
-        self.events.put((opcode, payload))
+    def submit(self, opcode, payload, conn=None):
+        self.events.put((opcode, payload, conn))
 
-    # -- event handlers (all s2c writes happen on this single thread) ------
+    def add_client(self, conn, session_uuid: str, send):
+        """Attach a client connection to this match session.
+        Handles both new player slot allocation and reconnection."""
+        with self._clients_lock:
+            # Match 00000000 is persistent and the guest session uuid is
+            # fixed, so every queue-up lands in the reconnect path. A fresh
+            # queue is a fresh play session: re-arm the pick countdown so the
+            # draft is live instead of pinned at the boot-time expiry.
+            # [Deviation from retail: draft length resets per join, not per
+            # match formation — deliberate for the persistent solo match.]
+            if self.phase == self.PICK:
+                self._pick_deadline = time.monotonic() + PICK_COUNTDOWN_START
+            # 1. Reconnection: match existing non-bot slot by session_uuid
+            existing = next((p for p in self.players if p.uuid == session_uuid and not p.is_bot), None)
+            if existing is not None:
+                self.clients[conn] = (existing, send)
+                self.log(f"[match] client reconnected: {session_uuid} -> slot {existing.slot} (eid {existing.eid})")
+                if self.phase == self.WORLD:
+                    self._dump_reconnect_state(conn, existing, send)
+                elif self.phase in (self.LOCKED, self.FINAL):
+                    send(wire.OP.GAME_SETUP, roster.build_game_setup(roster.MODE_SOLO_BOTS, existing.eid))
+                    send(wire.OP.GAME_MODE, roster.build_game_mode())
+                    remaining = max(0.0, self.lock_deadline - time.monotonic()) if self.lock_deadline else 0.0
+                    send(wire.OP.SNAPSHOT_JOIN, roster.build_snapshot(self.players, countdown=(remaining, LOCK_COUNTDOWN)))
+                elif self.phase == self.PICK:
+                    send(wire.OP.GAME_SETUP, roster.build_game_setup(roster.MODE_SOLO_BOTS, existing.eid))
+                    send(wire.OP.GAME_MODE, roster.build_game_mode())
+                    for name in hero_catalog.HERO_CATALOG_1107_NAMES:
+                        send(wire.OP.HERO_CATALOG, hero_catalog.catalog_payload(name))
+                    send(wire.OP.SNAPSHOT_JOIN, roster.build_snapshot(self.players, countdown=self._pick_countdown()))
+                return existing
 
-    def _send_snapshot(self, countdown):
-        self._send(wire.OP.SNAPSHOT_JOIN,
-                   roster.build_snapshot(self.players, countdown=countdown))
+            # 2. New human slot: default policy alternates teams [0, 3, 1, 4, 2, 5] for PvP
+            if os.environ.get("HALCYON_TEAM_ALLOCATION") == "coop":
+                candidate_slots = [0, 1, 2, 3, 4, 5]
+            else:
+                candidate_slots = [0, 3, 1, 4, 2, 5]
+
+            slot_idx = None
+            for idx in candidate_slots:
+                if idx < len(self.players) and self.players[idx].is_bot:
+                    slot_idx = idx
+                    break
+            if slot_idx is None:
+                slot_idx = next((i for i, p in enumerate(self.players) if p.is_bot), 0)
+
+            player = self.players[slot_idx]
+            player.is_bot = False
+            player.uuid = session_uuid
+            player.handle = f"Player {slot_idx + 1}" if slot_idx != 0 else "Guest"
+            player.selection_hash = 0
+            player.pick_flags = 0
+
+            self.clients[conn] = (player, send)
+
+            spawn_pos = roster.HERO_SPAWNS.get(player.eid, (roster.SPAWN_X, roster.SPAWN_Y))
+            if player.eid not in self.hero_sims:
+                self.hero_sims[player.eid] = hero_movement.HeroMovement(
+                    eid=player.eid, team=player.team,
+                    x=spawn_pos[0], y=spawn_pos[1])
+            if player.eid not in self.hero_kits:
+                self.hero_kits[player.eid] = abilities.create_ringo_kit(self.hero_sims[player.eid])
+
+            self.log(f"[match] new client added: {session_uuid} -> slot {slot_idx} (eid {player.eid}, team {player.team})")
+
+            # Opener burst sent to this client
+            send(wire.OP.GAME_SETUP, roster.build_game_setup(roster.MODE_SOLO_BOTS, player.eid))
+            send(wire.OP.GAME_MODE, roster.build_game_mode())
+            for name in hero_catalog.HERO_CATALOG_1107_NAMES:
+                send(wire.OP.HERO_CATALOG, hero_catalog.catalog_payload(name))
+            send(wire.OP.SNAPSHOT_JOIN, roster.build_snapshot(self.players, countdown=self._pick_countdown()))
+
+            # Broadcast updated roster snapshot to all other clients
+            for c, (_, s_fn) in list(self.clients.items()):
+                if c != conn:
+                    try:
+                        s_fn(wire.OP.SNAPSHOT_JOIN, roster.build_snapshot(self.players, countdown=self._pick_countdown()))
+                    except OSError:
+                        pass
+            return player
+
+    def remove_client(self, conn):
+        with self._clients_lock:
+            p_info = self.clients.pop(conn, None)
+            self.ready_clients.discard(conn)
+            if p_info is not None:
+                p = p_info[0]
+                self.log(f"[match] client left: slot {p.slot} (eid {p.eid})")
+
+    # -- frame broadcasting & targeted sending -------------------------------
+
+    def _broadcast(self, opcode: int, payload: bytes):
+        dead = []
+        with self._clients_lock:
+            for conn, (_, send_fn) in list(self.clients.items()):
+                try:
+                    send_fn(opcode, payload)
+                except OSError:
+                    dead.append(conn)
+            for c in dead:
+                self.clients.pop(c, None)
+                self.ready_clients.discard(c)
+        if self._send is not None and not self.clients:
+            try:
+                self._send(opcode, payload)
+            except OSError:
+                pass
         self.frames_sent += 1
 
-    def _apply_event(self, opcode, payload):
-        player = self.players[0]
+    def _send_to(self, conn, opcode: int, payload: bytes):
+        if conn is not None:
+            with self._clients_lock:
+                info = self.clients.get(conn)
+                if info is not None:
+                    try:
+                        info[1](opcode, payload)
+                    except OSError:
+                        self.clients.pop(conn, None)
+                        self.ready_clients.discard(conn)
+                    self.frames_sent += 1
+                    return
+        if self._send is not None:
+            try:
+                self._send(opcode, payload)
+            except OSError:
+                pass
+            self.frames_sent += 1
+
+    def _broadcast_snapshot(self, countdown):
+        self._last_snapshot_at = time.monotonic()
+        self._broadcast(wire.OP.SNAPSHOT_JOIN,
+                         roster.build_snapshot(self.players, countdown=countdown))
+
+    def _send_snapshot(self, countdown):
+        self._broadcast_snapshot(countdown)
+
+    # -- event handlers -----------------------------------------------------
+
+    def _apply_event(self, opcode, payload, conn=None):
+        if conn is not None and conn in self.clients:
+            player = self.clients[conn][0]
+        else:
+            player = self.players[0]
+
+        sim = self.hero_sims.get(player.eid)
+
         if opcode == wire.OP.JOIN_1112 or opcode == wire.OP.JOIN_1131:
-            self._send(opcode, roster.build_zero_ack())
+            self._send_to(conn, opcode, roster.build_zero_ack())
         elif opcode == wire.OP.JOIN_1118:
-            if self.locked:
+            if player.pick_flags == roster.PICK_FLAG_LOCKED:
                 return                       # corpus: no re-pick after lock
             try:
                 hero_id, selection_hash = roster.parse_hero_selection(payload)
@@ -156,50 +342,150 @@ class SnapshotStream(threading.Thread):
                 return
             player.hero_id, player.selection_hash = hero_id, selection_hash
             player.pick_flags = roster.PICK_FLAG_SELECTED
-            self._send(wire.OP.JOIN_1118, roster.build_hero_selection(player))
-            self.log(f"[match] hero selected: id={hero_id} hash={selection_hash:08x}")
+            self._send_to(conn, wire.OP.JOIN_1118, roster.build_hero_selection(player))
+            self.log(f"[match] hero selected by slot {player.slot} (eid {player.eid}): id={hero_id} hash={selection_hash:08x}")
+            self._broadcast_snapshot(self._pick_countdown())
         elif opcode == wire.OP.BUILD_LOCK:
             if payload != bytes(6) or player.hero_id == roster.UNPICKED_HERO_ID:
                 self.log("[match] rejected lock without a valid selection/payload")
                 return
-            if self.locked:
+            if player.pick_flags == roster.PICK_FLAG_LOCKED:
                 return
-            self.locked = True
-            self.lock_requested_at = time.monotonic()
             player.pick_flags = roster.PICK_FLAG_LOCKED
-            # corpus: 1113 (0101, clicked hash) → 1123 echo; the committed
-            # 1113 follows once (or if) the 1119 commit is applied
-            self._send_snapshot(self._pick_countdown())
-            self._send(wire.OP.BUILD_LOCK, roster.build_zero_ack())
-            if self.commit_hash is not None:
-                self._begin_lock()
+            self.lock_requested_at = time.monotonic()
+            self._broadcast_snapshot(self._pick_countdown())
+            self._send_to(conn, wire.OP.BUILD_LOCK, roster.build_zero_ack())
+            with self._clients_lock:
+                all_locked = all(p.pick_flags == roster.PICK_FLAG_LOCKED for p, _ in self.clients.values()) if self.clients else True
+            if all_locked:
+                self.locked = True
+                if self.commit_hash is not None:
+                    self._begin_lock()
         elif opcode == wire.OP.LOCK_COMMIT:
             try:
-                self.commit_hash = roster.parse_commit_hash(payload)
+                commit_h = roster.parse_commit_hash(payload)
             except ValueError as exc:
                 self.log(f"[match] rejected 1119 commit: {exc}")
                 return
-            if self.locked and self.phase == self.PICK:
+            player.selection_hash = commit_h
+            if player.slot == 0:
+                self.commit_hash = commit_h
+            with self._clients_lock:
+                all_locked = all(p.pick_flags == roster.PICK_FLAG_LOCKED for p, _ in self.clients.values()) if self.clients else True
+            if all_locked and self.phase == self.PICK:
+                self.locked = True
                 self._begin_lock()
         elif opcode in (wire.OP.SHOP_OPEN, wire.OP.HERO_READY):
-            if self.phase == self.FINAL and not self.dumped:
-                self._dump_world()
-                self.phase = self.WORLD
-            if self.dumped and self.tape_frames == []:
-                # no-tape fallback: echo verbatim here; with a tape the
-                # corpus stream replays the echoes at measured positions
-                self._send(opcode, payload)
+            if self.phase == self.FINAL:
+                if conn not in self.dumped_conns:
+                    self._dump_world_to(conn)
+                    self.dumped_conns.add(conn)
+                self._enter_world()
+                if opcode == wire.OP.HERO_READY and conn is not None:
+                    self.ready_clients.add(conn)
+            if (self.dumped or self.phase == self.WORLD) and self.tape_frames == []:
+                self._send_to(conn, opcode, payload)
         elif opcode == wire.OP.BUY_CLOSE:
             self.log("[match] c2s 1133 build-select close — world bootstrap "
                      "replays the measured tape; sim is T3 work")
         elif opcode == wire.OP.MOVE_CAST:
             try:
-                self.move_target = roster.parse_move(payload)
+                tx, ty = roster.parse_move(payload)
             except ValueError as exc:
                 self.log(f"[match] rejected 1012 move: {exc}")
                 return
-            self.log(f"[match] move target ({self.move_target[0]:.2f}, "
-                     f"{self.move_target[1]:.2f})")
+            self.log(f"[match] move target ({tx:.2f}, {ty:.2f}) for eid {player.eid}")
+            if self.sparse_1070:
+                self.sparse_budget[player.eid] = 6   # ~1.2 s of 5 Hz burst
+            if sim is not None:
+                start_frames = sim.set_target(tx, ty)
+                for op, p in start_frames:
+                    self._broadcast(op, p)
+                if player.slot == 0:
+                    self.hero_x = sim.x
+                    self.hero_y = sim.y
+                    self.hero_facing = sim.facing
+                    self.move_target = sim.move_target
+        elif opcode == wire.OP.TARGET_ENTITY:
+            try:
+                target_eid = roster.parse_target_entity(payload)
+            except ValueError as exc:
+                self.log(f"[match] rejected 1060 target entity: {exc}")
+                return
+            self.log(f"[match] target entity {target_eid} for eid {player.eid}")
+            if sim is not None:
+                sim.set_target_eid(target_eid)
+        elif opcode == wire.OP.ABILITY_CAST:
+            try:
+                slot_idx = roster.parse_ability_cast(payload)
+            except ValueError as exc:
+                self.log(f"[match] rejected 1078 ability cast: {exc}")
+                return
+            self.log(f"[ability] eid {player.eid} cast ability slot {slot_idx}")
+            kit = self.hero_kits.get(player.eid)
+            if kit is not None:
+                now = time.monotonic()
+                target_eid = sim.target_eid if sim is not None else None
+                ability_frames = kit.cast_ability(
+                    slot=slot_idx,
+                    now=now,
+                    target_eid=target_eid,
+                    target_pos=None,
+                    status_manager=self.status_manager,
+                    damage_queue=self.damage_queue,
+                    all_heroes=self.hero_sims,
+                    all_minions=self.wave_director.minions if self.wave_director else [],
+                )
+                for aop, ap in ability_frames:
+                    self._broadcast(aop, ap)
+        elif opcode == wire.OP.SKILLSHOT_CAST:
+            try:
+                caster, target, x, y, slot_idx, flag = roster.parse_skillshot_cast(payload)
+            except ValueError as exc:
+                self.log(f"[match] rejected 1102 skillshot cast: {exc}")
+                return
+            self.log(f"[ability] eid {caster} skillshot slot {slot_idx} at ({x:.2f}, {y:.2f}) target {target}")
+            kit = self.hero_kits.get(caster)
+            if kit is not None:
+                now = time.monotonic()
+                tgt_eid = target if target != 0xFFFFFFFF else None
+                ability_frames = kit.cast_ability(
+                    slot=slot_idx,
+                    now=now,
+                    target_eid=tgt_eid,
+                    target_pos=(x, y),
+                    status_manager=self.status_manager,
+                    damage_queue=self.damage_queue,
+                    all_heroes=self.hero_sims,
+                    all_minions=self.wave_director.minions if self.wave_director else [],
+                )
+                for aop, ap in ability_frames:
+                    self._broadcast(aop, ap)
+        elif opcode == wire.OP.SHOP_BUY:
+            try:
+                target_eid, item_id = roster.parse_shop_buy(payload)
+            except ValueError as exc:
+                self.log(f"[match] rejected 1081 shop buy: {exc}")
+                return
+            self.log(f"[economy] eid {target_eid} purchasing item {item_id}")
+            hero = self.hero_sims.get(target_eid)
+            if hero is not None:
+                ok, buy_frames = self.economy.purchase_item(target_eid, item_id, hero)
+                if ok:
+                    self.log(f"[economy] eid {target_eid} bought item {item_id}, gold remaining: {self.economy.get_or_create(target_eid).gold:.1f}")
+                    for bop, bp in buy_frames:
+                        self._broadcast(bop, bp)
+                else:
+                    self.log(f"[economy] eid {target_eid} failed purchase {item_id} (not enough gold or full)")
+        elif opcode == wire.OP.ABILITY_UPGRADE:
+            try:
+                ability_id = roster.parse_ability_upgrade(payload)
+            except ValueError as exc:
+                self.log(f"[match] rejected 1096 ability upgrade: {exc}")
+                return
+            self.log(f"[ability] eid {player.eid} upgrade ability {ability_id}")
+            kit = self.hero_kits.get(player.eid)
+            self.economy.upgrade_ability(player.eid, ability_id, kit)
 
     def _pick_countdown(self):
         remaining = max(0.0, self._pick_deadline - time.monotonic())
@@ -210,27 +496,26 @@ class SnapshotStream(threading.Thread):
         locks (bots take their heroes) and the 7.0 s countdown restarts
         with a burst of 8× identical snapshots."""
         if self.commit_hash is None:
-            # fallback: a client that never sends 1119 keeps its clicked hash
             self.commit_hash = self.players[0].selection_hash
             send_commit_ack = False
             self.log("[match] no 1119 commit — locking with the 1118 hash")
         self.players[0].selection_hash = self.commit_hash
-        self._send_snapshot(self._pick_countdown())
+        self._broadcast_snapshot(self._pick_countdown())
         if send_commit_ack:
-            self._send(wire.OP.LOCK_COMMIT, roster.build_commit_ack(self.commit_hash))
+            self._broadcast(wire.OP.LOCK_COMMIT, roster.build_commit_ack(self.commit_hash))
         roster.commit_lock(self.players, self.commit_hash)
         self.phase = self.LOCKED
         self.lock_deadline = time.monotonic() + LOCK_COUNTDOWN
         self.log(f"[match] roster locked (committed hash {self.commit_hash:08x}); "
                  f"countdown {LOCK_COUNTDOWN}s")
         for _ in range(LOCK_BURST):
-            self._send_snapshot((LOCK_COUNTDOWN, LOCK_COUNTDOWN))
+            self._broadcast_snapshot((LOCK_COUNTDOWN, LOCK_COUNTDOWN))
 
     def _finalize(self):
         self.phase = self.FINAL
         for p in self.players:
-            self._send(wire.OP.PLAYER_INFO, roster.build_player_info(p, self.match_id))
-        self._send(wire.OP.ROSTER_FINAL, roster.build_zero_ack())
+            self._broadcast(wire.OP.PLAYER_INFO, roster.build_player_info(p, self.match_id))
+        self._broadcast(wire.OP.ROSTER_FINAL, roster.build_zero_ack())
         self.dump_fallback_at = time.monotonic() + WORLD_DUMP_FALLBACK
         self.log("[match] roster finalized: 1006×6 + 1132; awaiting client "
                  "1134/1137 (map load)")
@@ -257,66 +542,85 @@ class SnapshotStream(threading.Thread):
             span = frames[-1][0] / 1000.0
             self.log(f"[match] world tape: {len(frames)} frames, "
                      f"{span:.1f}s (corpus bootstrap — sim is T3)")
-            self.tape_frames = frames
             # the 1010 seq byte counts every entity full update the client
             # has seen — continue from the tape's tail, not from zero
-            self.seq_1010 = sum(
-                1 for _t, b in frames
-                if struct.unpack_from(">H", b)[0] == wire.OP.ENTITY_FULL_UPDATE)
+            self.tape_frames = frames
+            self.seq_1010 = 0
+            for _t, b in frames:
+                if len(b) >= 2:
+                    op = struct.unpack_from(">H", b)[0]
+                    if op == wire.OP.ENTITY_FULL_UPDATE:
+                        self.seq_1010 += 1
+                        if len(b) >= 2 + 24:
+                            p = b[2:]
+                            eid = struct.unpack_from(">I", p, 8)[0]
+                            x, z, y = struct.unpack_from(">fff", p, 12)
+                            self.world_entities[eid] = (x, y)
         else:
             self.log(f"[match] no world tape — echo/1055 fallback "
                      f"(expected at {WORLD_TAPE_PATH})")
             self.tape_frames = []
 
-    def _dump_world(self):
-        """1135, 1006×6, 1105, (1011 + 1162×7) reverse — corpus order, with
-        the measured per-hero stat runs and timer sets. In tape mode the
-        tape itself carries 1055×6, the 1087 allocations, the delta stream
-        and the 1134/1137 echoes (all measured, at measured positions);
-        without a tape we send our derived 1055s and rely on echoes."""
+    def _dump_world_to(self, conn, send_fn=None):
+        """Dump world init to a specific client connection."""
         self.dumped = True
         self._load_tape()
         tape = bool(self.tape_frames)
-        self._send(wire.OP.MODE_NAME, roster.build_mode_name())
+        send = send_fn if send_fn is not None else (lambda op, p: self._send_to(conn, op, p))
+        send(wire.OP.MODE_NAME, roster.build_mode_name())
         for p in self.players:
-            self._send(wire.OP.PLAYER_INFO, roster.build_player_info(p, self.match_id))
-        self._send(wire.OP.MODE_PING_1105, roster.build_zero_ack())
+            send(wire.OP.PLAYER_INFO, roster.build_player_info(p, self.match_id))
+        send(wire.OP.MODE_PING_1105, roster.build_zero_ack())
         for p in reversed(self.players):
-            self._send(wire.OP.HERO_BLOCK, roster.build_hero_block(p))
-            hero_data = roster.HERO_INIT_DATA.get(p.hero_id)
+            send(wire.OP.HERO_BLOCK, roster.build_hero_block(p))
+            hero_data, donated = roster.hero_init_for(p.hero_id)
+            if donated:
+                self.log(f"[match] hero id {p.hero_id} unmeasured — donor "
+                         f"stat run from {roster.HERO_INIT_DONOR_ID} "
+                         "[Open: real 1011 not captured]")
+            # an entry whose init-burst 1162s were never captured (e.g. 258:
+            # vg5_final starts after the burst) reuses the donor's timers
+            timers = hero_data and (hero_data["timers"] if hero_data["timers"]
+                                    is not None else
+                                    roster.HERO_INIT_DATA[
+                                        roster.HERO_INIT_DONOR_ID]["timers"])
             for k in range(roster.TIMERS_PER_HERO):
-                if hero_data is not None and k < len(hero_data["timers"]):
-                    tag, tail = hero_data["timers"][k]
-                    self._send(wire.OP.TIMER_TICK,
-                               roster.build_timer_tick(p.eid, tag, 0.0,
-                                                       bytes.fromhex(tail)))
+                if timers and k < len(timers):
+                    tag, tail = timers[k]
+                    send(wire.OP.TIMER_TICK,
+                         roster.build_timer_tick(p.eid, tag, 0.0,
+                                                 bytes.fromhex(tail)))
                 else:
-                    self._send(wire.OP.TIMER_TICK,
-                               roster.build_timer_tick(p.eid, 0, 0.0))
+                    send(wire.OP.TIMER_TICK,
+                         roster.build_timer_tick(p.eid, 0, 0.0))
         if not tape:
             for p in self.players:
-                self._send(wire.OP.PLAYER_TAG, roster.build_player_tag(p, self.match_id))
+                send(wire.OP.PLAYER_TAG, roster.build_player_tag(p, self.match_id))
+            for sop, sp in self.structures.get_spawn_1010_frames():
+                send(sop, sp)
         mode = "tape carries 1055/1087/deltas/echoes" if tape else \
-               "1055 derived tags; no 1087 spawn batch"
-        self.log(f"[match] world init dumped (1135, 1006×6, 1105, 1011+1162×7 "
-                 f"reverse); {mode}")
+               "1055 derived tags; static structures spawned; no 1087 spawn batch"
+        self.log(f"[match] world init dumped to client; {mode}")
 
-    # -- world phase ---------------------------------------------------------
+    def _dump_world(self):
+        """1135, 1006×6, 1105, (1011 + 1162×7) reverse — corpus order."""
+        self.dumped = True
+        with self._clients_lock:
+            active_conns = list(self.clients.keys())
+        for conn in active_conns:
+            self._dump_world_to(conn)
+        if not active_conns:
+            self._dump_world_to(None)
 
-    def _run_world(self):
-        """Post-dump world: replay the measured entity tape (paced in real
-        time), then keep the client fed with 1116 pings, live movement
-        (c2s 1012 → 1070 at the corpus cadence) and hero 1010 full updates
-        (first one HERO_1010_PERIOD after the live layer starts). The tape
-        carries its own 1116 frames, so ours start only once it has played
-        out. Lane-minion waves (T3 slice 2) run on the measured 25 s grid
-        anchored at the world start — wave 1 lands at +22.97 s, i.e. after
-        the 12.5 s tape has finished; HALCYON_NO_WAVE=1 turns them off."""
+    def _enter_world(self):
+        """Transition into WORLD simulation phase after ready barrier or fallback."""
+        if self.phase == self.WORLD:
+            return
+        self.phase = self.WORLD
+        self.dumped = True
         self._load_tape()
-        if not self.tape_frames:
-            self.tape_done = True     # fallback: live layer only
         tape_base = time.monotonic()
-        self.wave_t0 = tape_base      # corpus 1137-ack instant = tape t=0
+        self.wave_t0 = tape_base
         if self.emit_waves:
             self.wave_director = wave.Director(tape_base, seq_1010=[self.seq_1010])
             self.log(f"[match] minion-wave director armed: wave 1 at "
@@ -325,27 +629,36 @@ class SnapshotStream(threading.Thread):
                      f"(eids from {self.wave_director.first_eid})")
         else:
             self.log("[match] HALCYON_NO_WAVE set — no minion waves")
+
+    # -- world phase ---------------------------------------------------------
+
+    def _run_world(self):
+        self._load_tape()
+        if not self.tape_frames:
+            self.tape_done = True     # fallback: live layer only
+        tape_base = self.wave_t0
         next_move_tick = time.monotonic() + roster.MOVE_TICK
         next_ping = time.monotonic() + 1.0
         next_full_update = None       # armed when the live layer starts
         while not self._stop_event.is_set():
             now = time.monotonic()
             if self.wave_director is not None:
-                # waves anchor at the world start, independent of the tape
                 self.wave_director.seq_1010[0] = self.seq_1010
-                wave_frames = self.wave_director.pump(now)
+                wave_frames = self.wave_director.pump(now, hero=self.hero_sim)
                 self.seq_1010 = self.wave_director.seq_1010[0]
                 for op, payload in wave_frames:
-                    self._send(op, payload)
-                    self.frames_sent += 1
+                    self._broadcast(op, payload)
+                    if op == wire.OP.COMBAT_DELTA:
+                        src_eid, tgt_eid, delta = struct.unpack_from(">IIf", payload, 0)
+                        if tgt_eid in self.hero_sims:
+                            self.log(f"[combat] minion {src_eid} attacked hero {tgt_eid}: {delta:.1f}")
             if not self.tape_done:
                 while self.tape_i < len(self.tape_frames):
                     t_ms, body = self.tape_frames[self.tape_i]
                     if tape_base + t_ms / 1000.0 > now:
                         break
                     op = struct.unpack_from(">H", body)[0]
-                    self._send(op, body[2:])
-                    self.frames_sent += 1
+                    self._broadcast(op, body[2:])
                     self.tape_i += 1
                 if self.tape_i >= len(self.tape_frames):
                     self.tape_done = True
@@ -360,67 +673,201 @@ class SnapshotStream(threading.Thread):
                     next_full_update = now + roster.HERO_1010_PERIOD
                     self.world_tick += 1
                     self.seq_1010 = (self.seq_1010 + 1) & 0xFF
-                    self._send(wire.OP.ENTITY_FULL_UPDATE,
-                               roster.build_entity_full_update(
-                                   self.players[0].eid, self.world_tick,
-                                   self.hero_x, self.hero_y,
-                                   self.seq_1010, self.hero_facing))
-                    self.frames_sent += 1
-                if now >= next_move_tick:
-                    next_move_tick = now + roster.MOVE_TICK
-                    self._step_hero(roster.MOVE_TICK)
+                    self._broadcast(wire.OP.ENTITY_FULL_UPDATE,
+                                    roster.build_entity_full_update(
+                                        self.players[0].eid, self.world_tick,
+                                        self.hero_x, self.hero_y,
+                                        self.seq_1010, self.hero_facing))
                 if now >= next_ping:
                     next_ping = now + 1.0
-                    self._send(wire.OP.SLOT_FLAGS_PING,
-                               roster.build_slot_flags(self.players))
-                    self.frames_sent += 1
+                    self._broadcast(wire.OP.SLOT_FLAGS_PING,
+                                    roster.build_slot_flags(self.players))
+                # hero keepalive layer, cadences measured on the corpus match
+                # (2026-09-07): 1086 attr 0x45→253 @0.3 s, 0x3e→251 @0.6 s,
+                # 1053 pair 6.0@0x0600 + 1.0@0x0800 @1.0 s
+                if self.hero_keepalive:
+                    eid0 = self.players[0].eid
+                    if now >= self.next_ka_45:
+                        self.next_ka_45 = now + 0.3
+                        self.keep_seq = (self.keep_seq + 1) & 0xFFFF
+                        self._broadcast(wire.OP.ENTITY_PROP,
+                                        roster.build_entity_prop(eid0, 0x45,
+                                                                 self.keep_seq, 253))
+                    if now >= self.next_ka_3e:
+                        self.next_ka_3e = now + 0.6
+                        self.keep_seq = (self.keep_seq + 1) & 0xFFFF
+                        self._broadcast(wire.OP.ENTITY_PROP,
+                                        roster.build_entity_prop(eid0, 0x3e,
+                                                                 self.keep_seq, 251))
+                    if now >= self.next_ka_stat:
+                        self.next_ka_stat = now + 1.0
+                        self._broadcast(wire.OP.ENTITY_STAT,
+                                        roster.build_entity_stat(eid0, 6.0, 0x0600))
+                        self._broadcast(wire.OP.ENTITY_STAT,
+                                        roster.build_entity_stat(eid0, 1.0, 0x0800,
+                                                                 w2=0x0100))
+
+            if now >= next_move_tick:
+                next_move_tick = now + roster.MOVE_TICK
+                self._step_heroes(roster.MOVE_TICK, now)
+                econ_frames = self.economy.step(
+                    roster.MOVE_TICK, now, self.hero_sims, emit_trickle=self.emit_trickle
+                )
+                for eop, ep in econ_frames:
+                    self._broadcast(eop, ep)
+
             self._pump(timeout=WORLD_PUMP_TICK)
 
-    def _step_hero(self, dt: float):
-        """Advance the local hero toward its 1012 target; 1070 at the corpus
-        cadence while moving (client predicts locally, server confirms).
-        Each tick publishes the current position, then advances; the arrival
-        tick additionally pins the exact target pair (corpus shows same-
-        instant duplicate 1070s, so the double send has precedent). Facing
-        follows the motion vector and holds after arrival — the 1010 full
-        updates carry the same (cos, sin) pair."""
-        if self.move_target is None:
-            return
-        eid = self.players[0].eid
+    def _step_hero(self, dt: float, now: float):
+        self._step_heroes(dt, now)
 
-        def publish(x, y):
-            self._send(wire.OP.POSITION, roster.build_position(eid, x, y))
-            self.frames_sent += 1
+    def _step_heroes(self, dt: float, now: float):
+        """Advance all active heroes toward their move/attack targets.
+        Handles hero movement, basic attack on minions, turrets, and enemy heroes."""
+        for eid, sim in list(self.hero_sims.items()):
+            target_pos = None
+            if sim.target_eid is not None:
+                # 1. Target is a minion
+                if self.wave_director is not None:
+                    target_minion = next((m for m in self.wave_director.minions
+                                          if m.eid == sim.target_eid and m.alive), None)
+                    if target_minion is not None:
+                        target_pos = (target_minion.x, target_minion.y)
+                # 2. Target is a structure / world entity
+                if target_pos is None and sim.target_eid in self.world_entities:
+                    target_pos = self.world_entities[sim.target_eid]
+                # 3. Target is an enemy hero (PvP)
+                if target_pos is None and sim.target_eid in self.hero_sims:
+                    enemy = self.hero_sims[sim.target_eid]
+                    if enemy.team != sim.team and enemy.is_alive:
+                        target_pos = (enemy.x, enemy.y)
+                # 4. Target is a jungle monster
+                if target_pos is None and sim.target_eid in self.jungle.monsters:
+                    monster = self.jungle.monsters[sim.target_eid]
+                    if monster.is_alive:
+                        target_pos = (monster.x, monster.y)
 
-        publish(self.hero_x, self.hero_y)
-        tx, ty = self.move_target
-        self.hero_facing = roster.facing_toward(self.hero_x, self.hero_y, tx, ty)
-        dx, dy = tx - self.hero_x, ty - self.hero_y
-        dist = (dx * dx + dy * dy) ** 0.5
-        step = roster.MOVE_SPEED * dt
-        if dist <= step:
-            self.hero_x, self.hero_y = tx, ty
-            self.move_target = None
-            publish(tx, ty)
-        else:
-            self.hero_x += dx / dist * step
-            self.hero_y += dy / dist * step
+            frames = sim.step(dt, now=now, target_pos=target_pos, status_manager=self.status_manager)
+            budget = self.sparse_budget.get(eid, 0) if self.sparse_1070 else None
+            for op, p in frames:
+                if budget is not None and op == wire.OP.POSITION:
+                    if budget <= 0:
+                        continue          # corpus-mirroring silence window
+                    budget -= 1
+                    self.sparse_budget[eid] = budget
+                self._broadcast(op, p)
+                # 1018 3D pose rides every hero 1070 while moving (bot-
+                # measured layout; the real local hero never receives it
+                # because its client walks itself — ours does not)
+                if (op == wire.OP.POSITION and self.hero_keepalive
+                        and eid == self.players[0].eid):
+                    self.keep_seq = (self.keep_seq + 1) & 0xFFFF
+                    self._broadcast(wire.OP.ENTITY_POSE_3D,
+                                    roster.build_entity_pose_3d(
+                                        eid, self.keep_seq,
+                                        sim.x, 1.05, -sim.y))
+                if op == wire.OP.COMBAT_DELTA:
+                    src_eid, tgt_eid, delta = struct.unpack_from(">IIf", p, 0)
+                    self.log(f"[combat] hero attack: COMBAT_DELTA {src_eid} -> {tgt_eid}: {delta:.1f}")
+                    # Hit minion
+                    if self.wave_director is not None and src_eid == sim.eid:
+                        minion_damage_frames = self.wave_director.apply_hero_damage_to_minion(
+                            tgt_eid, -delta, sim)
+                        for mop, mp in minion_damage_frames:
+                            self._broadcast(mop, mp)
+                            if mop == wire.OP.DESTROY:
+                                self.log(f"[economy] hero {sim.eid} killed minion {tgt_eid}! Awarding bounty.")
+                                bounty_frames = self.economy.reward_minion_bounty(sim.eid, self.hero_sims)
+                                for bop, bp in bounty_frames:
+                                    self._broadcast(bop, bp)
+                    # Hit turret / structure
+                    if tgt_eid in self.structures.structures and src_eid == sim.eid:
+                        target_struct = self.structures.structures[tgt_eid]
+                        if target_struct.team != sim.team:
+                            struct_frames = self.structures.apply_damage(tgt_eid, -delta, src_eid)
+                            for sop, sp in struct_frames:
+                                self._broadcast(sop, sp)
+                            self.log(f"[combat] hero {src_eid} attacked structure {tgt_eid} for {-delta:.1f} (HP: {target_struct.hp:.1f}/{target_struct.max_hp:.1f})")
+                    # Hit enemy hero! (PvP combat)
+                    if tgt_eid in self.hero_sims and src_eid == sim.eid:
+                        enemy_hero = self.hero_sims[tgt_eid]
+                        if enemy_hero.team != sim.team:
+                            was_alive = enemy_hero.is_alive
+                            hero_dmg_frames = enemy_hero.apply_damage(-delta, src_eid, now)
+                            for hop, hp in hero_dmg_frames:
+                                self._broadcast(hop, hp)
+                            self.log(f"[combat] hero {src_eid} hit enemy hero {tgt_eid} for {-delta:.1f}")
+                            if was_alive and not enemy_hero.is_alive:
+                                self.log(f"[economy] hero {src_eid} killed enemy hero {tgt_eid}! Awarding bounty.")
+                                bounty_frames = self.economy.reward_hero_bounty(src_eid, tgt_eid, self.hero_sims)
+                                for bop, bp in bounty_frames:
+                                    self._broadcast(bop, bp)
+                    # Hit jungle monster
+                    if tgt_eid in self.jungle.monsters and src_eid == sim.eid:
+                        jungle_frames = self.jungle.apply_damage_to_monster(
+                            tgt_eid, -delta, sim, now,
+                            economy_mgr=self.economy,
+                            all_heroes=self.hero_sims,
+                        )
+                        for jop, jp in jungle_frames:
+                            self._broadcast(jop, jp)
+                        self.log(f"[combat] hero {src_eid} hit jungle monster {tgt_eid} for {-delta:.1f}")
+
+        # Step jungle camps and monsters
+        jungle_frames = self.jungle.step(dt, now, self.hero_sims, economy_mgr=self.economy)
+        for jop, jp in jungle_frames:
+            self._broadcast(jop, jp)
+
+        # Step static turrets (aggro 1045 + attacks 1054)
+        minions = self.wave_director.minions if self.wave_director is not None else []
+        turret_frames = self.structures.step(now, self.hero_sims, minions)
+        for top, tp in turret_frames:
+            self._broadcast(top, tp)
+
+        if self.structures.match_finished:
+            self.log(f"[match] MATCH FINISHED! Team {self.structures.winner_team} WINS!")
+
+        # Keep primary hero vars synced for backwards compatibility
+        if self.players[0].eid in self.hero_sims:
+            p0 = self.hero_sims[self.players[0].eid]
+            self.hero_x = p0.x
+            self.hero_y = p0.y
+            self.hero_facing = p0.facing
+            self.move_target = p0.move_target
+
+    def _dump_reconnect_state(self, conn, player, send):
+        """Emit full state dump to a reconnecting client."""
+        send(wire.OP.GAME_SETUP, roster.build_game_setup(roster.MODE_SOLO_BOTS, player.eid))
+        send(wire.OP.GAME_MODE, roster.build_game_mode())
+        self._dump_world_to(conn, send_fn=send)
+        for eid, sim in self.hero_sims.items():
+            send(wire.OP.POSITION, roster.build_position(eid, sim.x, sim.y))
+            if sim.hp < sim.max_hp:
+                delta = sim.hp - sim.max_hp
+                send(wire.OP.ENTITY_STAT, roster.build_hero_stat(eid, delta, stat_type=6))
+            if not sim.is_alive:
+                send(wire.OP.ENTITY_STATE, roster.build_hero_death_state(eid))
+        if self.wave_director is not None:
+            for m in self.wave_director.minions:
+                if m.alive:
+                    send(wire.OP.POSITION, roster.build_position(m.eid, m.x, m.y))
+        send(wire.OP.SLOT_FLAGS_PING, roster.build_slot_flags(self.players))
 
     # -- loop ---------------------------------------------------------------
 
     def _pump(self, timeout):
         """Process queued c2s events; block up to `timeout` for the first."""
         try:
-            opcode, payload = self.events.get(timeout=timeout)
+            opcode, payload, conn = self.events.get(timeout=timeout)
         except queue.Empty:
             return
-        self._apply_event(opcode, payload)
+        self._apply_event(opcode, payload, conn)
         while True:
             try:
-                opcode, payload = self.events.get_nowait()
+                opcode, payload, conn = self.events.get_nowait()
             except queue.Empty:
                 return
-            self._apply_event(opcode, payload)
+            self._apply_event(opcode, payload, conn)
 
     def run(self):
         try:
@@ -429,34 +876,53 @@ class SnapshotStream(threading.Thread):
                 if self.phase == self.PICK:
                     self._pump(timeout=SNAPSHOT_INTERVAL)
                     if (self.locked and self.commit_hash is None
+                            and self.lock_requested_at is not None
                             and time.monotonic() - self.lock_requested_at > COMMIT_FALLBACK):
                         self._begin_lock()
-                    if self.phase == self.PICK:
-                        self._send_snapshot(self._pick_countdown())
+                    if (self.phase == self.PICK
+                            and time.monotonic() - self._last_snapshot_at >= SNAPSHOT_INTERVAL):
+                        self._broadcast_snapshot(self._pick_countdown())
+                    if (self.phase == self.PICK and not self.locked
+                            and time.monotonic() >= self._pick_deadline):
+                        self.log("[match] pick countdown expired — auto-locking roster")
+                        self._begin_lock()
                 elif self.phase == self.LOCKED:
                     self._pump(timeout=LOCK_TICK)
                     remaining = self.lock_deadline - time.monotonic()
                     if remaining <= 0:
                         self._finalize()
-                    else:
-                        self._send_snapshot((remaining, LOCK_COUNTDOWN))
+                    elif time.monotonic() - self._last_snapshot_at >= LOCK_TICK:
+                        self._broadcast_snapshot((remaining, LOCK_COUNTDOWN))
                 elif self.phase == self.FINAL:
                     self._pump(timeout=LOCK_TICK)
                     if not self.dumped and time.monotonic() >= self.dump_fallback_at:
-                        self.log("[match] no client 1134/1137 — world-dump fallback")
-                        self._dump_world()
-                        self.phase = self.WORLD
+                        self.log("[match] ready-barrier fallback timeout — entering WORLD phase")
+                        self._enter_world()
                 else:
                     self._run_world()
         except OSError:
             pass
         finally:
-            # shutdown wakes the reader on platforms where close alone does not.
-            try:
-                self.conn.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            self.conn.close()
+            with self._clients_lock:
+                for c in list(self.clients.keys()):
+                    try:
+                        c.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        c.close()
+                    except OSError:
+                        pass
+                self.clients.clear()
+            if self.conn is not None:
+                try:
+                    self.conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    self.conn.close()
+                except OSError:
+                    pass
 
 
 # --------------------------------------------------------------------------
@@ -473,12 +939,29 @@ class MatchServer:
         self.keepalive_ticks = []          # parsed u16 ticks, in order
         self.join_sequence = []            # (opcode, payload) of every c2s frame
         self.session_uuid = None
-        self.streams = []                  # per-connection SnapshotStream
+        self.streams = []                  # [self.session]
         self._streams_by_conn = {}
         self._stop = threading.Event()
         self._listener = None
         self._conns = []
         self.port = port                   # 0 = OS-assigned in start()
+        self.session = None                # shared SnapshotStream match session
+        self._session_lock = threading.Lock()
+
+    def is_stopped(self) -> bool:
+        return self._stop.is_set()
+
+    def is_finished(self) -> bool:
+        if self._stop.is_set():
+            return True
+        if self.session is not None:
+            if not self.session.is_alive():
+                return True
+            if len(self.session.clients) == 0:
+                return True
+            if getattr(self.session, "structures", None) and self.session.structures.match_finished:
+                return True
+        return False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -486,12 +969,14 @@ class MatchServer:
         self._listener = socket.socket()
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._listener.bind((self.host, self.port))   # port 0 = OS-assigned, dynamic per match
-        self._listener.listen(4)
+        self._listener.listen(8)
         self.port = self._listener.getsockname()[1]   # dynamic per match (§15.1)
         threading.Thread(target=self._accept_loop, daemon=True).start()
 
     def stop(self):
         self._stop.set()
+        if self.session is not None:
+            self.session.stop()
         for st in self.streams:
             st.stop()
         for s in [self._listener] + self._conns:
@@ -542,9 +1027,11 @@ class MatchServer:
         except (wire.WireError, OSError) as exc:
             self.log(f"[match] {peer} closed: {exc!r}")
         finally:
-            stream = self._streams_by_conn.pop(conn, None)
-            if stream is not None:
-                stream.stop()
+            if self.session is not None:
+                self.session.remove_client(conn)
+                if self.session.phase == SnapshotStream.WORLD and len(self.session.clients) == 0:
+                    self.session.stop()
+            self._streams_by_conn.pop(conn, None)
             try:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -597,10 +1084,11 @@ class MatchServer:
             return
         if opcode in (wire.OP.JOIN_1112, wire.OP.JOIN_1118, wire.OP.BUILD_LOCK,
                       wire.OP.LOCK_COMMIT, wire.OP.JOIN_1131, wire.OP.SHOP_OPEN,
-                      wire.OP.HERO_READY, wire.OP.BUY_CLOSE, wire.OP.MOVE_CAST):
+                      wire.OP.HERO_READY, wire.OP.BUY_CLOSE, wire.OP.MOVE_CAST,
+                      wire.OP.TARGET_ENTITY):
             stream = self._streams_by_conn.get(conn)
             if stream is not None:
-                stream.submit(opcode, payload)
+                stream.submit(opcode, payload, conn=conn)
         # Join handshakes (1112/1118/1123/1131/1119/1134/1137/1133/1157/1081…)
         # and gameplay verbs without a slice yet (1041/1078) are logged above;
         # semantic replies are T3 work.
@@ -608,24 +1096,26 @@ class MatchServer:
 
     def _serve_join(self, conn):
         """Present unpicked slots; 1118 comes from the client, not this burst."""
-        if conn in self._streams_by_conn:
-            return
-        players = roster.default_solo_bots(self.session_uuid, self.match_id)
-        send = self._sender(conn)
-        # Opener burst, pcap order: 1001 → 1108 → 1107×275 → 1113[0]
-        # (the first snapshot carries the pre-pick countdown pair, flags 0000).
-        send(wire.OP.GAME_SETUP,
-             roster.build_game_setup(roster.MODE_SOLO_BOTS, players[0].eid))
-        send(wire.OP.GAME_MODE, roster.build_game_mode())
-        for name in hero_catalog.HERO_CATALOG_1107_NAMES:
-            send(wire.OP.HERO_CATALOG, hero_catalog.catalog_payload(name))
-        send(wire.OP.SNAPSHOT_JOIN,
-             roster.build_snapshot(players, countdown=(298.717, 300.0),
-                                   pick_flags=0x0000))
-        stream = SnapshotStream(conn, players, self.match_id, send, self.log)
-        self.streams.append(stream)
-        self._streams_by_conn[conn] = stream
-        stream.start()
+        with self._session_lock:
+            send = self._sender(conn)
+            if self.session is None or not self.session.is_alive():
+                players = roster.default_solo_bots(self.session_uuid, self.match_id)
+                self.session = SnapshotStream(conn, players, self.match_id, send, self.log)
+                self.streams = [self.session]
+                self._streams_by_conn[conn] = self.session
+                self.session.start()
+                # Opener burst for client 1, pcap order: 1001 → 1108 → 1107×275 → 1113[0]
+                send(wire.OP.GAME_SETUP,
+                     roster.build_game_setup(roster.MODE_SOLO_BOTS, players[0].eid))
+                send(wire.OP.GAME_MODE, roster.build_game_mode())
+                for name in hero_catalog.HERO_CATALOG_1107_NAMES:
+                    send(wire.OP.HERO_CATALOG, hero_catalog.catalog_payload(name))
+                send(wire.OP.SNAPSHOT_JOIN,
+                     roster.build_snapshot(players, countdown=(298.717, 300.0),
+                                           pick_flags=0x0000))
+            else:
+                self.session.add_client(conn, self.session_uuid, send)
+                self._streams_by_conn[conn] = self.session
 
     def _sender(self, conn):
         def send(opcode, payload):

@@ -338,5 +338,86 @@ class TestCombatDirector(unittest.TestCase):
         self.assertEqual(run(), run())
 
 
+class TestMinionClassesAndRanged(unittest.TestCase):
+    """Corpus-measured minion classes: melee vs ranged, per-class damage
+    (-19.4, -27.8, -38.8, -50.0), engagement range (p90 6.08 / max 7.28 for ranged),
+    and per-pair stop offsets."""
+
+    def test_minion_class_stats_and_spawners(self):
+        d = wave.Director(100.0)
+        # Spawn wave 1 (5 pairs = 10 minions)
+        frames = []
+        for pair in range(5):
+            d._spawn_pair(100.0, pair)
+
+        self.assertEqual(len(d.minions), 10)
+        expected_classes = ["lead_melee", "melee", "captain", "ranged", "ranged"]
+        expected_damages = [19.4, 27.8, 38.8, 50.0, 50.0]
+        expected_ranges = [2.0, 2.0, 5.0, 6.0, 6.0]
+
+        for pair in range(5):
+            m_r = d.minions[2 * pair]
+            m_l = d.minions[2 * pair + 1]
+            self.assertEqual(m_r.minion_class, expected_classes[pair])
+            self.assertEqual(m_l.minion_class, expected_classes[pair])
+            self.assertAlmostEqual(m_r.attack_damage, expected_damages[pair], places=1)
+            self.assertAlmostEqual(m_r.attack_range, expected_ranges[pair], places=1)
+            self.assertAlmostEqual(m_l.attack_damage, expected_damages[pair], places=1)
+            self.assertAlmostEqual(m_l.attack_range, expected_ranges[pair], places=1)
+
+    def test_ranged_minion_engagement_distance(self):
+        """Ranged minions (pair 3 & 4) acquire and attack at 5.5u (> melee 2.0u)."""
+        d = wave.Director(100.0, combat=True)
+        # Pair 3 is ranged (range 6.0u, damage 50.0)
+        d._spawn_pair(100.0, 3)
+        m_r = d.minions[0]  # Right side (Red)
+        m_l = d.minions[1]  # Left side (Blue)
+
+        # Place them 5.5 units apart
+        m_r.x, m_r.y = 5.5, 0.0
+        m_l.x, m_l.y = 0.0, 0.0
+        self.assertAlmostEqual(d._dist(m_r, m_l), 5.5)
+
+        # Pump combat at now=100.0
+        frames = d.pump(100.0)
+        hits = [f for f in frames if f[0] == wave.OP_COMBAT_1054]
+        self.assertTrue(hits)
+        src, tgt, delta = struct.unpack_from(">IIf", hits[0][1], 0)
+        self.assertEqual(src, m_r.eid)
+        self.assertEqual(tgt, m_l.eid)
+        self.assertAlmostEqual(delta, -50.0, places=1)
+
+    def test_melee_minion_cannot_attack_at_range(self):
+        """Melee minions (pair 0/1, range 2.0u) cannot attack at 3.5u."""
+        d = wave.Director(100.0, combat=True)
+        d._spawn_pair(100.0, 0)
+        m_r = d.minions[0]
+        m_l = d.minions[1]
+
+        # Place them 3.5 units apart (outside melee 2.0u range)
+        m_r.x, m_r.y = 3.5, 0.0
+        m_l.x, m_l.y = 0.0, 0.0
+
+        frames = d.pump(100.0)
+        hits = [f for f in frames if f[0] == wave.OP_COMBAT_1054]
+        self.assertEqual(len(hits), 0)
+
+    def test_minion_stop_offset_trimming(self):
+        """Verify polyline trimming produces staggered stop coordinates."""
+        raw_path = roster.LANE_PATH_RIGHT
+        end_p0 = roster.trim_polyline(raw_path, 0.0)[-1]
+        end_p1 = roster.trim_polyline(raw_path, 1.0)[-1]
+        end_p2 = roster.trim_polyline(raw_path, 4.0)[-1]
+        end_p3 = roster.trim_polyline(raw_path, 5.0)[-1]
+        end_p4 = roster.trim_polyline(raw_path, 8.0)[-1]
+
+        self.assertEqual((round(end_p0[0], 3), round(end_p0[1], 3)), (1.500, 5.500))
+        # Each subsequent pair stops earlier along x (larger positive x for right side)
+        self.assertGreater(end_p1[0], end_p0[0])
+        self.assertGreater(end_p2[0], end_p1[0])
+        self.assertGreater(end_p3[0], end_p2[0])
+        self.assertGreater(end_p4[0], end_p3[0])
+
+
 if __name__ == "__main__":
     unittest.main()

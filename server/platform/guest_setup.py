@@ -24,6 +24,7 @@ mapping; either may happen independently — this script is safe to re-run in
 any combination of half-applied state.
 """
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -33,8 +34,20 @@ CACERTS_SRC = "/data/local/tmp/halcyon-cacerts-20260905"
 HOSTS_TARGET = "/system/etc/hosts"
 CACERTS_TARGET = "/system/etc/security/cacerts"
 
+DNS_NAMES = [
+    "platform.superevil.net",
+    "platform.superevilmegacorp.net",
+    "rpc.kindred-live.net",
+    "preauth.superevil.net",
+    "preauth.superevilmegacorp.net",
+    "gamefeeds.superevilmegacorp.net",
+    "my.superevilmegacorp.net",
+]
+
+LOCAL_HOST_COMMENT = "halcyon-target-host"
 LOCAL_ONLY_COMMENT = "halcyon-local-only"
 LOCAL_ROUTE_COMMENT = "halcyon-local-route"
+LOCAL_LAN_ROUTE_COMMENT = "halcyon-lan-route"
 VERIFY_HOST = "rpc.kindred-live.net"
 # The documented adb-server wedge: an online transport with a dead shell
 # service. One bounded restart attempt before giving up (leaf §"ADB shells
@@ -83,21 +96,76 @@ def mounts(serial):
 
 def mount_state(lines, target, src_hint):
     """-> ("ours" | "foreign" | "missing") for one mountpoint."""
-    for line in lines:
+    for line in reversed(lines):
         parts = line.split()
         if len(parts) >= 2 and parts[1] == target:
             return "ours" if src_hint in parts[0] else "foreign"
     return "missing"
 
 
-def hosts_content_ok(serial):
+def hosts_content_ok(serial, host="127.0.0.1"):
     res = su(serial, f"grep rpc.kindred-live.net {HOSTS_TARGET}")
-    return res.returncode == 0 and "127.0.0.1" in res.stdout
+    return res.returncode == 0 and host in res.stdout
 
 
 def cacerts_content_ok(serial):
     res = su(serial, f"ls {CACERTS_TARGET}/41e9eb4e.0")
     return res.returncode == 0 and "41e9eb4e.0" in res.stdout
+
+
+def ensure_hosts_source(serial, host="127.0.0.1"):
+    """Ensure /data/local/tmp/halcyon-hosts-20260905 exists and maps SEMC names to host."""
+    check = su(serial, f"cat {HOSTS_SRC} 2>/dev/null")
+    if check.returncode == 0 and host in check.stdout:
+        return True
+    lines = [
+        "127.0.0.1 localhost",
+        "::1 ip6-localhost",
+    ]
+    for d in DNS_NAMES:
+        lines.append(f"{host} {d}")
+    content = "\\n".join(lines) + "\\n"
+    res = su(serial, f"printf '{content}' > {HOSTS_SRC} && chmod 0644 {HOSTS_SRC}")
+    if res.returncode != 0:
+        print(f"[hosts] FAILED to write {HOSTS_SRC}: {res.stderr.strip()}")
+        return False
+    print(f"[hosts] created overlay source {HOSTS_SRC} -> {host}")
+    return True
+
+
+def ensure_cacerts_source(serial, cert_path=None):
+    """Ensure /data/local/tmp/halcyon-cacerts-20260905 contains Halcyon CA cert 41e9eb4e.0."""
+    cert_hash = "41e9eb4e.0"
+    target_cert = f"{CACERTS_SRC}/{cert_hash}"
+    check = su(serial, f"[ -f {target_cert} ] && echo present")
+    if "present" in check.stdout:
+        return True
+
+    dir_check = su(serial, f"[ -d {CACERTS_SRC} ] && echo present")
+    if "present" not in dir_check.stdout:
+        print(f"[cacerts] cloning {CACERTS_TARGET} to {CACERTS_SRC}...")
+        res = su(serial, f"cp -a {CACERTS_TARGET} {CACERTS_SRC} && chmod 0755 {CACERTS_SRC}")
+        if res.returncode != 0:
+            print(f"[cacerts] FAILED to clone system cacerts: {res.stderr.strip()}")
+            return False
+
+    if not cert_path or not os.path.isfile(cert_path):
+        default_cert = os.path.join(os.environ.get("TEMP", "."), "halcyon_stack", "platform_cert.pem")
+        if os.path.isfile(default_cert):
+            cert_path = default_cert
+        else:
+            print(f"[cacerts] generating certificate via mkcert...")
+            from . import mkcert
+            mkcert.main([])
+            cert_path = default_cert
+
+    push_res = run(["adb", "-s", serial, "push", cert_path, f"/data/local/tmp/{cert_hash}"])
+    if push_res.returncode != 0:
+        print(f"[cacerts] FAILED to push cert: {push_res.stderr.strip()}")
+        return False
+    su(serial, f"cp /data/local/tmp/{cert_hash} {target_cert} && chmod 0644 {target_cert}")
+    print(f"[cacerts] installed {cert_hash} into {CACERTS_SRC}")
+    return True
 
 
 def ensure_mount(serial, lines, src, target, effect_ok):
@@ -109,7 +177,7 @@ def ensure_mount(serial, lines, src, target, effect_ok):
     again adds nothing — report and skip. Only a target with BOTH the wrong
     mechanism and the wrong content is a hard conflict."""
     state = mount_state(lines, target, src)
-    if state == "ours":
+    if state == "ours" and effect_ok(serial):
         print(f"[mount] ok (already bound): {src} -> {target}")
         return True
     if effect_ok(serial):
@@ -117,7 +185,10 @@ def ensure_mount(serial, lines, src, target, effect_ok):
               else "not in /proc/mounts, content verified"
         print(f"[mount] ok ({why}): {target}")
         return True
-    if state == "foreign":
+    if state == "ours":
+        # Target was mounted with old content (e.g. host changed); unmount to re-bind
+        su(serial, f"umount {target}")
+    elif state == "foreign":
         owner = next((l for l in lines if l.split()[1:2] == [target]), "?")
         print(f"[mount] CONFLICT: {target} mounted elsewhere with wrong "
               f"content:\n        {owner}")
@@ -125,8 +196,7 @@ def ensure_mount(serial, lines, src, target, effect_ok):
     check = su(serial, f"[ -e {src} ] && echo present")
     if "present" not in check.stdout:
         print(f"[mount] MISSING source {src} — recreate it once per "
-              "Docs/Teardown/vainglory-mobile-local-stack.md (the overlay "
-              "files survive reboots; this is not expected)")
+              "Docs/Teardown/vainglory-mobile-local-stack.md")
         return False
     res = su(serial, f"mount --bind {src} {target}")
     if res.returncode != 0:
@@ -163,38 +233,78 @@ def ensure_rule(serial, binary, table_args, rule, markers):
     return True
 
 
-def ensure_firewall(serial, uid, http, https):
-    """uid-local-only REJECT (v4+v6) + loopback 80/443 -> http/https
-    REDIRECT; exact rule text from the leaf. The two REDIRECTs share the
-    same tag comment, so each carries its --to-ports as a presence marker —
-    a half-applied nat table must still get its missing half."""
+def ensure_firewall(serial, uid, http, https, host="127.0.0.1", redirect_lan=False):
+    """Firewall policy: local loopback (host=127.0.0.1) rejects non-loopback
+    traffic from game uid and redirects 80/443 -> 8080/8443; remote host
+    allows traffic to that host while rejecting all other non-loopback traffic,
+    preventing any leak to SEMC or the public internet."""
     ok = True
-    ok &= ensure_rule(
-        serial, "iptables", [],
-        ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
-         "!", "-d", "127.0.0.0/8", "-m", "comment",
-         "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
-        [LOCAL_ONLY_COMMENT])
-    ok &= ensure_rule(
-        serial, "ip6tables", [],
-        ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
-         "!", "-d", "::1/128", "-m", "comment",
-         "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
-        [LOCAL_ONLY_COMMENT])
-    ok &= ensure_rule(
-        serial, "iptables", ["-t", "nat"],
-        ["-I", "OUTPUT", "1", "-d", "127.0.0.1", "-p", "tcp",
-         "--dport", "80", "-m", "comment",
-         "--comment", LOCAL_ROUTE_COMMENT, "-j", "REDIRECT",
-         "--to-ports", str(http)],
-        [LOCAL_ROUTE_COMMENT, f"--to-ports {http}"])
-    ok &= ensure_rule(
-        serial, "iptables", ["-t", "nat"],
-        ["-I", "OUTPUT", "1", "-d", "127.0.0.1", "-p", "tcp",
-         "--dport", "443", "-m", "comment",
-         "--comment", LOCAL_ROUTE_COMMENT, "-j", "REDIRECT",
-         "--to-ports", str(https)],
-        [LOCAL_ROUTE_COMMENT, f"--to-ports {https}"])
+    if host == "127.0.0.1":
+        ok &= ensure_rule(
+            serial, "iptables", [],
+            ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
+             "!", "-d", "127.0.0.0/8", "-m", "comment",
+             "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
+            [LOCAL_ONLY_COMMENT])
+        ok &= ensure_rule(
+            serial, "ip6tables", [],
+            ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
+             "!", "-d", "::1/128", "-m", "comment",
+             "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
+            [LOCAL_ONLY_COMMENT])
+        ok &= ensure_rule(
+            serial, "iptables", ["-t", "nat"],
+            ["-I", "OUTPUT", "1", "-d", "127.0.0.1", "-p", "tcp",
+             "--dport", "80", "-m", "comment",
+             "--comment", LOCAL_ROUTE_COMMENT, "-j", "REDIRECT",
+             "--to-ports", str(http)],
+            [LOCAL_ROUTE_COMMENT, f"--to-ports {http}"])
+        ok &= ensure_rule(
+            serial, "iptables", ["-t", "nat"],
+            ["-I", "OUTPUT", "1", "-d", "127.0.0.1", "-p", "tcp",
+             "--dport", "443", "-m", "comment",
+             "--comment", LOCAL_ROUTE_COMMENT, "-j", "REDIRECT",
+             "--to-ports", str(https)],
+            [LOCAL_ROUTE_COMMENT, f"--to-ports {https}"])
+    else:
+        # Remote host on LAN:
+        # Rule 1: allow traffic to host
+        marker_host = f"{LOCAL_HOST_COMMENT}-{host}"
+        ok &= ensure_rule(
+            serial, "iptables", [],
+            ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
+             "-d", f"{host}/32", "-m", "comment",
+             "--comment", marker_host, "-j", "ACCEPT"],
+            [marker_host])
+        # Rule 2: reject other non-loopback IPv4 traffic (no internet leak)
+        ok &= ensure_rule(
+            serial, "iptables", [],
+            ["-I", "OUTPUT", "2", "-m", "owner", "--uid-owner", str(uid),
+             "!", "-d", "127.0.0.0/8", "-m", "comment",
+             "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
+            [LOCAL_ONLY_COMMENT])
+        # Rule 3: reject non-loopback IPv6 traffic
+        ok &= ensure_rule(
+            serial, "ip6tables", [],
+            ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
+             "!", "-d", "::1/128", "-m", "comment",
+             "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
+            [LOCAL_ONLY_COMMENT])
+        if redirect_lan:
+            ok &= ensure_rule(
+                serial, "iptables", ["-t", "nat"],
+                ["-I", "OUTPUT", "1", "-d", host, "-p", "tcp",
+                 "--dport", "80", "-m", "comment",
+                 "--comment", LOCAL_LAN_ROUTE_COMMENT, "-j", "DNAT",
+                 "--to-destination", f"{host}:{http}"],
+                [LOCAL_LAN_ROUTE_COMMENT, f"{host}:{http}"])
+            ok &= ensure_rule(
+                serial, "iptables", ["-t", "nat"],
+                ["-I", "OUTPUT", "1", "-d", host, "-p", "tcp",
+                 "--dport", "443", "-m", "comment",
+                 "--comment", LOCAL_LAN_ROUTE_COMMENT, "-j", "DNAT",
+                 "--to-destination", f"{host}:{https}"],
+                [LOCAL_LAN_ROUTE_COMMENT, f"{host}:{https}"])
     return ok
 
 
@@ -221,16 +331,15 @@ def ensure_reverses(serial, ports):
 
 # -- verify ------------------------------------------------------------------
 
-def verify_dns(serial):
+def verify_dns(serial, host="127.0.0.1"):
     """The leaf's acceptance: the guest must resolve the platform RPC host
-    to loopback through the bound hosts file. ping's first line reads
-    `PING rpc.kindred-live.net (127.0.0.1) ...`."""
+    to the target host IP through the bound hosts file."""
     res = su(serial, f"ping -c 1 -W 2 {VERIFY_HOST}", timeout=15)
     first = res.stdout.splitlines()[0] if res.stdout else ""
-    if "127.0.0.1" in first:
-        print(f"[verify] ok: {VERIFY_HOST} -> 127.0.0.1 in guest")
+    if host in first:
+        print(f"[verify] ok: {VERIFY_HOST} -> {host} in guest")
         return True
-    print(f"[verify] FAILED: {VERIFY_HOST} did not resolve to 127.0.0.1 "
+    print(f"[verify] FAILED: {VERIFY_HOST} did not resolve to {host} "
           f"-> {first or res.stderr.strip() or '(no output)'}")
     return False
 
@@ -241,6 +350,10 @@ def main(argv=None):
                     "(bind mounts + tagged firewall + adb reverses).")
     ap.add_argument("--serial", default="emulator-5554",
                     help="adb device serial (default emulator-5554)")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="target platform/match host IP (default 127.0.0.1; set to LAN IP for remote client)")
+    ap.add_argument("--cert", default=None,
+                    help="path to platform certificate PEM (default: auto-detect/generate)")
     ap.add_argument("--uid", type=int, default=10060,
                     help="game package uid for the local-only REJECT "
                          "(installation-specific, default 10060)")
@@ -252,6 +365,8 @@ def main(argv=None):
                     help="current match gateway port (drifts; see leaf)")
     ap.add_argument("--heartbeat-port", type=int, default=2114,
                     help="current heartbeat port (drifts; see leaf)")
+    ap.add_argument("--redirect-lan", action="store_true",
+                    help="redirect port 80/443 to http/https ports for remote host")
     ap.add_argument("--skip-verify", action="store_true",
                     help="skip the guest DNS ping check")
     args = ap.parse_args(argv)
@@ -262,16 +377,21 @@ def main(argv=None):
         return 2
 
     ok = True
+    ok &= ensure_hosts_source(args.serial, args.host)
+    ok &= ensure_cacerts_source(args.serial, args.cert)
+
     lines = mounts(args.serial)
     ok &= ensure_mount(args.serial, lines, HOSTS_SRC, HOSTS_TARGET,
-                       hosts_content_ok)
+                       lambda s: hosts_content_ok(s, args.host))
     ok &= ensure_mount(args.serial, lines, CACERTS_SRC, CACERTS_TARGET,
                        cacerts_content_ok)
-    ok &= ensure_firewall(args.serial, args.uid, args.http, args.https)
-    ok &= ensure_reverses(args.serial,
-                          [args.http, args.https,
-                           args.gateway_port, args.heartbeat_port])
-    ok &= True if args.skip_verify else verify_dns(args.serial)
+    ok &= ensure_firewall(args.serial, args.uid, args.http, args.https,
+                          host=args.host, redirect_lan=args.redirect_lan)
+    if args.host == "127.0.0.1":
+        ok &= ensure_reverses(args.serial,
+                              [args.http, args.https,
+                               args.gateway_port, args.heartbeat_port])
+    ok &= True if args.skip_verify else verify_dns(args.serial, args.host)
 
     print("[guest] RESULT:", "OK" if ok else "INCOMPLETE — see [..] FAILED/"
           "CONFLICT/MISSING lines above")

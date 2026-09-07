@@ -566,3 +566,187 @@ unit test. **Không hero nào bị nhắm** (chưa đo được aggro hero của
 **[Open] ghi rõ**: damage theo class minion (ranged tồn tại: hit distance
 p90 6.08/max 7.28), per-pair stop positions, HP accounting chính xác
 server-side, semantics từng flag 1045, quy tắc ngữ cảnh 1016.
+
+## 17. Update 2026-09-06 (late night IV) — T3 slice 4 LIVE: hero movement server-authoritative
+
+Slice 4 của master goal `GOAL.md`, protocol measure → build → test → live.
+
+**Measure**:
+1. 1016 cho hero: điều tra toàn bộ 32,640 frame của match 1 (`vgfull.pcap`) và 169,963 frame của match 5 (`vgr5frames.pkl`). Kết quả: **0 frame 1016 cho bất kỳ hero eid nào (1500, 1515–1519)**. Hero trên wire không bao giờ nhận 1016 — 1016 thuần túy là waypoint của minions/monsters/camps.
+2. 1070 cho hero: phân tích chi tiết toàn bộ 21 segment `c2s 1012` và `s2c 1070` của hero local (1500) và 5 bot heroes (1515..1519) qua `trace_after_lock.py` + `measure_hero_movement.py`:
+   - Start anchor: khi có 1012 từ trạng thái đứng yên, server phát 1070 vị trí hiện tại (độ trễ phản hồi ~70–260 ms).
+   - Nhịp phát: đúng **0.20 s** (5 Hz), vận tốc ~5.0 u/s (corpus biến thiên 4.8–6.6 u/s).
+   - Đến đích: phát 1070 tọa độ đích chính xác kèm duplicate frame cùng thời điểm xác nhận đến đích.
+   - Khi đứng yên: im lặng tuyệt đối (**0 frame 1070**).
+   - Thiết kế chống rubberband: retarget giữa chừng khi đang di chuyển cập nhật vector mới mượt mà, không giật lùi về điểm cũ và không phát thừa start anchor.
+
+**Build**:
+- Tạo `server/hero_movement.py`: class `HeroMovement` quản lý vị trí, vector facing (cos, sin), path waypoints, cadence 1070, anti-rubberband retarget, duplicate arrival frame, và hỗ trợ eid/team (Team 1 spawn âm, Team 2 spawn dương).
+- Cập nhật `server/roster.py`: thêm `HERO_SPAWNS` (1011 stat-run ground truth cho cả 6 heroes).
+- Đấu nối `server/match_server.py`: tích hợp `HeroMovement` vào SessionHandler, xử lý `c2s 1012` qua `hero_sim.set_target`, tick qua `hero_sim.step`. Sửa race condition gửi snapshot trùng lặp trong `run()`.
+
+**Tests**:
+- 5 unit tests mới trong `server/test/test_hero_movement.py` (walk path đơn và đa điểm, arrives, stop, anti-rubberband, zero 1016, eids đúng phe).
+- Suite tăng lên **109/109** green (`python -B -W error::ResourceWarning -m unittest discover -s server/test -t .`).
+
+**Live (LDPlayer + local_stack)**:
+- Chạy `python -m server.platform.live_up`: stack up trên port 7102/2114/8080/8443, guest setup OK.
+- Client vào match: chọn Amael, bot chọn Grumpjaw/Adagio vs Viola/Krul/Baptiste.
+- Dismiss overlay, joystick/tap điều khiển hero đi từ bệ spawn xuống lane và lối vào jungle:
+  - 35 s continuous active movement (`task-282` script chạy tap liên tục).
+  - Client ở lại match qua 1:14+, không EOF, không reset, không crash, heartbeat op-0 tiêu thụ đều đặn.
+  - Screenshots xác minh lưu tại `$TEMP/halcyon_stack/slice4-verify/` (`screen_gameplay.png`, `screen_moved1.png`, `screen_lane_walk.png`). Acceptance Slice 4 đạt 100%.
+
+## 18. Update 2026-09-06 (đêm, phần 2) — skin platform layer + draft-freshness fix
+
+Yêu cầu user: chọn được skin + animation khi di chuyển. Kết quả:
+
+**Skin — những gì LIVE được (tất cả qua `answers.json`, không đổi wire):**
+- `getSkinManifest` trả shape THẬT lấy từ capture công khai `a1cnore/HackedGlory`
+  (`mitm/vg_traffic.jsonl`, cùng build 147219): envelope
+  `{"code":0,"sessionToken":<token của stack>,"returnValue":"<JSON string>"}`;
+  `returnValue` = `{"skins":[290 records 17 fields (skinKey, heroKey `*Hero*`,
+  tier, priority, obtainable, cardCosts…), "themes":[192]}`. Client nuốt
+  không retry (journal: 1 call/bootstrap so với ~1 Hz retry khi probe thiếu field).
+- Ownership: `playerInfo.unlocks` (list 275 chuỗi: `*Hero*` + skinKey) +
+  `canUseAllHeroes:true` → draft **LOCK IN xanh** cho mọi hero. LƯU Ý parser
+  playerInfo phía client **strict**: đổi `currency` từ number sang object làm
+  HỎNG cả merge (draft hiện "HERO NOT OWNED") — revert number là hết.
+- Màn BAG → SKINS hiển thị đủ skin theo hero với viền tier; BAG → HEROES full
+  hero; hero-detail SKINS carousel render. Client render các màn này thuần từ
+  manifest+unlocks (không gọi RPC thêm).
+- Screenshots: `$TEMP/vg_max/bag4.png` (bag heroes), `skins1.png` (skins grid),
+  `skins2.png` (skin detail), `hero_skins.png` (hero skins carousel).
+
+**[Open] skin equip**: chưa tìm được hành động equip — draft Skins tab mờ (không
+phản ứng tap, không phụ thuộc countdown/selection), skin-detail popup không có
+nút. Nghi vấn: cần `getPlayerSkinProgress` (response_type playerInfoUpdate —
+đã answer = clone playerInfo) nhưng client chỉ gọi nó ở burst post-match-refresh
+(params `[""]`), chưa trigger lại được. Hash→skin mapping vẫn [Open]
+(không khớp FNV1a/CRC/djb2/sdbm của skinKey).
+
+**Fix chơi được — draft chết (match_server.py `add_client` + `run`)**:
+- Root cause: match 00000000 persistent + session uuid cố định → mọi queue
+  sau lần đầu đi nhánh "reconnect", không reset `_pick_deadline` → sau 300 s
+  từ boot, mọi draft vào ở 0 s, client kẹt (EXIT MATCH chết, label
+  "HERO NOT OWNED").
+- Fix: (1) join trong phase PICK reset deadline (+300 s) — [Deviation from
+  retail: draft length resets per join, not per match formation — deliberate
+  cho persistent solo match]; (2) hết giờ pick → auto-lock (`_begin_lock`)
+  thay vì kẹt ở 0 s vĩnh viễn.
+- Verify live: draft vào với **4m49s** tick, LOCK IN hoạt động, vào trận full.
+
+**Animation di chuyển** [SỬA 2026-09-07 — claim cũ bị user falsify 2 lần]:
+video 3 fps không đủ phân giải để kết luận anim. Xác lập theo quan sát live
+60 fps của user: **idle animation CÓ** ở mọi hero (đứng yên có breathing/sway),
+nhưng **walk-on-move KHÔNG xác nhận được** — kể cả Adagio 244 (hero đã đo).
+Các video `animA*.mp4` trước đó chỉ chứng minh idle + dịch chuyển, không phải
+locomotion. Root cause đang mở ở §19; lớp thí nghiệm mới ở §20.
+
+**Stack note vận hành**: zombie stack (PID cũ, elevated) giữ :7102 → stack
+live chuyển `_gw_port=7103`, `_hb_port=2115` (answers.json). Trong lúc đó phát
+hiện + fix bug `local_stack.fsm_on_rpc`: fallback `_gw_port` đọc từ file LIVE
+thay vì `answers_path` — sửa đọc từ `answers_path` (test FSM green lại).
+
+**Suite**: 115 tests — 111 green, 4 đỏ CŨ (pre-existing, slice-6 WIP: thứ tự
+sau lock 1113→1123→1113→1119 theo corpus vs hiện tại 1119 echo sớm;
+`TestWaveE2E` timeout). Không thêm đỏ mới; không commit khi còn đỏ.
+
+## 19. Update 2026-09-07 — glide root cause: hero chưa đo cần donor 1011 stat run
+
+**Report user**: "di chuyển thì không có animation" — hero **glide** (trượt
+không bước chân). §18 kết luận ngược vì mọi capture trước đó dùng Adagio
+(244) — hero CÓ trong `HERO_INIT_DATA`. Claim "anim OK toàn bộ" bị falsify.
+
+**Root cause (hiểu mechanism trước khi fix)**:
+- `HERO_INIT_DATA` mới chỉ đo được 6 hero {924, 254, 399, 244, 396, 925}
+  (thuận đoán khi các lần test trước pick đúng các hero này).
+- Hero ngoài tập đó (Skye 265) nhận 1011 stat run **zero** → client không
+  chạy được local sim cho actor hero (thiếu spawn/facing/scale/HP/speed) →
+  client không tự render bước chân, chỉ kéo vị trí bằng 1070 corrections
+  từ server → glide. Level cũng hiển thị **0** (cùng nguồn: init run rỗng).
+
+**Fix — donor stat run (`server/roster.py`, `server/match_server.py`)**:
+- `hero_init_for(hero_id)` trả `(data, donated)`: hero đã đo → data thật;
+  hero chưa đo → stat run đo được của 244 (donor) + flag. `build_hero_block`
+  và `_dump_world_to` (path world-init duy nhất, cả reconnect) dùng nó.
+- Không bịa byte: donor là run **đã đo thật**, giữ nguyên semantics "không
+  phát minh giá trị". `[Open]: 1011 thật của từng hero chưa được capture —
+  donor chỉ có tác dụng render/di chuyển, không phải stats chuẩn`.
+- Log dòng donor khi serve: `[match] hero id N unmeasured — donor stat run
+  from 244` — quan sát được trong gateway log mỗi lần vào trận hero lạ.
+- Test mới `test_unmeasured_hero_gets_donor_stat_run` (265 → donor+True;
+  244 → thật+False; block patch đúng run bytes). Path hero đã đo
+  byte-identical trước kia (không regression cho Adagio…).
+
+**Verify live (LDPlayer)**: pick Skye → log `01:09:25 hero id 265 unmeasured
+— donor stat run from 244`; level hiển thị **1** (trước là 0), không
+rubberband. [SỬA 2026-09-07 khuya] — claim "có stride pose (anim chạy)" phía
+dưới bị **user falsify trên live 60 fps**: Skye + donor run vẫn glide; những
+gì tôi đọc thành "stride" trong video 3 fps thực ra là **idle animation**
+(đứng yên hero cũng có anim) + dịch chuyển. Donor fix chỉ cho render + level
+display, KHÔNG mở walk-on-move. Bằng chứng `$TEMP/vg_max/animFix.mp4`
+(không còn giá trị kết luận về anim — 3 fps).
+- Hero-id mapping học thêm từ phiên: **265 = Skye**, **250 = SAW** (loading
+  screen "Supersonic Skye" / "Dragon Slayer SAW" khi pick tương ứng).
+
+**Suite**: 116 tests — **112 green** (+1 test donor), 4 đỏ CŨ y nguyên
+(slice-6 WIP: `1119 != 1113` ở `test_e2e.py:415` + `TestWaveE2E` timeout).
+Không thêm đỏ mới. Skin equip vẫn [Open] như §18.
+
+## 20. Update 2026-09-07 (khuya) — corpus sweep 6→14 hero, GUID 601, movement model thật, lớp keepalive
+
+**User hỏi đúng điểm**: "Có cách nào tính được bằng phân tích gói tin client
+<-> server không?" — CÓ. Walk toàn bộ corpus pcap cũ (`vgfull`, `vg3`,
+`vgc2s`, `vg5_final`), không cần capture mới.
+
+**Corpus sweep — HERO_INIT_DATA 6→14 hero** (`Tools` ngoài repo:
+`$TEMP/vg_max/sweep_1011.py`):
+- Key recovery mới: scan UUID literal trên **mọi** TCP flow (session uuid
+  nằm cả ở flow không phải match) + key local cố định. 4/5 corpus mở được.
+- Timer rule mới: init burst của 1162 = **first-7-unique (tag, tail)** —
+  tái tạo byte-exact timer đã lưu của 924 từ `vg3`. Filter cũ (value==0)
+  bắt nhầm runtime tick.
+- Thêm 8 hero đo thật: **245, 253, 257, 258, 268, 279 (Lyra), 429, 915**.
+  258 không thấy 1162 trong capture → `timers=None` (donor fallback).
+- Offset **601 = 12-byte content GUID ổn định theo hero** (giống nhau qua
+  mọi match trong corpus). Không grep thấy trong obb/libs/inst_dump → nguồn
+  chưa rõ [Open: content table hay server-side catalog].
+- Chạy hero KHÁC 1011 của mình → client boot local sim/anim chỉ khi nhận
+  run THẬT của hero đó; donor chỉ cho render + level display (khớp falsify
+  của user).
+
+**Movement model thật (từ corpus, pha lê với capture 02:2x)**:
+- Client THẬT tự đi bộ hero mình: chỉ ~21×1012 order + ~37×1070 correction
+  (5 Hz burst, step 1.2–1.6 u) cho hero local cả trận; bot do server điều —
+  350–606×1070 + 1018 orientation mỗi bot.
+- **Client ta KHÔNG tự đi bộ** (đã chứng minh: test sparse-1070 — ngắt
+  stream là hero đứng im). → hero ta phải server-driven như bot: 1070 liên
+  tục, không sparse.
+
+**Lớp keepalive đo thật từ corpus (trước đó thiếu hoàn toàn)**:
+- `1053 ENTITY_STAT` 14 B `[u32 eid][f32 val][u16 attr][u16 w2][u16 0]` —
+  cặp 6.0@0x0600 + 1.0@0x0800/w2=0x0100 mỗi 1.0 s.
+- `1086 ENTITY_PROP` 22 B `[eid][eid][u8 attr][u24 0][u16 seq][u16 val]
+  [u32 0][u16 0]` — attr 0x45→253 mỗi 0.3 s, 0x3e→251 mỗi 0.6 s, seq tăng
+  đơn điệu toàn cục (capture 3203–3729).
+- `1018 ENTITY_POSE_3D` 22 B `[u32 eid][u16 0][u16 seq][f32 x][f32 h]
+  [f32 z][u16 0]` — pose 3D tuyệt đối cho entity server-driven (z ≈
+  −1070.y, h ≈ 1.05 với hero). `1019` = teleport (hiếm).
+- Đã serve đủ: builders trong `roster.py`, cadence trong WORLD loop
+  (`match_server.py`), 1018 bám theo mỗi 1070 của hero. `HALCYON_NO_KEEPALIVE`
+  để tắt.
+
+**Thí nghiệm walk-anim đang mở**: stack mới (1070 liên tục + keepalive),
+vào trận hero **925 Amael (1011 thật)** — pipeline đi bộ sống: 5×1012
+02:48:35–44 → move target → 1070/1018. Client sống qua world entry (crash
+02:38 trước đó là rejoin vào world cũ, không phải do ops mới). Video
+`$TEMP/vg_max/walk2.mp4` 4.4 fps + phân tích align-nameplate: **không phân
+giải được** (h264 motion mush; leg residual nhảy ~2.5–4.7× nhưng torso
+nhảy tương đương → dominated bởi alignment noise). Kết luận anim thuộc về
+mắt user trên live 60 fps — với lớp keepalive mới này chưa ai judging.
+[SOpen] nếu vẫn glide: hướng kế tiếp = tinh chỉnh semantics 1018, delta
+layer 1067/1045/1052, hoặc memory-scan anim-state flag trên client chạy.
+
+**Suite**: 118 tests — 112+4 green (thêm 2 test sweep: shape 8 hero mới +
+entry 258 timers=None), 4 đỏ CŨ y nguyên (slice-6 WIP).

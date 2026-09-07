@@ -17,6 +17,8 @@ six trailing zero bytes. Bots are assigned heroes + locked exactly when the
 from __future__ import annotations
 
 import hashlib
+import math
+import os
 import struct
 
 BOT_UUID_SENTINEL = "__Kindred_Player_Bot__"
@@ -104,16 +106,25 @@ def default_solo_bots(session_uuid: str, match_id: str):
     return players
 
 
-def commit_lock(players, committed_hash: int):
-    """Lock the whole roster: local player commits its (hero, hash) pair,
+def commit_lock(players, committed_hash: int | None = None):
+    """Lock the whole roster: human players commit their (hero, hash) pair,
     bots take the measured hero choices — corpus: all slots 0101 with heroes
     the moment the 7.0 s lock countdown starts."""
-    players[0].selection_hash = committed_hash
-    players[0].pick_flags = PICK_FLAG_LOCKED
-    for p, (hero_id, selection_hash) in zip(players[1:], BOT_HERO_CHOICES):
-        p.hero_id = hero_id
-        p.selection_hash = selection_hash
-        p.pick_flags = PICK_FLAG_LOCKED
+    if committed_hash is not None and len(players) > 0 and not players[0].is_bot:
+        players[0].selection_hash = committed_hash
+        players[0].pick_flags = PICK_FLAG_LOCKED
+    bot_choices_iter = iter(BOT_HERO_CHOICES)
+    for p in players:
+        if p.is_bot:
+            try:
+                hero_id, selection_hash = next(bot_choices_iter)
+                p.hero_id = hero_id
+                p.selection_hash = selection_hash
+            except StopIteration:
+                pass
+            p.pick_flags = PICK_FLAG_LOCKED
+        else:
+            p.pick_flags = PICK_FLAG_LOCKED
 
 
 # --------------------------------------------------------------------------
@@ -245,13 +256,13 @@ def build_player_tag(p: Player, match_id: str) -> bytes:
 
 def build_slot_flags(players) -> bytes:
     """1116, ~1 Hz after world init: 16 × [u32 eid][u16 flags] + 6 B pad.
-    Corpus flags: local 0100, bots 0101."""
+    Corpus flags: local/humans 0100, bots 0101."""
     body = bytearray(SLOT_FLAGS_PAYLOAD_SIZE)
     for k in range(SNAPSHOT_SLOT_COUNT):
         off = k * 6
         if k < len(players):
             p = players[k]
-            flags = PICK_FLAG_SELECTED if k == 0 else PICK_FLAG_LOCKED
+            flags = PICK_FLAG_SELECTED if not p.is_bot else PICK_FLAG_LOCKED
             struct.pack_into(">IH", body, off, p.eid, flags)
     return bytes(body)
 
@@ -271,16 +282,31 @@ def build_hero_block(p: Player) -> bytes:
     struct.pack_into(">I", body, 8, p.eid)
     struct.pack_into(">I", body, 12, p.team)
     body[16:18] = b"\xff\xff"
-    hero_data = HERO_INIT_DATA.get(p.hero_id)
+    hero_data, donated = hero_init_for(p.hero_id)
     if hero_data is not None:
         for off, hexbytes in hero_data["runs"].items():
             raw = bytes.fromhex(hexbytes)
             body[off:off + len(raw)] = raw
-    # a hero outside the measured corpus roster keeps a zeroed stat run —
-    # never invent values
+    # A hero outside the measured corpus roster reuses the donor's measured
+    # stat run (see hero_init_for) — measured bytes, no invented values.
     body[741:745] = b"\xff\xff\xff\xff"
     body[745] = p.slot                          # corpus: slot 5 → 05
     return bytes(body)
+
+
+# Live evidence 2026-09-07: a hero served with a zeroed stat run renders but
+# GLIDES — the client never enters its walk animation (hero id 265, user
+# report + gateway log). The measured runs animate correctly (hero 244 A/B).
+# So unmeasured heroes reuse a measured DONOR run: bytes stay corpus-measured,
+# only the per-hero numbers are the donor's. [Open: capture real 1011 runs.]
+HERO_INIT_DONOR_ID = 244
+
+def hero_init_for(hero_id: int):
+    """(init data or None, donated?) for a hero id."""
+    data = HERO_INIT_DATA.get(hero_id)
+    if data is not None:
+        return data, False
+    return HERO_INIT_DATA.get(HERO_INIT_DONOR_ID), True
 
 
 # --------------------------------------------------------------------------
@@ -317,11 +343,13 @@ def build_game_setup(mode: str = MODE_SOLO_BOTS, hero_eid: int = 1500) -> bytes:
     return bytes(body)
 
 
-# Hero world-init constants: 1011 stat-run byte patches (offset -> hex)
-# bytes) and the 7 1162 timer (tag, tail) pairs per hero. Measured on the
-# vgfull.pcap match-1 world init, whose roster is exactly the solo-bots
-# roster this server presents; the stat-run interior is otherwise unmapped
-# (semantics [Open], bytes measured).
+# Hero world-init constants: 1011 stat-run byte patches (offset -> hex
+# bytes) and the 7 1162 timer (tag, tail) pairs per hero. The first six
+# heroes were measured on the vgfull.pcap match-1 world init; the rest come
+# from the same capture corpus re-walked (vg3/vgc2s/vg5_final, session keys
+# recovered from the recorded uuids) — see the sweep note inside. The
+# stat-run interior is otherwise unmapped (semantics [Open], bytes measured);
+# offset 601 is a per-hero content GUID, stable across matches.
 HERO_INIT_DATA = {
     924: {
         'eid': 1519,
@@ -592,6 +620,344 @@ HERO_INIT_DATA = {
             (0x60482b06, '0000000001000100'),
         ],
     },
+    # --- 2026-09-07 corpus sweep: same capture corpus re-walked for more
+    # --- 1011/1162 init frames (vg3 + vgc2s + vg5_final pcaps, keys
+    # --- recovered from the recorded session uuids). Byte-extraction rule
+    # --- mirrors the six entries above; offset 18 truncated to the 12
+    # --- match-stable spawn bytes (byte 30 proved match-variable), tail
+    # --- 712-723 (ability/level state) dropped as match-variable. Timers
+    # --- re-derived with the first-7-unique 1162 rule, validated to
+    # --- reproduce the 924 stored set byte-for-byte.
+    245: {
+        'eid': 1518,
+        'runs': {
+            18: '429d33333fdf9ffac0a1eb85',
+            34: '80',
+            42: '4431c0',
+            46: '4431c0',
+            74: '4079999a',
+            98: '3f80',
+            122: '438c00',
+            126: '438c00',
+            190: '41f0',
+            202: '41a0',
+            214: '429e',
+            226: '3f',
+            286: '4416',
+            290: '4416',
+            294: '3f80',
+            314: '3f80',
+            322: '4288',
+            334: 'bf80',
+            561: '01',
+            565: '02',
+            596: '0303',
+            601: '115d35732f030a7688ae7bae',
+            636: '01',
+            640: '01',
+            644: '01',
+            668: '01',
+            672: '01',
+            676: '01',
+            708: '01',
+        },
+        'timers': [
+            (0xb855d752, '0000010101000100'),
+            (0x1e275dc1, '0000010101000100'),
+            (0x022982b5, '0000010101000100'),
+            (0x36c7a4f7, '0000010101000100'),
+            (0x6a863145, '0000000001010100'),
+            (0x69862fb2, '0000000001000100'),
+            (0x68862e1f, '0000000001000100'),
+        ],
+    },
+    253: {
+        'eid': 1515,
+        'runs': {
+            18: 'c2a39eb83fa22f563ffc28f6',
+            34: '80',
+            42: '443980',
+            46: '443980',
+            74: '4079999a',
+            98: '3f80',
+            122: '43c300',
+            126: '43c300',
+            190: '420c',
+            202: '41c8',
+            214: '4284',
+            226: '3f',
+            286: '4416',
+            290: '4416',
+            294: '3f80',
+            314: '3f80',
+            322: '4288',
+            334: 'bf80',
+            561: '01',
+            565: '02',
+            596: '0303',
+            601: '98a643feb0ebcce6cfb8b255',
+            636: '01',
+            640: '01',
+            644: '01',
+            668: '01',
+            672: '01',
+            676: '01',
+            708: '01',
+        },
+        'timers': [
+            (0xb855d752, '0000010101000100'),
+            (0x1e275dc1, '0000010101000100'),
+            (0xb87e7670, '0000010101000100'),
+            (0x65bbcc86, '0000010101010000'),
+            (0x0c76237b, '0000000001010100'),
+            (0x0b7621e8, '0000000001000101'),
+            (0x0e7626a1, '0000000001000100'),
+        ],
+    },
+    257: {
+        'eid': 1519,
+        'runs': {
+            18: '42a670a43fdf9ffa3f3851ec',
+            34: '80',
+            42: '445180',
+            46: '445180',
+            74: '4079999a',
+            98: '3f80',
+            190: '420c',
+            202: '41c8',
+            214: '42a0',
+            226: '3f',
+            286: '4416',
+            290: '4416',
+            294: '3f80',
+            314: '3f80',
+            322: '4288',
+            334: 'bf80',
+            561: '01',
+            565: '02',
+            596: '0303',
+            601: 'dd876f0b35e412d76c705454',
+            636: '01',
+            640: '01',
+            644: '01',
+            668: '01',
+            672: '01',
+            676: '01',
+            708: '01',
+        },
+        'timers': [
+            (0xb855d752, '0000010101000100'),
+            (0x1e275dc1, '0000010101000100'),
+            (0x022982b5, '0000010101000100'),
+            (0xd775fc96, '0000000001010100'),
+            (0xd875fe29, '0000000001000100'),
+            (0xd575f970, '0000000001000100'),
+            (0xd60c580b, '3333010100000001'),
+        ],
+    },
+    258: {
+        'eid': 1517,
+        'runs': {
+            18: '429f51ec3fdf9ffabf68f5c3',
+            34: '80',
+            42: '4426c0',
+            46: '4426c0',
+            74: '40733333',
+            98: '3f80',
+            122: '434800',
+            126: '434800',
+            190: '41c8',
+            202: '41a0',
+            214: '4258',
+            226: '3f',
+            286: '4416',
+            290: '4416',
+            294: '3f80',
+            314: '3f80',
+            322: '4288',
+            334: 'bf80',
+            561: '01',
+            565: '02',
+            596: '0303',
+            601: '8875f26fa4da1c5f03f0cb8e',
+            636: '01',
+            640: '01',
+            644: '01',
+            668: '01',
+            672: '01',
+            676: '01',
+            708: '01',
+        },
+        'timers': None,          # [Open] vg5_final capture starts after the init burst
+    },
+    268: {
+        'eid': 1515,
+        'runs': {
+            18: 'c2a39eb83fa22f563ffc28f6',
+            34: '80',
+            42: '443e40',
+            46: '443e40',
+            74: '40800000',
+            98: '3f80',
+            190: '41f0',
+            202: '41a0',
+            214: '42a6',
+            226: '3f',
+            286: '4416',
+            290: '4416',
+            294: '3f80',
+            314: '3f80',
+            322: '4288',
+            334: 'bf80',
+            561: '01',
+            565: '02',
+            596: '0303',
+            601: 'e79e521c0c6071d0cd9e0de9',
+            636: '01',
+            640: '01',
+            644: '01',
+            668: '01',
+            672: '01',
+            676: '01',
+            708: '01',
+        },
+        'timers': [
+            (0xb855d752, '0000010101000100'),
+            (0x1e275dc1, '0000010101000100'),
+            (0x26312d75, '0000010101000100'),
+            (0x49d725bb, '0000000001010100'),
+            (0xcd8619d8, '0000010101010000'),
+            (0xb3dc27c4, '0000000001010100'),
+            (0xb4dc2957, '0000000001000100'),
+        ],
+    },
+    279: {
+        'eid': 1519,
+        'runs': {
+            18: '42a670a43fdf9ffa3f3851ec',
+            34: '80',
+            42: '445f00',
+            46: '445f00',
+            74: '40600000',
+            98: '3f80',
+            122: '438700',
+            126: '438700',
+            190: '420c',
+            202: '41c8',
+            214: '42be',
+            226: '3f',
+            286: '4416',
+            290: '4416',
+            294: '3f80',
+            314: '3f80',
+            322: '4288',
+            334: 'bf80',
+            561: '01',
+            565: '02',
+            596: '0303',
+            601: 'c8ab8bb302852dd7dcccfaef',
+            636: '01',
+            640: '01',
+            644: '01',
+            668: '01',
+            672: '01',
+            676: '01',
+            708: '01',
+        },
+        'timers': [
+            (0xb855d752, '0000010101000100'),
+            (0x1e275dc1, '0000010101000100'),
+            (0x022982b5, '0000010101000100'),
+            (0x4f7024a5, '0000000001010100'),
+            (0x4e702312, '0000000001000100'),
+            (0x4d70217f, '0000000001000100'),
+            (0xd60c580b, '3333010100000001'),
+        ],
+    },
+    429: {
+        'eid': 1517,
+        'runs': {
+            18: '429f51ec3fdf9ffabf68f5c3',
+            34: '80',
+            42: '443b80',
+            46: '443b80',
+            74: '40800000',
+            98: '3f80',
+            122: '434800',
+            126: '434800',
+            190: '41f0',
+            202: '41a0',
+            214: '42a4',
+            226: '3f',
+            286: '4416',
+            290: '4416',
+            294: '3f80',
+            314: '3f80',
+            322: '4288',
+            334: 'bf80',
+            561: '02',
+            565: '03',
+            596: '0303',
+            601: '8e5d428fa96f323d3c776ccd',
+            636: '01',
+            640: '01',
+            644: '01',
+            668: '01',
+            672: '01',
+            676: '01',
+            708: '01',
+        },
+        'timers': [
+            (0xb855d752, '0000010101000100'),
+            (0x1e275dc1, '0000010101000100'),
+            (0x022982b5, '0000010101000100'),
+            (0x212a1d93, '0000000001010100'),
+            (0x202a1c00, '0000000001000100'),
+            (0x232a20b9, '0000000001000100'),
+            (0xd60c580b, '3333010100000001'),
+        ],
+    },
+    915: {
+        'eid': 1517,
+        'runs': {
+            18: '429f51ec3fdf9ffabf68f5c3',
+            34: '80',
+            42: '443b80',
+            46: '443b80',
+            74: '40733333',
+            98: '3f80',
+            190: '41c8',
+            202: '41a0',
+            214: '42a4',
+            226: '3f',
+            286: '4416',
+            290: '4416',
+            294: '3f80',
+            314: '3f80',
+            322: '4288',
+            334: 'bf80',
+            561: '01',
+            565: '02',
+            596: '0303',
+            601: '052d93ba366b01b85ce7a862',
+            636: '01',
+            640: '01',
+            644: '01',
+            668: '01',
+            672: '01',
+            676: '01',
+            708: '01',
+        },
+        'timers': [
+            (0xb855d752, '0000010101000100'),
+            (0x1e275dc1, '0000010101000100'),
+            (0x022982b5, '0000010101000100'),
+            (0xba121030, '0000010101000101'),
+            (0x352deb06, '0000000001010100'),
+            (0x362dec99, '0000000001000100'),
+            (0x332de7e0, '0000000001000100'),
+        ],
+    },
 }
 
 
@@ -606,8 +972,22 @@ MOVE_SPEED = 5.0                  # u/s; corpus hero 1070s span 4.8–6.6 u/s
 
 # Spawn of the local hero entity: corpus hero 0x5dc's first 1070 after its
 # first move command (matches the f32 pair in the corpus 1011 stat run).
-SPAWN_X = -78.18000030517578      # 0xC29C5C29
-SPAWN_Y = 0.8799999952316284      # 0x3F6147AE
+SPAWN_X = float(os.environ.get("HALCYON_HERO_SPAWN_X", "-78.18000030517578"))      # 0xC29C5C29
+SPAWN_Y = float(os.environ.get("HALCYON_HERO_SPAWN_Y", "0.8799999952316284"))      # 0x3F6147AE
+
+# Authoritative hero spawn coordinates measured from corpus 1011 blocks
+# Team 1 (Halcyon / Left): negative X
+# Team 2 (Right): positive X
+HERO_SPAWNS = {
+    1500: (SPAWN_X, SPAWN_Y),
+    1515: (-81.81, 1.267),
+    1516: (-77.03, 1.254),
+    1517: (79.66, 1.747),
+    1518: (78.60, 1.747),
+    1519: (83.22, 1.747),
+}
+HERO_SPAWNS_TEAM1 = [HERO_SPAWNS[1500], HERO_SPAWNS[1515], HERO_SPAWNS[1516]]
+HERO_SPAWNS_TEAM2 = [HERO_SPAWNS[1517], HERO_SPAWNS[1518], HERO_SPAWNS[1519]]
 
 
 def build_position(eid: int, x: float, y: float) -> bytes:
@@ -615,11 +995,37 @@ def build_position(eid: int, x: float, y: float) -> bytes:
     return struct.pack(">IffH", eid, x, y, 0)
 
 
+def build_entity_stat(eid: int, value: float, attr: int, w2: int = 0) -> bytes:
+    """s2c 1053 — [eid][f32 value][u16 attr][u16 w2][u16 0], 14 B
+    (corpus 2026-09-07: hero keepalive pair 6.0@0x0600 / 1.0@0x0800 @1 Hz)."""
+    return struct.pack(">IfHHH", eid, value, attr, w2, 0)
+
+
+def build_entity_prop(eid: int, attr: int, seq: int, val: int) -> bytes:
+    """s2c 1086 — [eid][eid][u8 attr][u24 0][u16 seq][u16 val][u32 0][u16 0], 22 B
+    (corpus 2026-09-07: hero keepalive 0x45→253 @0.3 s, 0x3e→251 @0.6 s;
+    seq is a global delta counter, monotonic)."""
+    return struct.pack(">II", eid, eid) + bytes([attr, 0, 0, 0]) + \
+        struct.pack(">HHIHH", seq, val, 0, 0, 0)
+
+
+def build_entity_pose_3d(eid: int, seq: int, x: float, height: float, z: float) -> bytes:
+    """s2c 1018 — [eid][u16 0][u16 seq][f32 x][f32 height][f32 z][u16 0], 22 B
+    (layout measured on bot heroes 2026-09-07; z ≈ −1070.y for our spawn
+    frame, height 1.05 from the hero 1019 sample; semantics [Open])."""
+    return struct.pack(">IHHfffH", eid, 0, seq, x, height, z, 0)
+
+
 def parse_move(payload: bytes) -> tuple[float, float]:
     """c2s 1012 — move command to an absolute map target."""
     if len(payload) != MOVE_PAYLOAD_SIZE or payload[8:] != bytes(6):
         raise ValueError("invalid 1012 move payload")
     return struct.unpack_from(">ff", payload)
+
+
+def build_move(x: float, y: float) -> bytes:
+    """c2s 1012 move intent (14 B): [f32 x][f32 y][6B 0]."""
+    return struct.pack(">ff", x, y) + bytes(6)
 
 
 # --------------------------------------------------------------------------
@@ -797,6 +1203,53 @@ MINION_ATTACK_COOLDOWN = 0.6    # s between repeat hits of one (src, tgt)
 MINION_ATTACK_RANGE = 2.0       # first blood happened at exactly 2.00
 MINION_HP = 450.0               # lane-minion HP tier (mechanics leaf §17)
 
+# Minion class profiles per pair (0..4) in a 5-pair wave:
+#   (class_name, hp, damage, attack_range, attack_cooldown, stop_offset)
+# Measured on vg5 corpus:
+#   - Pair 0: Lead Melee (spawner 366, first blood 19.4, range 2.0, offset 0.0)
+#   - Pair 1: Melee (spawner 366, damage 27.8 / -28 peak, range 2.0, offset 1.0)
+#   - Pair 2: Captain (spawner 367, damage 38.8 / 46.0, range 5.0, offset 4.0)
+#   - Pair 3: Ranged (spawner 365, damage 50.0 / -50 peak, range 6.0, offset 5.0)
+#   - Pair 4: Ranged (spawner 365, damage 50.0 / -50 peak, range 6.0, offset 8.0)
+MINION_PAIR_CLASSES = (
+    ("lead_melee", 450.0, 19.4, 2.0, 0.6, 0.0),
+    ("melee",      450.0, 27.8, 2.0, 0.6, 1.0),
+    ("captain",    650.0, 38.8, 5.0, 0.8, 4.0),
+    ("ranged",     350.0, 50.0, 6.0, 0.6, 5.0),
+    ("ranged",     350.0, 50.0, 6.0, 0.6, 8.0),
+)
+
+
+def trim_polyline(path: tuple[tuple[float, float], ...] | list[tuple[float, float]],
+                  offset: float) -> list[tuple[float, float]]:
+    """Trim a polyline backwards from its end by `offset` units, returning the trimmed points."""
+    if offset <= 0.0 or len(path) <= 1:
+        return list(path)
+    lens = []
+    tot = 0.0
+    for i in range(len(path) - 1):
+        d = math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1])
+        lens.append(d)
+        tot += d
+    if offset >= tot:
+        return [path[0]]
+    rem = offset
+    idx = len(path) - 1
+    new_path = list(path)
+    while idx > 0:
+        seg_len = lens[idx - 1]
+        if rem < seg_len:
+            t = (seg_len - rem) / seg_len
+            x = path[idx - 1][0] + t * (path[idx][0] - path[idx - 1][0])
+            y = path[idx - 1][1] + t * (path[idx][1] - path[idx - 1][1])
+            new_path = new_path[:idx] + [(x, y)]
+            break
+        else:
+            rem -= seg_len
+            new_path.pop()
+            idx -= 1
+    return new_path
+
 DESTROY_PAYLOAD_SIZE = 6        # s2c 1073 / 1035: [u32 eid][u16 0]
 #   minion death chain measured: 1073 destroy then 1035 despawn, same
 #   timestamp, tail 0000, NO overkill 1054 and no 1068/1037/1072 frames
@@ -805,9 +1258,46 @@ DESTROY_PAYLOAD_SIZE = 6        # s2c 1073 / 1035: [u32 eid][u16 0]
 #   ever carries a minion eid) and computes its own HP from the 1054 stream.
 
 
-def build_combat_delta(src_eid: int, tgt_eid: int, delta: float) -> bytes:
+# -- hero combat (T3 slice 5; measured on vg5, measure_hero_combat.py) ------
+
+COMBAT_DELTA_HERO_TAIL = bytes.fromhex("0005000000000000")  # tag 5 weapon basic attack
+HERO_BASE_HP = 740.0             # base HP for level 1 (Amael)
+HERO_BASE_ATTACK_DAMAGE = 70.0   # base weapon attack damage
+HERO_ATTACK_RANGE = 2.5          # melee basic attack range (u)
+HERO_ATTACK_COOLDOWN = 0.8       # attack cadence (s)
+HERO_RESPAWN_DURATION = 6.0      # level 1-2 respawn timer (s)
+
+HERO_STAT_PAYLOAD_SIZE = 14      # s2c 1053: [u32 eid][f32 val][u8 type][5B tail]
+TARGET_ENTITY_PAYLOAD_SIZE = 6   # c2s 1060: [u32 target_eid][u16 0]
+
+
+def build_combat_delta(src_eid: int, tgt_eid: int, delta: float,
+                       tail: bytes = COMBAT_DELTA_TAIL) -> bytes:
     """s2c 1054 COMBAT_DELTA — the wire's damage event."""
-    return struct.pack(">IIf", src_eid, tgt_eid, delta) + COMBAT_DELTA_TAIL
+    return struct.pack(">IIf", src_eid, tgt_eid, delta) + tail
+
+
+def build_hero_stat(eid: int, value: float, stat_type: int = 6,
+                    tail: bytes = bytes(5)) -> bytes:
+    """s2c 1053 HERO_STAT (14 B) — client HUD stat delta (type 6 = HP)."""
+    return struct.pack(">IfB", eid, value, stat_type) + tail
+
+
+def build_hero_death_state(eid: int) -> bytes:
+    """s2c 1067 ENTITY_STATE on hero death (14 B) — measured: [eid][02 01][8B zeros]."""
+    return struct.pack(">IBB", eid, 0x02, 0x01) + bytes(8)
+
+
+def parse_target_entity(payload: bytes) -> int:
+    """c2s 1060 — target acquisition intent (6 B)."""
+    if len(payload) != TARGET_ENTITY_PAYLOAD_SIZE:
+        raise ValueError("invalid 1060 target entity payload")
+    return struct.unpack_from(">I", payload)[0]
+
+
+def build_target_entity(target_eid: int) -> bytes:
+    """c2s 1060 target acquisition intent (6 B): [u32 target_eid][u16 0]."""
+    return struct.pack(">IH", target_eid, 0)
 
 
 def build_destroy(eid: int) -> bytes:
@@ -817,6 +1307,21 @@ def build_destroy(eid: int) -> bytes:
 
 def build_despawn(eid: int) -> bytes:
     """s2c 1035 DESPAWN."""
+    return struct.pack(">IH", eid, 0)
+
+
+def build_target_acquire(src_eid: int, tgt_eid: int, flag: int = 1) -> bytes:
+    """s2c 1045 TARGET_ACQUIRE (14 B) — target/aggro lock/drop."""
+    return struct.pack(">IIB", src_eid, tgt_eid, flag) + bytes(5)
+
+
+def build_entity_substate(eid: int, b1: int, b2: int) -> bytes:
+    """s2c 1068 ENTITY_SUBSTATE (12 B) — sub-state transition in death chains."""
+    return struct.pack(">IBB", eid, b1, b2) + bytes(6)
+
+
+def build_entity_clear(eid: int) -> bytes:
+    """s2c 1072 ENTITY_CLEAR (6 B) — clear active state."""
     return struct.pack(">IH", eid, 0)
 
 
@@ -859,3 +1364,92 @@ def build_timer_tick(eid: int, tag: int, value: float = 0.0,
     if len(tail) != 8:
         raise ValueError("1162 tail must be 8 bytes")
     return struct.pack(">IIHf", eid, tag, 0, value) + tail
+
+
+# --------------------------------------------------------------------------
+# Abilities & Casts — 1046 POSITION_EVENT, 1078 ABILITY_CAST, 1102 SKILLSHOT_CAST
+# --------------------------------------------------------------------------
+
+POSITION_EVENT_PAYLOAD_SIZE = 22  # s2c 1046: [u32 eid][f32 x][u32 z][f32 y][u8 kind][3B 0]
+ABILITY_CAST_PAYLOAD_SIZE = 6    # c2s/s2c 1078: [u8 slot][5B 0]
+SKILLSHOT_CAST_PAYLOAD_SIZE = 22 # c2s 1102: [u32 caster][u32 target][f32 x][f32 z][f32 y][u8 slot][u8 flag]
+
+
+def build_position_event(eid: int, x: float, y: float, z: int = 0, kind: int = 0) -> bytes:
+    """s2c 1046 POSITION_EVENT (22 B) — ability impact, projectile, or AoE marker."""
+    return struct.pack(">IfIfB", eid, x, z, y, kind) + bytes(5)
+
+
+def build_ability_cast(slot: int) -> bytes:
+    """c2s/s2c 1078 ABILITY_CAST (6 B) — ability activation (0=A, 1=B, 2=Ult)."""
+    return struct.pack(">B", slot & 0xFF) + bytes(5)
+
+
+def parse_ability_cast(payload: bytes) -> int:
+    """Parse c2s 1078 ability slot index (0..2)."""
+    if len(payload) < 1:
+        raise ValueError("invalid 1078 payload")
+    return payload[0]
+
+
+def parse_skillshot_cast(payload: bytes) -> tuple[int, int, float, float, int, int]:
+    """Parse c2s 1102 skillshot/target cast: returns (caster, target, x, y, slot, flag)."""
+    if len(payload) < 22:
+        raise ValueError("invalid 1102 payload")
+    caster, target, x, z, y, slot, flag = struct.unpack_from(">IIfffBB", payload, 0)
+    return caster, target, x, y, slot, flag
+
+
+# --------------------------------------------------------------------------
+# Economy & Shop — 1081 SHOP_BUY, 1082 INVENTORY_SLOT, 1086 XP_TRICKLE, 1096 ABILITY_UPGRADE
+# --------------------------------------------------------------------------
+
+SHOP_BUY_PAYLOAD_SIZE = 14       # c2s 1081: [u32 eid][u32 item_id][6B 0]
+INVENTORY_SLOT_PAYLOAD_SIZE = 14 # s2c 1082: [u32 eid][u32 slot][6B 0]
+ABILITY_UPGRADE_PAYLOAD_SIZE = 6 # c2s 1096: [u32 ability_id][u16 0]
+XP_TRICKLE_PAYLOAD_SIZE = 22     # s2c 1086: [u32 eid][u32 src][f32 amount][u8 0x0c][u8 seq][u16 0][u32 0][u16 0]
+
+
+def parse_shop_buy(payload: bytes) -> tuple[int, int]:
+    """Parse c2s 1081 shop item purchase: returns (eid, item_id)."""
+    if len(payload) < SHOP_BUY_PAYLOAD_SIZE:
+        raise ValueError("invalid 1081 payload")
+    eid, item_id = struct.unpack_from(">II", payload, 0)
+    return eid, item_id
+
+
+def build_shop_buy(eid: int, item_id: int) -> bytes:
+    """c2s 1081 shop purchase payload (14 B): [u32 eid][u32 item_id][6B 0]."""
+    return struct.pack(">II", eid, item_id) + bytes(6)
+
+
+def build_inventory_slot(eid: int, slot: int) -> bytes:
+    """s2c 1082 inventory slot update (14 B): [u32 eid][u32 slot][6B 0]."""
+    return struct.pack(">II", eid, slot) + bytes(6)
+
+
+def parse_inventory_slot(payload: bytes) -> tuple[int, int]:
+    """Parse s2c 1082 inventory slot update: returns (eid, slot)."""
+    if len(payload) < INVENTORY_SLOT_PAYLOAD_SIZE:
+        raise ValueError("invalid 1082 payload")
+    eid, slot = struct.unpack_from(">II", payload, 0)
+    return eid, slot
+
+
+def build_xp_trickle(eid: int, amount: float = 3.594, seq: int = 0) -> bytes:
+    """s2c 1086 passive XP trickle (22 B): [u32 eid][u32 src][f32 amount][u8 0x0c][u8 seq][u16 0][u32 0][u16 0]."""
+    return struct.pack(">IIfBBHIH", eid, eid, amount, 0x0C, seq & 0xFF, 0, 0, 0)
+
+
+def parse_ability_upgrade(payload: bytes) -> int:
+    """Parse c2s 1096 ability upgrade: returns ability_id / slot."""
+    if len(payload) < 4:
+        raise ValueError("invalid 1096 payload")
+    return struct.unpack_from(">I", payload, 0)[0]
+
+
+def build_ability_upgrade(ability_id: int) -> bytes:
+    """c2s 1096 ability upgrade (6 B): [u32 ability_id][u16 0]."""
+    return struct.pack(">IH", ability_id, 0)
+
+

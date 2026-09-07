@@ -41,6 +41,8 @@ class Gateway:
         self.log = log
         self.relay = match_server.HeartbeatRelay(host, heartbeat_port, heartbeat_interval)
         self.matches = []          # spawned MatchServer instances
+        self.active_match = None   # currently active shared match
+        self._match_lock = threading.Lock()
         self.routes = []           # (backend_named, match_port) per client
         self._stop = threading.Event()
         self._listener = None
@@ -96,15 +98,24 @@ class Gateway:
         # client never speaks (2026-09-06 handshake decode, vgfull.pcap).
         conn.sendall(wire.frame(wire.ROUTE_ACK_BODY))
 
-        match = match_server.MatchServer(self.host, self.match_id, port=0,
-                                         log=lambda m: self.log(f"[match:{self.match_id[:8]}] {m}"))
-        match.start()
-        self.matches.append(match)
+        with self._match_lock:
+            if (self.active_match is None or self.active_match.is_stopped()
+                    or self.active_match.is_finished()):
+                upstream_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
+                match = match_server.MatchServer(upstream_host, self.match_id, port=0,
+                                                 log=lambda m: self.log(f"[match:{self.match_id[:8]}] {m}"))
+                match.start()
+                self.matches.append(match)
+                self.active_match = match
+            else:
+                match = self.active_match
+
         self.routes.append((backend, match.port))
         self.log(f"[gateway] {peer} routed to backend {backend!r} -> match port {match.port} "
                  f"(heartbeat relay on {self.relay.port})")
 
-        upstream = socket.create_connection((self.host, match.port), timeout=5)
+        upstream_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
+        upstream = socket.create_connection((upstream_host, match.port), timeout=5)
         self._pump(conn, upstream)
 
     def _pump(self, client_sock, match_sock):

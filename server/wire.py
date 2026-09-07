@@ -61,14 +61,24 @@ class OP:
     ENTITY_FLOAT = 1016
     DESPAWN = 1035
     TARGETLESS_CAST = 1041    # c2s, ff ff ff ff = null target
+    POSITION_EVENT = 1046     # s2c position-tagged event / ability impact (22 B)
+    TARGET_ACQUIRE = 1045     # s2c target/aggro event [u32 src][u32 tgt][u8 flag][5B 0]
+    ENTITY_POSE_3D = 1018     # s2c [eid][seq][f32 x][f32 height][f32 z][pad] (bot-measured)
     ENTITY_STAT = 1053
     COMBAT_DELTA = 1054
+    TARGET_ENTITY = 1060      # c2s target acquisition / basic attack intent [u32 target_eid][u16 0]
     PLAYER_TAG = 1055         # s2c world-init, one per player [u32][10B 0]
     HERO_BLOCK = 1011         # s2c per-hero 750 B block (header mapped; stats open)
     ENTITY_STATE = 1067
     ENTITY_SUBSTATE = 1068
     POSITION = 1070
+    ENTITY_CLEAR = 1072       # s2c clear target/state [u32 eid][u16 0]
     DESTROY = 1073
+    ABILITY_CAST = 1078       # c2s/s2c ability slot activation (0=A, 1=B, 2=Ult) [u8 slot][5B 0]
+    SKILLSHOT_CAST = 1102     # c2s targeted / skillshot cast (22 B)
+    SHOP_BUY = 1081           # c2s shop item purchase [u32 eid][u32 item_id][6B 0]
+    INVENTORY_SLOT = 1082     # s2c inventory slot update [u32 eid][u32 slot][6B 0]
+    ABILITY_UPGRADE = 1096    # c2s ability point upgrade [u32 ability_id][u16 0]
     LEVELUP_B = 1078          # c2s ability point, slot B
     ENTITY_PROP = 1086
     ENTITY_DATA = 1087

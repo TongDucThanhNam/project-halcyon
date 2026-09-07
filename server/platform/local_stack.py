@@ -110,7 +110,8 @@ def fsm_on_boot(answers_path: str = ANSWERS_PATH,
 
 
 def fsm_on_rpc(rpc_method: str, answers_path: str = ANSWERS_PATH,
-               gw_port: int | None = None) -> None:
+               gw_port: int | None = None,
+               match_host: str | None = None) -> None:
     """Drive the client's update-FSM from the RPC stream: the client polls
     `update` as its FSM driver, so the moment it sends joinLobby we flip
     `playing` (+host/port) — skipping matched_partners/accept screen, the
@@ -119,14 +120,24 @@ def fsm_on_rpc(rpc_method: str, answers_path: str = ANSWERS_PATH,
     if not _answers().get("_fsm_auto", True):
         return
     if rpc_method == "joinLobby":
+        # The port fallback must come from the SAME answers file this call
+        # rewrites — a caller may point answers_path at a scratch copy
+        # (tests) while the live file carries a different _gw_port.
+        try:
+            with open(answers_path, encoding="utf-8") as fh:
+                answers_cfg = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            answers_cfg = {}
+        port = gw_port if gw_port is not None \
+            else int(answers_cfg.get("_gw_port", 7100))
+        host = match_host if match_host is not None \
+            else answers_cfg.get("_match_host", "127.0.0.1")
         _fsm_update_state(
             answers_path,
-            {"state": "playing", "host": "127.0.0.1",
+            {"state": "playing", "host": host,
              "matchId": MATCH_ID},
-            gw_port=gw_port if gw_port is not None
-            else int(_answers().get("_gw_port", 7100)))
-        _log(f"FSM joinLobby -> update=playing (port "
-             f"{_answers().get('_gw_port', 7100)})")
+            gw_port=port)
+        _log(f"FSM joinLobby -> update=playing (host {host}, port {port})")
     elif rpc_method == "exitLobby":
         _fsm_update_state(answers_path, {"state": "menus"})
         _log("FSM exitLobby -> update=menus")
@@ -368,8 +379,20 @@ class TLSServer(ThreadingHTTPServer):
             raise
 
 
-def main() -> None:
+def main(argv=None) -> None:
+    import argparse
     import ssl
+
+    ap = argparse.ArgumentParser(description="Halcyon local platform stack (preauth + JSON-RPC + T2 gateway)")
+    ap.add_argument("--bind-host", default=None,
+                    help="IP to bind listeners to (default: _bind_host in answers.json or 0.0.0.0)")
+    ap.add_argument("--match-host", default=None,
+                    help="Host/IP returned to client in joinLobby playing state (default: _match_host or 127.0.0.1)")
+    ap.add_argument("--gw-port", type=int, default=None,
+                    help="Gateway port (default: _gw_port or 7100)")
+    ap.add_argument("--hb-port", type=int, default=None,
+                    help="Heartbeat port (default: _hb_port or 2112)")
+    args = ap.parse_args(argv)
 
     os.makedirs(STACK_DIR, exist_ok=True)
     if not os.path.exists(ANSWERS_PATH):
@@ -384,20 +407,31 @@ def main() -> None:
         with gw_log_lock, open(gw_log_path, "a", encoding="utf-8") as fh:
             fh.write(f"[{stamp}] {msg}\n")
 
-    # Gateway ports are configurable: a stale elevated copy of an older stack
-    # can still hold :7100/:2112 (observed 2026-09-06, PID survives taskkill
-    # without elevation) — move to 7101/2113 by setting _gw_port/_hb_port.
+    # Gateway ports and hosts are configurable:
     cfg = _answers()
-    gw = gateway.Gateway("127.0.0.1", port=int(cfg.get("_gw_port", 7100)),
+    bind_host = args.bind_host or cfg.get("_bind_host", "0.0.0.0")
+    match_host = args.match_host or cfg.get("_match_host", "127.0.0.1")
+    gw_port = args.gw_port if args.gw_port is not None else int(cfg.get("_gw_port", 7100))
+    hb_port = args.hb_port if args.hb_port is not None else int(cfg.get("_hb_port", 2112))
+
+    if args.match_host or args.bind_host:
+        if args.match_host:
+            cfg["_match_host"] = args.match_host
+        if args.bind_host:
+            cfg["_bind_host"] = args.bind_host
+        with open(ANSWERS_PATH, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=1)
+
+    gw = gateway.Gateway(bind_host, port=gw_port,
                          match_id=MATCH_ID,
-                         heartbeat_port=int(cfg.get("_hb_port", 2112)), log=_gwlog)
+                         heartbeat_port=hb_port, log=_gwlog)
     gw.start()
     fsm_on_boot(gw_port=gw.port)   # a stale `playing` answer must not poison boot
     print(f"[stack] FSM auto {'ON' if _answers().get('_fsm_auto', True) else 'OFF'} "
-          f"(boot=menus; joinLobby->playing:{gw.port}; exitLobby->menus)")
+          f"(boot=menus; joinLobby->playing:{gw.port} on {match_host}; exitLobby->menus)")
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", 80), Handler)
-        print(f"[stack] http://127.0.0.1:80 (all SEMC hosts) — log {LOG_PATH}")
+        httpd = ThreadingHTTPServer((bind_host, 80), Handler)
+        print(f"[stack] http://{bind_host}:80 (all SEMC hosts) — log {LOG_PATH}")
     except OSError as exc:
         # A stale (often elevated) holder of :80 keeps serving HTTP — but from
         # the SHARED hot-reloaded answers.json, so its replies stay correct.
@@ -406,7 +440,7 @@ def main() -> None:
         print(f"[stack] :80 unavailable ({exc!r}) — HTTP stays with the holder", flush=True)
     print(f"[stack] rpc journal {RPC_LOG_PATH}")
     print(f"[stack] answers {ANSWERS_PATH} (hot-reloaded)")
-    print(f"[stack] T2 gateway 127.0.0.1:{gw.port} + heartbeat :{gw.relay.port}")
+    print(f"[stack] T2 gateway {bind_host}:{gw.port} (announced: {match_host}) + heartbeat :{gw.relay.port}")
 
     cert = os.path.join(STACK_DIR, "platform_cert.pem")
     key = os.path.join(STACK_DIR, "platform_key.pem")
@@ -418,11 +452,11 @@ def main() -> None:
 
     try:
         if ctx is not None:
-            httpsd = TLSServer(("127.0.0.1", 443), Handler, ctx)
-            print("[stack] https://127.0.0.1:443 (platform RPC endpoint, TLS)", flush=True)
+            httpsd = TLSServer((bind_host, 443), Handler, ctx)
+            print(f"[stack] https://{bind_host}:443 (platform RPC endpoint, TLS)", flush=True)
         else:
-            httpsd = ThreadingHTTPServer(("127.0.0.1", 443), Handler)
-            print("[stack] http://127.0.0.1:443 (platform RPC endpoint, PLAIN)", flush=True)
+            httpsd = ThreadingHTTPServer((bind_host, 443), Handler)
+            print(f"[stack] http://{bind_host}:443 (platform RPC endpoint, PLAIN)", flush=True)
         threading.Thread(target=httpsd.serve_forever, daemon=True).start()
     except OSError as exc:
         # A stale elevated stack may still hold :443 — the client-facing
@@ -435,13 +469,13 @@ def main() -> None:
     # Every client-facing URL we control (preauth redirect body, platformUrl,
     # startSessionUrl, notifyUrl) therefore points at :8080/:8443, which only
     # the live stack binds.
-    alt = ThreadingHTTPServer(("127.0.0.1", 8080), Handler)
+    alt = ThreadingHTTPServer((bind_host, 8080), Handler)
     threading.Thread(target=alt.serve_forever, daemon=True).start()
-    print("[stack] http://127.0.0.1:8080 (alternate plain)", flush=True)
+    print(f"[stack] http://{bind_host}:8080 (alternate plain)", flush=True)
     if ctx is not None:
-        alt_tls = TLSServer(("127.0.0.1", 8443), Handler, ctx)
+        alt_tls = TLSServer((bind_host, 8443), Handler, ctx)
         threading.Thread(target=alt_tls.serve_forever, daemon=True).start()
-        print("[stack] https://127.0.0.1:8443 (alternate TLS)", flush=True)
+        print(f"[stack] https://{bind_host}:8443 (alternate TLS)", flush=True)
 
     try:
         if httpd is not None:

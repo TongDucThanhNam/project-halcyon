@@ -166,6 +166,50 @@ class TestJoinHandshakes(unittest.TestCase):
         self.assertEqual(block[741:745], b"\xff\xff\xff\xff")
         self.assertEqual(block[745], p.slot)         # corpus: slot 5 → 05
 
+    def test_unmeasured_hero_gets_donor_stat_run(self):
+        # Live evidence 2026-09-07: a zeroed stat run renders the hero but
+        # the client never enters its walk animation (glide, hero id 265).
+        # Unmeasured heroes reuse the measured donor run — no invented bytes.
+        donor = roster.HERO_INIT_DATA[roster.HERO_INIT_DONOR_ID]
+        data, donated = roster.hero_init_for(265)          # unmeasured id
+        self.assertTrue(donated)
+        self.assertEqual(data, donor)
+        data, donated = roster.hero_init_for(244)          # measured hero
+        self.assertFalse(donated)
+        p = roster.Player("Guest", 1, 1500, 265, 0x34BD643E, SESSION_UUID,
+                          False)
+        block = roster.build_hero_block(p)
+        off, hexbytes = next(iter(donor["runs"].items()))
+        raw = bytes.fromhex(hexbytes)
+        self.assertEqual(block[off:off + len(raw)], raw)   # donor run patched
+
+    def test_corpus_sweep_entries_shape(self):
+        # 2026-09-07: the capture corpus re-walk (vg3/vgc2s/vg5_final) added
+        # 8 more measured heroes. Every entry must carry non-empty runs, the
+        # per-hero 601 content GUID (stable across matches), and either a
+        # 7-pair timer list or None (init burst not captured — donor timers).
+        for hid in (245, 253, 257, 258, 268, 279, 429, 915):
+            entry = roster.HERO_INIT_DATA[hid]
+            self.assertTrue(entry["runs"], hid)
+            self.assertIn(601, entry["runs"], hid)
+            self.assertEqual(len(bytes.fromhex(entry["runs"][601])), 12, hid)
+            self.assertTrue(entry["timers"] is None
+                            or len(entry["timers"]) == 7, hid)
+        # heroes measured in several captures keep the same 601 GUID
+        self.assertEqual(roster.HERO_INIT_DATA[924]["runs"][601],
+                         "820dd5b366bfd50a09d11ecf")
+        self.assertEqual(roster.HERO_INIT_DATA[925]["runs"][601],
+                         "1e3304fc948685f56c371076")
+
+    def test_uncaptured_timers_entry_present(self):
+        # hero 258 has measured runs but its capture started after the 1162
+        # init burst — the entry exists with timers=None (donor timers are
+        # substituted by the server, see match_server._dump_world_to).
+        data, donated = roster.hero_init_for(258)
+        self.assertFalse(donated)
+        self.assertIsNone(data["timers"])
+        self.assertIn(601, data["runs"])
+
 
 class TestLockCommitAndWorldInit(unittest.TestCase):
     """Corpus post-lock shapes (match-1 ACK-precise trace, 2026-09-06)."""
