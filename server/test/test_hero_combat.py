@@ -2,8 +2,8 @@
 
 Verifies:
 - Hero basic attack on enemy entity (c2s 1060 -> pursuit -> s2c 1054 at 0.8s cadence).
-- Hero HP management and s2c 1053 type-6 emission.
-- Hero death chain (1073 DESTROY + 1067 dead state + 1162 respawn timer).
+- Hero HP management and s2c 1053 type-0 emission.
+- Hero death/countdown, delayed 1073 corpse hiding, then 1033 resurrection.
 - Hero respawn (resurrection at spawn base + 1070 teleport + HP restoration).
 - Minion retaliatory aggro against hero (aggro phan don).
 - Manual move tap cancels entity target (orb-walking / animation canceling).
@@ -11,7 +11,8 @@ Verifies:
 import struct
 import unittest
 
-from server import hero_movement, roster, wave, wire
+from server import hero_movement, roster, wave, wire, combat
+from types import SimpleNamespace
 
 
 class TestHeroCombat(unittest.TestCase):
@@ -42,27 +43,20 @@ class TestHeroCombat(unittest.TestCase):
 
     def test_hero_basic_attack_cadence(self):
         self.hero.x = 8.0
-        self.hero.y = 0.0
         self.hero.set_target_eid(4610)
-
-        frames = self.hero.step(dt=0.1, now=1.0, target_pos=(10.0, 0.0))
-        atk_frames = [f for f in frames if f[0] == wire.OP.COMBAT_DELTA]
-        self.assertEqual(len(atk_frames), 1)
-
-        src, tgt, delta = struct.unpack_from(">IIf", atk_frames[0][1], 0)
-        tail = atk_frames[0][1][12:]
-        self.assertEqual(src, 1500)
-        self.assertEqual(tgt, 4610)
-        self.assertAlmostEqual(delta, -70.0, places=2)
-        self.assertEqual(tail, roster.COMBAT_DELTA_HERO_TAIL)
-
-        frames2 = self.hero.step(dt=0.1, now=1.2, target_pos=(10.0, 0.0))
-        atk_frames2 = [f for f in frames2 if f[0] == wire.OP.COMBAT_DELTA]
-        self.assertEqual(len(atk_frames2), 0)
-
-        frames3 = self.hero.step(dt=0.1, now=1.85, target_pos=(10.0, 0.0))
-        atk_frames3 = [f for f in frames3 if f[0] == wire.OP.COMBAT_DELTA]
-        self.assertEqual(len(atk_frames3), 1)
+        engine = combat.BasicAttackEngine()
+        target = SimpleNamespace(eid=4610, team=2, x=10.0, y=0.0, is_alive=True)
+        # Movement owns pursuit; only the combat FSM may commit a hit.
+        frames = self.hero.step(.1, now=1.0, target_pos=(10.0, 0.0))
+        self.assertFalse(any(op == wire.OP.COMBAT_DELTA for op, _ in frames))
+        self.assertEqual(engine.step_attacker(self.hero, target, 1.0), [])
+        self.assertEqual(engine.step_attacker(self.hero, target, 1.2), [])
+        first = engine.step_attacker(self.hero, target, 1.24)
+        self.assertEqual(len(first), 1)
+        self.assertEqual((first[0].source_eid, first[0].target_eid, first[0].damage), (1500, 4610, 70.0))
+        self.assertEqual(engine.step_attacker(self.hero, target, 1.79), [])
+        self.assertEqual(engine.step_attacker(self.hero, target, 1.8), [])
+        self.assertEqual(len(engine.step_attacker(self.hero, target, 2.04)), 1)
 
     def test_orb_walk_cancels_target(self):
         self.hero.set_target_eid(4610)
@@ -81,7 +75,7 @@ class TestHeroCombat(unittest.TestCase):
         eid, val, typ = struct.unpack_from(">IfB", stat_frames[0][1], 0)
         self.assertEqual(eid, 1500)
         self.assertAlmostEqual(val, -100.0, places=2)
-        self.assertEqual(typ, 6)
+        self.assertEqual(typ, roster.STAT_HEALTH)
 
     def test_hero_death_and_respawn_cycle(self):
         frames = self.hero.apply_damage(740.0, attacker_eid=4610, now=10.0)
@@ -90,17 +84,19 @@ class TestHeroCombat(unittest.TestCase):
 
         opcodes = [f[0] for f in frames]
         self.assertNotIn(wire.OP.DESTROY, opcodes)
-        self.assertIn(wire.OP.ENTITY_STATE, opcodes)
-        self.assertIn(wire.OP.TIMER_TICK, opcodes)
+        self.assertIn(wire.OP.ENTITY_DEATH, opcodes)
+        self.assertIn(wire.OP.RESPAWN_TIMER, opcodes)
 
-        tframe = next(f[1] for f in frames if f[0] == wire.OP.TIMER_TICK)
-        eid, inst, unk, timer = struct.unpack_from(">IIHf", tframe, 0)
+        tframe = next(f[1] for f in frames if f[0] == wire.OP.RESPAWN_TIMER)
+        eid, timer = struct.unpack_from(">If", tframe, 0)
         self.assertEqual(eid, 1500)
-        self.assertEqual(inst, 0xb855d752)
         self.assertAlmostEqual(timer, 6.0, places=2)
 
         self.assertEqual(self.hero.set_target(10.0, 10.0), [])
-        self.assertEqual(self.hero.step(dt=1.0, now=12.0), [])
+        corpse_frames = self.hero.step(dt=1.0, now=12.0)
+        self.assertEqual(corpse_frames, [(1073, roster.build_destroy(self.hero.eid))])
+        self.assertFalse(self.hero.is_alive)
+        self.assertEqual(self.hero.step(dt=.1, now=12.1), [])
 
         respawn_frames = self.hero.step(dt=0.1, now=16.1)
         self.assertTrue(self.hero.is_alive)
@@ -110,7 +106,8 @@ class TestHeroCombat(unittest.TestCase):
 
         r_ops = [f[0] for f in respawn_frames]
         self.assertIn(wire.OP.POSITION, r_ops)
-        self.assertIn(wire.OP.ENTITY_STAT, r_ops)
+        self.assertIn(wire.OP.ENTITY_RESPAWN, r_ops)
+        self.assertNotIn(wire.OP.ENTITY_STAT, r_ops)
 
 
 class TestMinionRetaliation(unittest.TestCase):
@@ -128,9 +125,16 @@ class TestMinionRetaliation(unittest.TestCase):
         self.assertEqual(m_right.target_hero, hero)
 
         frames = d.pump(now=1.0, hero=hero)
+        self.assertIn((1045, struct.pack('>IIB', m_right.eid, hero.eid, 0) + bytes(5)), frames)
+        self.assertFalse(any(op == wire.OP.COMBAT_DELTA for op, _ in frames))
+        self.assertEqual(hero.hp, initial_hero_hp)
+        before_contact = d.pump(now=1.499999, hero=hero)
+        self.assertFalse(any(op == wire.OP.COMBAT_DELTA for op, _ in before_contact))
+        self.assertEqual(hero.hp, initial_hero_hp)
+        frames = d.pump(now=1.5, hero=hero)
         c_frames = [f for f in frames if f[0] == wire.OP.COMBAT_DELTA]
         self.assertTrue(any(
-            struct.unpack_from(">II", f[1], 0) == (m_right.eid, hero.eid)
+            struct.unpack_from(">II", f[1], 0) == (hero.eid, m_right.eid)
             for f in c_frames
         ))
         self.assertAlmostEqual(hero.hp, initial_hero_hp - roster.MINION_ATTACK_DAMAGE)

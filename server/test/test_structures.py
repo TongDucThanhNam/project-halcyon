@@ -4,9 +4,9 @@ Verifies:
   - 12 static structures initialized (10 turrets + 2 Vain crystals).
   - Turret progression gates (Outer -> Middle -> Base -> Vain Turrets -> Crystal).
   - Damage application and measured death chain (1068/1067/1054 overkill/1072/1073/1035).
-  - Turret aggro acquisition (1045 flag 1), drop (1045 target ffffffff flag 0), attack (1054).
+  - Turret acquisition (action 1), shot (0), self release/idle (2/3), and damage.
   - Vain crystal destruction triggers win condition and ends match.
-  - 1010 full updates generated with (hp, max_hp) variant.
+  - Distinct native 126-byte creation and 122-byte HP snapshot forms.
 """
 import struct
 import unittest
@@ -14,6 +14,7 @@ import unittest
 from server import roster, wire
 from server.hero_movement import HeroMovement
 from server.structures import Structure, StructureManager
+from server.test.test_native_actor_spawn import original_native_catalog
 
 
 class TestStructures(unittest.TestCase):
@@ -32,7 +33,8 @@ class TestStructures(unittest.TestCase):
         self.assertEqual(self.mgr.structures[3539].max_hp, 2500.0)
         self.assertEqual(self.mgr.structures[3540].max_hp, 3000.0)
         self.assertEqual(self.mgr.structures[3541].max_hp, 3500.0)
-        self.assertEqual(self.mgr.structures[3542].max_hp, 5000.0)
+        # Native archetype372 snapshots consistently identify 3000 maximum HP.
+        self.assertEqual(self.mgr.structures[3542].max_hp, 3000.0)
         self.assertEqual(self.mgr.structures[3544].max_hp, 10000.0)
 
     def test_progression_gates(self):
@@ -63,6 +65,8 @@ class TestStructures(unittest.TestCase):
 
         # Destroy one Vain Turret (3542)
         self.mgr.structures[3542].is_alive = False
+        self.assertFalse(self.mgr.is_vulnerable(3544))
+        self.mgr.structures[3543].is_alive = False
         self.assertTrue(self.mgr.is_vulnerable(3544))
 
     def test_damage_and_measured_death_chain(self):
@@ -71,7 +75,7 @@ class TestStructures(unittest.TestCase):
         self.assertEqual(len(frames), 1)
         op, payload = frames[0]
         self.assertEqual(op, wire.OP.COMBAT_DELTA)
-        src, tgt, delta = struct.unpack_from(">IIf", payload, 0)
+        tgt, src, delta = struct.unpack_from(">IIf", payload, 0)
         self.assertEqual(src, 1500)
         self.assertEqual(tgt, 3539)
         self.assertEqual(delta, -500.0)
@@ -83,28 +87,14 @@ class TestStructures(unittest.TestCase):
         self.assertFalse(self.mgr.structures[3539].is_alive)
         self.assertEqual(self.mgr.structures[3539].hp, 0.0)
 
-        # Check death chain opcodes
+        # Natural match-six deaths retain the actor and attribute the killer.
         ops = [op for op, _ in death_frames]
         expected_ops = [
-            wire.OP.COMBAT_DELTA,     # normal final hit (-2000.0)
-            wire.OP.ENTITY_SUBSTATE,   # 1068 (02 03)
-            wire.OP.ENTITY_STATE,      # 1067 state 02 01
-            wire.OP.ENTITY_STATE,      # 1067 flag 02 00
-            wire.OP.ENTITY_SUBSTATE,   # 1068 (02 02)
-            wire.OP.COMBAT_DELTA,     # 1054 overkill (-10000.0)
-            wire.OP.ENTITY_SUBSTATE,   # 1068 (00 01)
-            wire.OP.ENTITY_CLEAR,      # 1072 clear
-            wire.OP.DESTROY,           # 1073 destroy
-            wire.OP.DESPAWN,           # 1035 despawn
+            wire.OP.COMBAT_DELTA,
+            wire.OP.ENTITY_DEATH,
         ]
         self.assertEqual(ops, expected_ops)
-
-        # Verify overkill frame is -10000.0
-        overkill_payload = death_frames[5][1]
-        o_src, o_tgt, o_delta = struct.unpack_from(">IIf", overkill_payload, 0)
-        self.assertEqual(o_src, 3539)
-        self.assertEqual(o_tgt, 3539)
-        self.assertEqual(o_delta, -10000.0)
+        self.assertEqual(death_frames[-1][1], struct.pack(">II6x", 3539, 1500))
 
     def test_turret_aggro_acquisition_and_attack(self):
         # Place Team 1 hero near Team 2 Outer turret (3539 at x=17.06, y=1.93)
@@ -126,7 +116,7 @@ class TestStructures(unittest.TestCase):
 
         # Check combat delta frame
         atk_payload = [p for op, p in frames if op == wire.OP.COMBAT_DELTA][0]
-        a_src, a_tgt, a_delta = struct.unpack_from(">IIf", atk_payload, 0)
+        a_tgt, a_src, a_delta = struct.unpack_from(">IIf", atk_payload, 0)
         self.assertEqual(a_src, 3539)
         self.assertEqual(a_tgt, 1500)
         self.assertEqual(a_delta, -160.0)
@@ -140,8 +130,10 @@ class TestStructures(unittest.TestCase):
         drop_payload = [p for op, p in drop_frames if op == wire.OP.TARGET_ACQUIRE][0]
         d_src, d_tgt, d_flag = struct.unpack_from(">IIB", drop_payload, 0)
         self.assertEqual(d_src, 3539)
-        self.assertEqual(d_tgt, 0xFFFFFFFF)  # target cleared
-        self.assertEqual(d_flag, 0)
+        self.assertEqual(d_tgt, 3539)
+        self.assertEqual(d_flag, 2)
+        self.assertEqual([struct.unpack_from(">IIB", p) for op, p in drop_frames
+                          if op == wire.OP.TARGET_ACQUIRE], [(3539, 3539, 2), (3539, 3539, 3)])
         self.assertIsNone(self.mgr.structures[3539].current_target_eid)
 
     def test_vain_crystal_win_condition(self):
@@ -150,6 +142,7 @@ class TestStructures(unittest.TestCase):
         self.mgr.structures[3540].is_alive = False
         self.mgr.structures[3541].is_alive = False
         self.mgr.structures[3542].is_alive = False
+        self.mgr.structures[3543].is_alive = False
 
         self.assertFalse(self.mgr.match_finished)
         self.assertIsNone(self.mgr.winner_team)
@@ -160,19 +153,24 @@ class TestStructures(unittest.TestCase):
         self.assertEqual(self.mgr.winner_team, 1)  # Blue team (Team 1) wins!
         self.assertFalse(self.mgr.structures[3544].is_alive)
 
-        # Verify death frames include 1073 and 1035
+        # Crystal destruction starts its animation, then keeps the actor dead.
         ops = [op for op, _ in frames]
-        self.assertIn(wire.OP.DESTROY, ops)
-        self.assertIn(wire.OP.DESPAWN, ops)
+        self.assertEqual(ops, [wire.OP.COMBAT_DELTA, wire.OP.CRYSTAL_DESTROYED, wire.OP.ENTITY_DEATH])
+        self.assertEqual(frames[1][1], bytes(6))
+        self.assertEqual(frames[2][1], struct.pack(">II6x", 3544, 1500))
 
     def test_spawn_1010_frames(self):
-        frames = self.mgr.get_spawn_1010_frames(tick_base=3539)
+        frames = self.mgr.get_spawn_1010_frames(tick_base=3539, catalog=original_native_catalog())
         self.assertEqual(len(frames), 12)
         for op, payload in frames:
             self.assertEqual(op, wire.OP.ENTITY_FULL_UPDATE)
-            self.assertEqual(len(payload), roster.ENTITY_FULL_UPDATE_HP_PAYLOAD_SIZE)
-            eid, tick = struct.unpack_from(">II", payload, 0)[0], struct.unpack_from(">I", payload, 8)[0]
+            self.assertEqual(len(payload), 126)
+            archetype, entity_class, eid = struct.unpack_from(">III", payload)
             self.assertIn(eid, self.mgr.structures)
+            self.assertEqual(archetype, self.mgr.archetype(self.mgr.structures[eid]))
+            self.assertEqual(entity_class, 0xC10B41DA)
+        for op, payload in self.mgr.get_state_1010_frames():
+            self.assertEqual(len(payload), 122)
             hp, max_hp = struct.unpack_from(">ff", payload, 36)
             self.assertEqual(hp, max_hp)
 

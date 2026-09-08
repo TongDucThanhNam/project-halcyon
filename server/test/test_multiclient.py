@@ -6,7 +6,7 @@ Verifies:
 - Hero pick and lock synchronized across both clients in s2c 1113 snapshots.
 - Ready barrier: both clients send 1134 and 1137 before world ticks.
 - Multi-hero simulation: Client 1 and Client 2 can move independently; both receive 1070 position updates for both heroes.
-- PvP Combat: Client 1 attacks Client 2 (c2s 1060); both receive s2c 1054 combat deltas and s2c 1053 type-6 HP updates.
+- PvP Combat: Client 1 attacks Client 2 (c2s 1060); both receive s2c 1054 combat deltas and s2c 1053 type-0 HP updates.
 - Reconnection: Client 2 disconnects and reconnects with same UUID; receives world state dump and resumes match stream.
 """
 import os
@@ -155,33 +155,29 @@ class TestMultiClientE2E(unittest.TestCase):
         ms = self.gw.matches[-1]
         sim1 = ms.session.hero_sims[1500]
         sim2 = ms.session.hero_sims[1517]
-        sim1.x = sim2.x - 2.0
-        sim1.y = sim2.y
+        sim1.teleport(-5.0, 5.0)
+        sim2.teleport(-3.5, 5.0)
 
         # Client 1 targets Client 2 (eid 1517) via c2s 1060
         c1.sendall(wire.encode_message(self.cipher, wire.OP.TARGET_ENTITY, struct.pack(">I", 1517)))
 
-        # Wait for COMBAT_DELTA and ENTITY_STAT on both clients
+        # Each client receives the same victim-first HP-changing combat event.
+        # A separate 1053 HP delta would double-subtract that hit on the client.
+        hp_before = sim2.hp
         def await_combat(sock):
-            got_delta = False
-            got_stat = False
             deadline = time.monotonic() + 4.0
             while time.monotonic() < deadline:
                 op, p = self._read_message(sock, timeout=deadline - time.monotonic())
                 if op == wire.OP.COMBAT_DELTA:
-                    src, tgt, dmg = struct.unpack_from(">IIf", p, 0)
+                    tgt, src, dmg = struct.unpack_from(">IIf", p, 0)
                     if src == 1500 and tgt == 1517:
-                        got_delta = True
-                elif op == wire.OP.ENTITY_STAT:
-                    eid = struct.unpack_from(">I", p, 0)[0]
-                    if eid == 1517:
-                        got_stat = True
-                if got_delta and got_stat:
-                    return True
+                        self.assertLess(dmg, 0)
+                        return True
             return False
 
         self.assertTrue(await_combat(c1))
         self.assertTrue(await_combat(c2))
+        self.assertLess(sim2.hp, hp_before)
 
     def test_world_entry_second_connection_reconnects_same_slot(self):
         """The 4.13 client opens a SECOND match connection for world entry

@@ -86,6 +86,7 @@ in the leaf; this entry point holds routes and brief status only.
 | Backend / gateway / relay architecture | `Docs/Teardown/vainglory-netcode-backend.md` (§14) | `vainglory-protocol-wire.md` §15.1–15.2 for the gateway route-request + heartbeat |
 | Mobile CE local-server startup, LDPlayer routing/TLS, or lobby entry | `Docs/Teardown/vainglory-mobile-local-stack.md` | `vainglory-runtime-reconstruction.md` only for additional emulator capture methods |
 | Evaluate external matchmaking/T3 advice or community-source leads | `Docs/Teardown/vainglory-implementation-brief-review.md` | Follow only the source or mechanics leaf needed for the claim under review |
+| Community ecosystem tricks & leads (VGNA, HackedGlory, VGReborn, Real Data strategy) | `Docs/Teardown/vainglory-community-ecosystem-tricks.md` | `vainglory-implementation-brief-review.md` for historical lead audit |
 | Legacy PC menu replies, watchdog errors, or date workaround | `Docs/Teardown/vainglory-pc-client-internals.md` | The mobile leaf above when validating the target CE client |
 | What is known vs. what is the ceiling (which layer is "Hiểu" and which is not) | `Docs/Teardown/vainglory-knowledge-ledger.md` | The `## Ceiling` row 10 (server sim interior) |
 | Gameplay rule layer: combat math, wave/jungle timers, HP tiers, economy | `Docs/Teardown/vainglory-mechanics-matrix.md` (§8/§14/§19, `## Offline combat-math pass`) | `vainglory-3v3-map-structure.md` for placement/anchors |
@@ -94,6 +95,7 @@ in the leaf; this entry point holds routes and brief status only.
 | Store format / container / cipher | `Docs/Teardown/vainglory-store-format.md` | `Tools/Teardown/` scripts |
 | How to capture / reproduce evidence on the emulator | `Docs/Teardown/vainglory-runtime-reconstruction.md` | `vainglory-artifact-reproduction.md` for exact counts + corrections |
 | Building the deterministic server-authoritative sim | `Docs/Research/veilbound-multiplayer-design.md` (input-stream model) | the determinism spike under `Docs/Research/spikes/determinism/` |
+| Current Tier 1 solo sandbox implementation and acceptance | `Docs/Plan/solo-sandbox.md` | `solo-sandbox-acceptance-status.md` and the subsystem leaf linked for the scenario |
 | After Phase 0: closing T1 (matchmaking schema) and opening the T3 thin slice; RE-asset→server mapping, determinism decisions, open gaps | `Docs/Plan/next-steps.md` | the Teardown leaves it cites per row |
 
 When no row matches, stay with this file and the source. Do not load docs "just
@@ -108,9 +110,9 @@ authoritative**. To self-host we must build three tiers:
 
 | Tier | What it is | RE status | Difficulty |
 |---|---|---|---|
-| **T1 Front door** | preauth bootstrap + platform RPC (TLS JSON-RPC menu/auth/matchmaking) | **Partial** — menu tier verified (PC + mobile CE); lobby/matchmaking schema remains open — discovery plan in `Docs/Plan/next-steps.md` §1 | Open |
+| **T1 Front door** | preauth bootstrap + platform RPC (TLS JSON-RPC menu/auth/matchmaking) | **Local CE flow verified** — menu, draft and match entry support the solo sandbox; broader platform/PvP completeness remains separate | Open |
 | **T2 Gateway + match server** | frame grammar `[u16 BE len][body]`, Blowfish ECB per-match key, route-request greeting, join handshake, heartbeat | **Closed** (`mock_gcp.py` round-trip proved encode/decode) | Easy |
-| **T3 Authoritative simulation** | run the actual game logic: movement, ability effects, minion/jungle AI, turret aggro, vision/FoW, XP/gold, death/respawn, win/lose — and emit the event stream | **The ceiling** — not recovered; must be reimplemented | Hard |
+| **T3 Authoritative simulation** | run the actual game logic: movement, ability effects, minion/jungle AI, turret aggro, vision/FoW, XP/gold, death/respawn, win/lose — and emit the event stream | **Solo acceptance reopened** — `Docs/Plan/solo-sandbox.md`; operator testing exposed missing Skye skills, projectile visuals and defective minion movement | Hard |
 
 **T3 is the real work.** T2 is the provable warm-up. The rule-layer *numbers*
 (kit 97.5 %, combat `D = W/(1+A/100)`, wave 60 s, HP tiers 2500/3000/3500/5000/
@@ -133,16 +135,18 @@ are not, and must be derived or rebuilt.
 
 ## Current phase
 
-Phase 0 is **closed** (acceptance met 2026-09-05: 24/24 tests, corpus
-decode, local gateway + match e2e — `Docs/Plan/phase0.md`). The T1 menu
-tier is verified on both PC and mobile CE; the exchange after `joinLobby`
-is still unknown, and T3 has no code yet.
+Phase 0 is **closed** (2026-09-05; `Docs/Plan/phase0.md`). The current
+gameplay implementation and acceptance record is **`Docs/Plan/solo-sandbox.md`**.
+**Acceptance is reopened:** the operator's Skye test has unavailable skill
+upgrades, missing basic-projectile visuals and defective minion movement.
+The 758-test baseline and two deterministic 960-second replays do not prove
+these client behaviors; the previous completion claim was too broad.
+Consult the linked leaf for active defects and evidence. The operator's "Tier 1" names solo gameplay
+acceptance, distinct from the platform T1 tier in the architecture above.
 
-**The active brief is `Docs/Plan/next-steps.md`**: close T1 via the
-matchmaking-schema discovery plan (§1, HackedGlory schema-sheet audit
-first), open the T3 movement thin slice with entity-spawn-opcode
-discovery running in parallel (§2), under the binding determinism
-decisions (§3).
+`Docs/Plan/next-steps.md` retains the historical Phase 0 hand-off and design
+decisions; its zero-simulation and unknown-match-entry statements are
+superseded by the current implementation record.
 
 ## Report discipline
 

@@ -10,7 +10,7 @@ from server.hero_movement import HeroMovement
 class TestHeroMovement(unittest.TestCase):
     def test_walk_single_target_arrives_and_stops(self):
         hero = HeroMovement(eid=1500, team=1)
-        self.assertEqual((hero.x, hero.y), (roster.SPAWN_X, roster.SPAWN_Y))
+        self.assertEqual(hero.position_fixed, (-78180000, 880000))
         self.assertFalse(hero.is_moving)
 
         target = (roster.SPAWN_X + 2.0, roster.SPAWN_Y)

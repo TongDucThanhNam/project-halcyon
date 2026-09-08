@@ -88,7 +88,7 @@ class TestBotAI(unittest.TestCase):
         self.assertTrue(len(shop_buys) > 0)
         eid, item_id = roster.parse_shop_buy(shop_buys[0])
         self.assertEqual(eid, 1515)
-        self.assertEqual(item_id, 504)  # Heavy Steel (cost 1150)
+        self.assertEqual(item_id, economy.ITEMS_BY_KEY["heavy_steel"].id)
 
 
 if __name__ == "__main__":

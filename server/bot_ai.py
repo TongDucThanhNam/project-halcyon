@@ -189,11 +189,10 @@ class BotAI:
 
         # 6. Purchasing items if gold available
         if econ is not None:
-            if econ.gold >= 3100.0 and econ.can_buy_item(487):
-                intents.append((wire.OP.SHOP_BUY, roster.build_shop_buy(hero.eid, 487)))
-            elif econ.gold >= 1150.0 and econ.can_buy_item(504):
-                intents.append((wire.OP.SHOP_BUY, roster.build_shop_buy(hero.eid, 504)))
-            elif econ.gold >= 300.0 and econ.can_buy_item(467):
-                intents.append((wire.OP.SHOP_BUY, roster.build_shop_buy(hero.eid, 467)))
+            for name in ("sorrowblade", "heavy_steel", "weapon_blade"):
+                item = economy.ITEMS_BY_KEY[name]
+                if item.id is not None and econ.can_buy_item(item.id):
+                    intents.append((wire.OP.SHOP_BUY, roster.build_shop_buy(hero.eid, item.id)))
+                    break
 
         return intents

@@ -287,8 +287,22 @@ def build_hero_block(p: Player) -> bytes:
         for off, hexbytes in hero_data["runs"].items():
             raw = bytes.fromhex(hexbytes)
             body[off:off + len(raw)] = raw
+    if donated:
+        # These fields are independently decoded in the captured 1011 runs.
+        # An unrecorded selection must receive its own numeric stats even while
+        # the remaining presentation fields still use the bootstrap template.
+        from .hero_balance import HERO_NAMES, STATS
+        stats = STATS.get(HERO_NAMES.get(p.hero_id))
+        if stats is not None:
+            values = {42: stats.health_base, 46: stats.health_base,
+                      74: stats.move_speed, 122: stats.energy_base, 126: stats.energy_base,
+                      190: stats.armor_base, 202: stats.shield_base, 214: stats.weapon_base}
+            for offset, value in values.items():
+                struct.pack_into(">f", body, offset, value)
     # A hero outside the measured corpus roster reuses the donor's measured
     # stat run (see hero_init_for) — measured bytes, no invented values.
+    for offset, value in ((294, 1.0), (314, 1.0), (318, 0.0), (322, 68.0)):
+        struct.pack_into(">f", body, offset, value)
     body[741:745] = b"\xff\xff\xff\xff"
     body[745] = p.slot                          # corpus: slot 5 → 05
     return bytes(body)
@@ -1000,14 +1014,6 @@ def build_entity_stat(eid: int, value: float, attr: int, w2: int = 0) -> bytes:
     return struct.pack(">IfHHH", eid, value, attr, w2, 0)
 
 
-def build_entity_prop(eid: int, attr: int, seq: int, val: int) -> bytes:
-    """s2c 1086 — [eid][eid][u8 attr][u24 0][u16 seq][u16 val][u32 0][u16 0], 22 B
-    (corpus 2026-09-07: hero keepalive 0x45→253 @0.3 s, 0x3e→251 @0.6 s;
-    seq is a global delta counter, monotonic)."""
-    return struct.pack(">II", eid, eid) + bytes([attr, 0, 0, 0]) + \
-        struct.pack(">HHIHH", seq, val, 0, 0, 0)
-
-
 def build_entity_pose_3d(eid: int, seq: int, x: float, height: float, z: float) -> bytes:
     """s2c 1018 — [eid][u16 0][u16 seq][f32 x][f32 height][f32 z][u16 0], 22 B
     (layout measured on bot heroes 2026-09-07; z ≈ −1070.y for our spawn
@@ -1019,7 +1025,10 @@ def parse_move(payload: bytes) -> tuple[float, float]:
     """c2s 1012 — move command to an absolute map target."""
     if len(payload) != MOVE_PAYLOAD_SIZE or payload[8:] != bytes(6):
         raise ValueError("invalid 1012 move payload")
-    return struct.unpack_from(">ff", payload)
+    point = struct.unpack_from(">ff", payload)
+    if not all(math.isfinite(value) for value in point):
+        raise ValueError("nonfinite move target")
+    return point
 
 
 def build_move(x: float, y: float) -> bytes:
@@ -1071,6 +1080,8 @@ def build_entity_full_update(eid: int, tick: int, x: float, y: float, seq: int,
     world tick and the per-1010 seq byte. hp=None emits the 126-B no-HP
     variant; hp=(current, max) emits the 122-B HP variant (the shape minions
     use — hero entities never receive 1010 in the corpus)."""
+    if type(seq) is not int or not 0 <= seq <= 255:
+        raise ValueError("compact actor slot must fit one byte")
     cos, sin = facing
     if hp is None:
         body = bytearray(ENTITY_FULL_UPDATE_PAYLOAD_SIZE)
@@ -1186,7 +1197,9 @@ def build_entity_state(eid: int, side: int, state: int) -> bytes:
 
 def build_move_intent(seq: int, x: float, y: float) -> bytes:
     """s2c 1016 — the movement target the entity walks toward (14 B)."""
-    return struct.pack(">Bff", seq & 0xFF, x, y) + bytes(5)
+    if type(seq) is not int or not 0 <= seq <= 255:
+        raise ValueError("compact actor slot must fit one byte")
+    return struct.pack(">Bff", seq, x, y) + bytes(5)
 
 
 # -- combat events (T3 slice 3; measured on vg5, measure_combat*.py) --------
@@ -1267,18 +1280,28 @@ HERO_ATTACK_COOLDOWN = 0.8       # attack cadence (s)
 HERO_RESPAWN_DURATION = 6.0      # level 1-2 respawn timer (s)
 
 HERO_STAT_PAYLOAD_SIZE = 14      # s2c 1053: [u32 eid][f32 val][u8 type][5B tail]
+STAT_HEALTH = 0
+STAT_ENERGY = 2
+STAT_GOLD = 6
+STAT_EXPERIENCE = 8
 TARGET_ENTITY_PAYLOAD_SIZE = 6   # c2s 1060: [u32 target_eid][u16 0]
 
 
 def build_combat_delta(src_eid: int, tgt_eid: int, delta: float,
                        tail: bytes = COMBAT_DELTA_TAIL) -> bytes:
-    """s2c 1054 COMBAT_DELTA — the wire's damage event."""
-    return struct.pack(">IIf", src_eid, tgt_eid, delta) + tail
+    """s2c 1054: victim first, attacker second (mechanics matrix section 19.1)."""
+    return struct.pack(">IIf", tgt_eid, src_eid, delta) + tail
 
 
-def build_hero_stat(eid: int, value: float, stat_type: int = 6,
-                    tail: bytes = bytes(5)) -> bytes:
-    """s2c 1053 HERO_STAT (14 B) — client HUD stat delta (type 6 = HP)."""
+def build_hero_stat(eid: int, value: float, stat_type: int = STAT_HEALTH,
+                    tail: bytes | None = None) -> bytes:
+    """1053 delta: health 0, energy 2, gold 6, experience 8.
+
+    The no-source HP/energy/XP deltas set the measured second flag to 1;
+    gold deltas leave it 0. Explicit tails preserve corpus variants.
+    """
+    if tail is None:
+        tail = bytes([0, 1, 0, 0, 0]) if stat_type in (0, 2, 8) else bytes(5)
     return struct.pack(">IfB", eid, value, stat_type) + tail
 
 
@@ -1334,6 +1357,8 @@ def build_minion_spawn_1010(spawner_eid: int, minion_eid: int, x: float, y: floa
     the B waypoint; facing (0, 1); z ground. Team-dependent tail bytes are
     measured per side: +96..98 and +119..121 (right 00 00 01 / 01 01 02,
     left 00 01 00 / 01 00 01)."""
+    if type(seq) is not int or not 0 <= seq <= 255:
+        raise ValueError("compact actor slot must fit one byte")
     body = bytearray(ENTITY_FULL_UPDATE_PAYLOAD_SIZE)
     struct.pack_into(">I", body, 0, spawner_eid)
     struct.pack_into(">I", body, 4, LANE_MINION_CLASS)
@@ -1355,14 +1380,13 @@ def build_minion_spawn_1010(spawner_eid: int, minion_eid: int, x: float, y: floa
 
 
 # --------------------------------------------------------------------------
-# 1162 timer tick — [u32 eid][u32 tag][u16 0][f32 value][8B tail]
+# 1162 timer tick — [u32 eid][u32 tag][f32 remaining][f32 duration][6B state]
 # --------------------------------------------------------------------------
 
-def build_timer_tick(eid: int, tag: int, value: float = 0.0,
-                     tail: bytes = bytes(8)) -> bytes:
-    if len(tail) != 8:
-        raise ValueError("1162 tail must be 8 bytes")
-    return struct.pack(">IIHf", eid, tag, 0, value) + tail
+def build_timer_tick(eid: int, tag: int, remaining: float = 0.0,
+                     duration: float = 0.0, state: bytes = bytes(6)) -> bytes:
+    from .cooldown_wire import TimerTick
+    return TimerTick(eid, tag, remaining, duration, state).encode()
 
 
 # --------------------------------------------------------------------------
@@ -1384,6 +1408,39 @@ def build_ability_cast(slot: int) -> bytes:
     return struct.pack(">B", slot & 0xFF) + bytes(5)
 
 
+def parse_targetless_cast(payload: bytes) -> tuple[int | None, int, int]:
+    """1041 targeted/self action, including the measured slot byte."""
+    if len(payload) != 6:
+        raise ValueError("invalid 1041 payload")
+    target, slot, flags = struct.unpack(">IBB", payload)
+    return (None if target == 0xffffffff else target), slot, flags
+
+
+def parse_ground_cast(payload: bytes) -> tuple[float, float, int, int]:
+    """1042 ground action; height is retained by the renderer, not the 2D sim."""
+    if len(payload) != 14:
+        raise ValueError("invalid 1042 payload")
+    x, height, y, slot, flags = struct.unpack(">fffBB", payload)
+    if not all(math.isfinite(value) for value in (x, height, y)):
+        raise ValueError("nonfinite ground cast")
+    return x, y, slot, flags
+
+
+def build_item_inventory(eid: int, item_id: int, instance_id: int) -> bytes:
+    """1085 equipment insertion (vgfull initial purchases, frame 2295)."""
+    return struct.pack(">IIIH", eid, item_id, instance_id, 0)
+
+
+def build_item_remove(eid: int, instance_id: int) -> bytes:
+    """1099 consumed equipment instance (vg5_final, 148.929 s)."""
+    return struct.pack(">II", eid, instance_id) + bytes.fromhex("000100000000")
+
+
+def build_entity_attribute(eid: int, delta: float, attribute_id: int) -> bytes:
+    """1052 equipment attribute delta; distinct from 1053 resource deltas."""
+    return struct.pack(">IIfBB", eid, 0xffffffff, delta, attribute_id, 1) + bytes(6)
+
+
 def parse_ability_cast(payload: bytes) -> int:
     """Parse c2s 1078 ability slot index (0..2)."""
     if len(payload) < 1:
@@ -1400,13 +1457,11 @@ def parse_skillshot_cast(payload: bytes) -> tuple[int, int, float, float, int, i
 
 
 # --------------------------------------------------------------------------
-# Economy & Shop — 1081 SHOP_BUY, 1082 INVENTORY_SLOT, 1086 XP_TRICKLE, 1096 ABILITY_UPGRADE
+# Economy & Shop — purchase helpers; native item use lives in item_input.py
 # --------------------------------------------------------------------------
 
 SHOP_BUY_PAYLOAD_SIZE = 14       # c2s 1081: [u32 eid][u32 item_id][6B 0]
 INVENTORY_SLOT_PAYLOAD_SIZE = 14 # s2c 1082: [u32 eid][u32 slot][6B 0]
-ABILITY_UPGRADE_PAYLOAD_SIZE = 6 # c2s 1096: [u32 ability_id][u16 0]
-XP_TRICKLE_PAYLOAD_SIZE = 22     # s2c 1086: [u32 eid][u32 src][f32 amount][u8 0x0c][u8 seq][u16 0][u32 0][u16 0]
 
 
 def parse_shop_buy(payload: bytes) -> tuple[int, int]:
@@ -1433,22 +1488,4 @@ def parse_inventory_slot(payload: bytes) -> tuple[int, int]:
         raise ValueError("invalid 1082 payload")
     eid, slot = struct.unpack_from(">II", payload, 0)
     return eid, slot
-
-
-def build_xp_trickle(eid: int, amount: float = 3.594, seq: int = 0) -> bytes:
-    """s2c 1086 passive XP trickle (22 B): [u32 eid][u32 src][f32 amount][u8 0x0c][u8 seq][u16 0][u32 0][u16 0]."""
-    return struct.pack(">IIfBBHIH", eid, eid, amount, 0x0C, seq & 0xFF, 0, 0, 0)
-
-
-def parse_ability_upgrade(payload: bytes) -> int:
-    """Parse c2s 1096 ability upgrade: returns ability_id / slot."""
-    if len(payload) < 4:
-        raise ValueError("invalid 1096 payload")
-    return struct.unpack_from(">I", payload, 0)[0]
-
-
-def build_ability_upgrade(ability_id: int) -> bytes:
-    """c2s 1096 ability upgrade (6 B): [u32 ability_id][u16 0]."""
-    return struct.pack(">IH", ability_id, 0)
-
 

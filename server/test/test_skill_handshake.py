@@ -3,14 +3,16 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
-from server import match_server, wire
+from server import abilities, cooldown_wire, match_server, roster, wire
+from server.navigation import NavMesh
 
 
 class TestSkillHandshake(unittest.TestCase):
     def test_network_routes_both_skill_buttons_to_session_writer(self):
         conn = object()
         stream = Mock()
-        server = SimpleNamespace(_streams_by_conn={conn: stream}, log=Mock())
+        server = match_server.MatchServer(log=Mock())
+        server._streams_by_conn[conn] = stream
         for opcode in (wire.OP.LEVELUP_A, wire.OP.LEVELUP_B):
             with self.subTest(opcode=opcode):
                 match_server.MatchServer._dispatch(server, conn, opcode, bytes(6))
@@ -18,14 +20,16 @@ class TestSkillHandshake(unittest.TestCase):
 
     def make_stream(self):
         conn = object()
-        first = SimpleNamespace(eid=1500)
-        second = SimpleNamespace(eid=1515)
-        stream = SimpleNamespace(
-            players=[first, second], clients={conn: (second, Mock())},
-            hero_sims={}, hero_kits={1515: Mock()}, log=Mock(),
-            _send_to=Mock(), _broadcast=Mock(),
-            economy=SimpleNamespace(upgrade_ability=Mock(return_value=True)),
-        )
+        players = roster.default_solo_bots("skills", "skills")[:2]
+        mesh = NavMesh([(-100, -100), (100, -100), (100, 100), (-100, 100)],
+                       [(0, 1, 2), (0, 2, 3)])
+        stream = match_server.SnapshotStream(None, players, "skills", None,
+                                            log=Mock(), navigation_mesh=mesh)
+        stream.clients[conn] = (players[1], Mock())
+        stream.hero_kits[1515] = abilities.create_hero_kit(stream.hero_sims[1515], 243)
+        stream.hero_kits[1515].cast_ability = Mock()
+        stream._send_to, stream._broadcast = Mock(), Mock()
+        stream.economy.upgrade_ability = Mock(return_value=True)
         return stream, conn
 
     def test_ack_targets_requesting_player_without_casting_or_broadcasting(self):
@@ -39,7 +43,7 @@ class TestSkillHandshake(unittest.TestCase):
                     stream.economy.upgrade_ability.assert_not_called()
                     stream._broadcast.assert_not_called()
                 else:
-                    stream._broadcast.assert_called_once_with(1082, b"\x00\x00\x05\xeb" + bytes(10))
+                    self.assert_learned_frames(stream, 0)
                 stream.hero_kits[1515].cast_ability.assert_not_called()
 
     def test_unmeasured_payloads_are_rejected_without_ack_or_cast(self):
@@ -58,7 +62,17 @@ class TestSkillHandshake(unittest.TestCase):
         match_server.SnapshotStream._apply_event(stream, 1078, payload, conn=conn)
         stream.economy.upgrade_ability.assert_called_once_with(1515, 1, stream.hero_kits[1515])
         stream._send_to.assert_called_once_with(conn, 1078, payload)
-        stream._broadcast.assert_called_once_with(1082, b"\x00\x00\x05\xeb\x00\x00\x00\x01" + bytes(6))
+        self.assert_learned_frames(stream, 1)
+
+    def assert_learned_frames(self, stream, slot):
+        calls = stream._broadcast.call_args_list
+        self.assertEqual([call.args[0] for call in calls], [1082, 1162])
+        self.assertEqual(calls[0].args[1], roster.build_inventory_slot(1515, slot))
+        timer = cooldown_wire.parse_timer_tick(calls[1].args[1])
+        self.assertEqual(timer.eid, 1515)
+        self.assertEqual(timer.remaining, 0)
+        self.assertEqual(timer.tag, cooldown_wire.native_ability_tag(
+            f"Ability__Ringo__{'ABC'[slot]}"))
 
     def test_no_points_does_not_publish_success(self):
         stream, conn = self.make_stream()

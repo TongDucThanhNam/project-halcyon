@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
-from server import hero_movement, match_server, roster, wire
+from server import hero_movement, match_server, roster, wire, jungle, structures
 
 
 class TestLocomotionTarget(unittest.TestCase):
@@ -17,25 +17,17 @@ class TestLocomotionTarget(unittest.TestCase):
         player = SimpleNamespace(slot=slot, eid=eid)
         hero = hero_movement.HeroMovement(eid=eid, x=-70.0, y=1.0)
         frames = []
-        stream = SimpleNamespace(
-            players=[player], clients={conn: (player, None)}, hero_sims={eid: hero},
-            sparse_1070=False, log=Mock(),
-            suppress_periodic_1070_sec=0.0,
-            suppress_periodic_1070_move=0,
-            move_count=0,
-            suppress_until=0.0,
-            suppress_active=False,
-            suppressed_1070_count=0,
-            sparse_budget={},
-            hero_keepalive=False,
-            wave_director=None,
-            world_entities={},
-            status_manager=None,
-            jungle=Mock(monsters={}, step=Mock(return_value=[])),
-            economy=Mock(),
-            structures=Mock(step=Mock(return_value=[])),
-            _broadcast=lambda op, body: frames.append((op, body)),
-        )
+        players = roster.default_solo_bots("test", "test")
+        stream = match_server.SnapshotStream(None, players, "test", None, log=Mock())
+        stream.players = [player]
+        stream.clients = {conn: (player, None)}
+        stream.hero_sims = {eid: hero}
+        stream.hero_kits = {}
+        stream.hero_sim = hero
+        stream.jungle = jungle.JungleManager(open_time=1000000)
+        for structure in stream.structures.structures.values():
+            structure.is_alive = False
+        stream._broadcast = lambda op, body: frames.append((op, body))
         return stream, conn, hero, frames
 
     def move(self, stream, conn, x, y):
@@ -77,7 +69,7 @@ class TestLocomotionTarget(unittest.TestCase):
         stream, conn, hero, frames = self.make_stream()
         stream.suppress_periodic_1070_sec = 2.0
         # Target is 20 units away: (-50, 1) from (-70, 1) at 5 u/s takes 4.0s
-        t0 = time.monotonic()
+        t0 = stream.sim_time
         self.move(stream, conn, -50.0, 1.0)
         # Order broadcasts 1016 and initial anchor 1070
         self.assertEqual([op for op, _ in frames], [1016, 1070])
@@ -85,7 +77,11 @@ class TestLocomotionTarget(unittest.TestCase):
 
         # Step at +0.2s: periodic 1070 suppressed
         match_server.SnapshotStream._step_heroes(stream, 0.2, now=t0 + 0.2)
-        self.assertEqual(frames, [])
+        self.assertEqual(frames, [
+            (1067, struct.pack(">IBBBB6x", 1500, 1, 1, 15, 0)),
+            (1067, struct.pack(">IBBBB6x", 1500, 2, 1, 0, 0)),
+        ])
+        frames.clear()
         self.assertEqual(stream.suppressed_1070_count, 1)
 
         # Step at +1.0s: still suppressed

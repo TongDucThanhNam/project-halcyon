@@ -56,12 +56,15 @@ class OP:
     GAME_SETUP = 1001         # s2c setup burst opener
     PLAYER_HANDLE = 1005
     PLAYER_INFO = 1006
+    MATCH_RESULT = 1009       # s2c [u32 winning team][u8 reason][pad]
     ENTITY_FULL_UPDATE = 1010
     MOVE_CAST = 1012          # c2s move tap / targeted cast [f32 x][f32 y][6B 0]
     MOVE_TO = 1016            # s2c ActionMoveTo: [u8 compact actor id][f32 x][f32 y][5B pad]
     ENTITY_FLOAT = MOVE_TO    # legacy name retained for minion encoders
+    ENTITY_RESPAWN = 1033     # pre-return relocation; hero remains dead until 1074
     DESPAWN = 1035
     TARGETLESS_CAST = 1041    # c2s, ff ff ff ff = null target
+    GROUND_CAST = 1042        # c2s [f32 x,height,y][u8 slot][u8 flag]
     POSITION_EVENT = 1046     # s2c position-tagged event / ability impact (22 B)
     TARGET_ACQUIRE = 1045     # s2c target/aggro event [u32 src][u32 tgt][u8 flag][5B 0]
     ENTITY_POSE_3D = 1018     # s2c [eid][seq][f32 x][f32 height][f32 z][pad] (bot-measured)
@@ -74,17 +77,24 @@ class OP:
     ENTITY_STATE = ENTITY_VISIBILITY  # legacy name retained for measured visibility builders
     ENTITY_SUBSTATE = 1068
     POSITION = 1070
-    ENTITY_CLEAR = 1072       # s2c clear target/state [u32 eid][u16 0]
-    DESTROY = 1073
+    ENTITY_DEATH = 1072       # s2c [u32 victim][u32 killer][6 pad]
+    ENTITY_CLEAR = ENTITY_DEATH  # legacy alias; six-byte builder is not actor death
+    DESTROY = 1073            # corpse hide/retirement; hero actor/slot persists until 1035
+    ENTITY_REVIVE = 1074      # s2c [eid][x,height,y][6 zero]: completes hero revival
+    RESPAWN_TIMER = 1075      # s2c [u32 eid][f32 seconds][6 pad]
     ABILITY_CAST = 1078       # c2s/s2c ability slot activation (0=A, 1=B, 2=Ult) [u8 slot][5B 0]
     SKILLSHOT_CAST = 1102     # c2s targeted / skillshot cast (22 B)
     SHOP_BUY = 1081           # c2s shop item purchase [u32 eid][u32 item_id][6B 0]
     INVENTORY_SLOT = 1082     # s2c inventory slot update [u32 eid][u32 slot][6B 0]
-    ABILITY_UPGRADE = 1096    # c2s ability point upgrade [u32 ability_id][u16 0]
+    INVENTORY_ITEM = 1085     # s2c [u32 hero][u32 item][u32 instance][u16 0]
+    ITEM_USE = 1096           # c2s/s2c [u32 owned item instance][u16 zero]
+    GROUND_ITEM_USE = 1098    # c2s/s2c [f32 x,height,y][u32 item instance][6B zero]
     LEVELUP_B = 1078          # c2s ability point, slot B
-    ENTITY_PROP = 1086
+    BUFF_ADD = 1086           # s2c target/source, f16 duration, instance, kind
+    BUFF_CANCEL = 1093        # s2c target, buff instance, six zero bytes
     ENTITY_DATA = 1087
     MODE_PING_1105 = 1105     # s2c world-init filler, 6 B zeros
+    CRYSTAL_DESTROYED = 1106  # s2c six zero bytes before the end sequence
     HERO_CATALOG = 1107
     GAME_MODE = 1108
     SNAPSHOT = 1114

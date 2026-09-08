@@ -209,6 +209,22 @@ runtime observation of decoded blueprints in the process heap
 recovery impractical (stripped `.text`) — the Ghidra decompile + the
 zero-word statistical attack together overturned that ruling.
 
+### Native registry IDs from the recovered manifest (2026-09-07)
+
+The first `KindredManifest` revision is a 32-bit pointer registry: relocation
+`0 -> 4` points to its record-pointer array, and a native entity/item ID is
+`(array_slot - 4) / 4`. Follow array slot -> record -> record's first pointer
+to resolve the symbol. This closes name-to-wire-ID binding without guessing
+hashes or reopening executable analysis. Initial wire items independently
+anchor the index: Healing Flask `457`, Vision Totem `526`; Weapon Blade is
+`458`, Sprint Boots `477`, and Fountain of Renewal `487`.
+
+`Tools/Teardown/inspect_kindred_registry.py` reads the original manifest's
+first PTCH group plus its already-decrypted external INST and resolves only
+requested names. Exact paths, reproduction command, item ID corrections,
+and purchase-stream evidence are in
+[`solo-sandbox-items.md`](../Plan/solo-sandbox-items.md).
+
 ## 6. Texture header — 28 bytes, arithmetically self-verifying (inherited §7)
 
 18k+ standalone textures share a 28-byte header

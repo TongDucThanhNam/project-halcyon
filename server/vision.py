@@ -1,24 +1,136 @@
-"""Fog of War (FoW) and Shared Team Vision System (T3 Milestone 2).
+"""Measured 1067 visibility banks with an explicit minimal team-vision policy.
 
-Anchored in Docs/Teardown §10 & §15 (vainglory-mechanics-matrix.md):
-- Vision grammar: Buff_{Stealth, TrueSight, Revealed, UnobstructedVision}
-- Standard radii: Hero 10.0u, Minion 6.0u, Turret 9.0u (with TrueSight)
-- Shared Ally Vision:
-  * Team 1 shares vision across all Team 1 heroes, minions, and structures.
-  * Team 2 shares vision across all Team 2 heroes, minions, and structures.
-- Brush Masking:
-  * Units inside brush are invisible to enemy observers outside that brush,
-    unless revealed by TrueSight (turret / flare) or an ally inside the same brush.
+Native viewer indices 1/2 correspond to the two playing teams. Ordinary
+visible/hidden values are (1, 1, 0)/(1, 0, 0); owner-team bootstrap uses
+(1, 15, 0). The 12-unit radius is policy, not a recovered native coefficient.
+Brush, wall occlusion, stealth and true-sight are intentionally unmodelled.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import math
-from typing import Any, Dict, List, Optional, Set, Tuple
+import struct
+from typing import Any, Dict, List, Optional
 
-from . import jungle
+from . import combat, jungle
+from .hero_movement import HeroMovement
+from .navigation import fixed
+from .structures import Structure
+from .wave import Minion
 
 
+VISIBILITY_OPCODE = 1067
+
+
+@dataclass(frozen=True)
+class VisibilityUpdate:
+    eid: int
+    viewer_index: int
+    values: tuple[int, int, int]
+
+    def encode(self):
+        if type(self.eid) is not int or not 0 <= self.eid <= 0xffffffff:
+            raise ValueError('visibility EID must fit u32')
+        if type(self.viewer_index) is not int or not 0 <= self.viewer_index <= 7:
+            raise ValueError('visibility viewer index must be 0..7')
+        if len(self.values) != 3 or any(type(value) is not int or not 0 <= value <= 255 for value in self.values):
+            raise ValueError('visibility update requires three byte values')
+        return struct.pack('>IBBBB6x', self.eid, self.viewer_index, *self.values)
+
+
+def parse_visibility(payload):
+    if len(payload) != 14 or payload[8:] != bytes(6):
+        raise ValueError('1067 requires EID, four fields and six zero bytes')
+    eid, viewer, *values = struct.unpack_from('>IBBBB', payload)
+    update = VisibilityUpdate(eid, viewer, tuple(values))
+    update.encode()
+    return update
+
+
+@dataclass(frozen=True)
+class VisionRules:
+    radius: float = 12.0  # Explicit sandbox policy; native radii remain unmeasured.
+
+    def __post_init__(self):
+        if (type(self.radius) not in (int, float) or not math.isfinite(self.radius)
+                or not 0.000001 <= self.radius <= 1000):
+            raise ValueError('vision radius must be finite and within [0.000001, 1000]')
+
+
+class Vision:
+    """Shared hero/minion/turret sight, emitted on changes at fixed ticks.
+
+    Supply the match's ActorSlots allocator to exclude actors before their
+    creation and after removal. Without it, ``entities`` must already contain
+    only client-created actors. Dead targets retain ordinary nearby/own-team
+    visibility; dead observers no longer reveal other actors.
+    """
+
+    def __init__(self, rules: VisionRules | None = None, *, actor_slots=None):
+        self.rules = rules or VisionRules()
+        self.actor_slots = actor_slots
+        self.values: dict[tuple[int, int], tuple[int, int, int]] = {}
+        self._last_update_at = -math.inf
+
+    @staticmethod
+    def _observer(actor):
+        return combat.alive(actor) and (
+            isinstance(actor, (HeroMovement, Minion))
+            or isinstance(actor, Structure) and not actor.is_crystal)
+
+    def update(self, now: float, entities: Mapping[int, object] | Iterable[object]):
+        if not math.isfinite(now) or now < self._last_update_at:
+            raise ValueError('vision update time must be finite and monotonic')
+        actors = entities.values() if isinstance(entities, Mapping) else entities
+        present = sorted((actor for actor in actors if getattr(actor, 'spawn_at', 0) <= now
+                          and (self.actor_slots is None or actor.eid in self.actor_slots.by_eid)),
+                         key=lambda actor: actor.eid)
+        positions = {actor.eid: (fixed(actor.x), fixed(actor.y)) for actor in present}
+        radius = fixed(self.rules.radius)
+        radius_squared = radius ** 2
+        observers = {1: {}, 2: {}}
+        revealed = {1: set(), 2: set()}
+        for actor in present:
+            team = combat.team(actor)
+            if team in observers and self._observer(actor):
+                x, y = positions[actor.eid]
+                observers[team].setdefault((x // radius, y // radius), []).append((x, y))
+                revealed[team].update(eid for eid, expires in
+                                      getattr(actor, 'revealed_targets', {}).items()
+                                      if now < expires)
+        current, frames = {}, []
+        for actor in present:
+            x, y = positions[actor.eid]
+            cell_x, cell_y = x // radius, y // radius
+            for team in (1, 2):
+                own = combat.team(actor) == team
+                # A point within one radius lies in this cell or one of its
+                # eight neighbors. The final inclusive integer check is exact.
+                nearby = own or actor.eid in revealed[team] or any((x - ox) ** 2 + (y - oy) ** 2 <= radius_squared
+                                    for gx in (cell_x - 1, cell_x, cell_x + 1)
+                                    for gy in (cell_y - 1, cell_y, cell_y + 1)
+                                    for ox, oy in observers[team].get((gx, gy), ()))
+                values = (1, 15 if own else int(nearby), 0)
+                key = actor.eid, team
+                current[key] = values
+                if self.values.get(key) != values:
+                    frames.append((VISIBILITY_OPCODE, VisibilityUpdate(actor.eid, team, values).encode()))
+        # Removed actors are forgotten without sending a packet against an EID
+        # whose native actor no longer exists. Reused EIDs start a new cache row.
+        self.values = current
+        self._last_update_at = now
+        return frames
+
+    def snapshot_frames(self):
+        """Current banks after creation on reconnect; no mutation or allocation."""
+        return [(VISIBILITY_OPCODE, VisibilityUpdate(eid, viewer, values).encode())
+                for (eid, viewer), values in sorted(self.values.items())]
+
+
+# Legacy standalone policy API retained for compatibility and its existing
+# tests. These 10/6/9 radii and rectangular brush/true-sight model were never
+# native measurements; the live match uses Vision and VisionRules above.
 HERO_VISION_RADIUS = 10.0
 MINION_VISION_RADIUS = 6.0
 TURRET_VISION_RADIUS = 9.0
@@ -36,7 +148,7 @@ class VisionSource:
 
 
 class VisionManager:
-    """Computes authoritative shared team vision, brush masking, and stealth."""
+    """Legacy standalone brush/radius policy; live publication uses Vision."""
 
     def __init__(self):
         self.revealed_entities: Dict[int, float] = {}  # eid -> revealed_until

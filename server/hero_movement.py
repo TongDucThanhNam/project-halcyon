@@ -1,374 +1,461 @@
-"""Hero movement simulation (T3 Slice 4).
+"""Fixed-point hero locomotion and lifecycle; attack resolution is world-owned.
 
-Authoritative movement for hero entities:
-- Consumes c2s 1012 move targets and multi-waypoint paths.
-- Simulates path traversal with constant move speed (roster.MOVE_SPEED = 5.0 u/s).
-- Authoritative 1070 emission:
-  * Start anchor: emits current position when a move starts from idle.
-  * Cadence: emits 1070 every roster.MOVE_TICK (0.20 s) while moving.
-  * Arrival: emits exact target position with duplicate confirmation frame (measured in corpus).
-  * Silence: emits zero 1070s when stationary.
-  * Anti-rubberband: seamless retargeting while in motion without snapping back.
-  * Facing: tracks unit (cos, sin) facing vector along the motion direction.
-  * Eid / team aware: supports any hero eid (1500 / 1515-1519) and team (1 or 2).
+Sessions inject the external A001 NavMesh. The wire uses floats only at the
+boundary; position integration and pathfinding use integer coordinates.
 """
-import math
-from typing import List, Optional, Tuple
+from __future__ import annotations
 
+import math
 from . import roster, wire
+from .navigation import SCALE, fixed, within_distance
+from . import lifecycle_wire, recall_wire
+
+RECALL_SECONDS = recall_wire.RECALL_SECONDS
+BASE_RADIUS = 8.0
+FOUNTAIN_REGEN_FRACTION = 0.15
+FOUNTAIN_LASER_DAMAGE = 1000.0
+RESPAWN_SECONDS_PER_MINUTE = 1.0  # Explicit policy, not a recovered coefficient.
 
 
 class HeroMovement:
-    """Simulates authoritative hero movement along paths with 1070 pacing."""
-
     def __init__(
-        self,
-        eid: int = 1500,
-        team: int = 1,
-        x: Optional[float] = None,
-        y: Optional[float] = None,
-        speed: float = roster.MOVE_SPEED,
-        hp: float = roster.HERO_BASE_HP,
-        max_hp: float = roster.HERO_BASE_HP,
-        attack_damage: float = roster.HERO_BASE_ATTACK_DAMAGE,
-        attack_range: float = roster.HERO_ATTACK_RANGE,
-        attack_cooldown: float = roster.HERO_ATTACK_COOLDOWN,
-        respawn_duration: float = roster.HERO_RESPAWN_DURATION,
+        self, eid=1500, team=1, x=None, y=None, speed=roster.MOVE_SPEED,
+        hp=roster.HERO_BASE_HP, max_hp=roster.HERO_BASE_HP,
+        attack_damage=roster.HERO_BASE_ATTACK_DAMAGE,
+        attack_range=roster.HERO_ATTACK_RANGE,
+        attack_cooldown=roster.HERO_ATTACK_COOLDOWN,
+        respawn_duration=None, *, navigation=None,
+        energy=300.0, max_energy=300.0, energy_regen=2.5,
+        energy_stat_type=2,
     ):
-        self.eid = eid
-        self.team = team
-        if x is None or y is None:
-            spawn = roster.HERO_SPAWNS.get(eid, (roster.SPAWN_X, roster.SPAWN_Y))
-            self.spawn_x = spawn[0] if x is None else x
-            self.spawn_y = spawn[1] if y is None else y
-        else:
-            self.spawn_x = x
-            self.spawn_y = y
-        self.x = self.spawn_x
-        self.y = self.spawn_y
-
-        self.speed = speed
-        self.hp = hp
-        self.max_hp = max_hp
-        self.attack_damage = attack_damage
-        self.attack_range = attack_range
+        self.eid, self.team = eid, team
+        fallback = roster.HERO_SPAWNS.get(1500 if team == 1 else 1517, (roster.SPAWN_X, roster.SPAWN_Y))
+        spawn = roster.HERO_SPAWNS.get(eid, fallback)
+        self.spawn_x = spawn[0] if x is None else x
+        self.spawn_y = spawn[1] if y is None else y
+        self.x, self.y = self.spawn_x, self.spawn_y
+        self.navigation = navigation
+        self.base_speed = speed
+        self.item_move_speed = 0.0
+        self.attr_0x284 = self.attr_0x1D0 = 0.0
+        self._speed_modifiers = {}
+        self._movement_remainder = 0
+        self.hp, self.max_hp = hp, max_hp
+        self.max_energy = max(0.0, max_energy)
+        self.energy = min(self.max_energy, max(0.0, energy))
+        self.energy_regen = max(0.0, energy_regen)
+        self.base_max_energy, self.base_energy_regen = self.max_energy, self.energy_regen
+        # vgfull: discriminator 0 = HP, 2 = energy, 6 = gold; resource
+        # updates share tail 0001000000 (measured alongside regeneration/casts).
+        self.energy_stat_type = energy_stat_type
+        self.attack_damage, self.attack_range = attack_damage, attack_range
         self.attack_cooldown = attack_cooldown
         self.respawn_duration = respawn_duration
-        self.armor: float = 25.0
-        self.shield: float = 20.0
-        self.armor_pierce: float = 0.0
-        self.shield_pierce: float = 0.0
-        self.damage_reduction: float = 0.0
-        self.base_max_hp: float = max_hp
-        self.base_attack_damage: float = attack_damage
-        self.base_armor: float = 25.0
-        self.base_shield: float = 20.0
-        self.base_speed: float = speed
-        self.crystal_power: float = 0.0
-        self.level: int = 1
+        self.armor, self.shield = 25.0, 20.0
+        self.armor_pierce = self.shield_pierce = self.damage_reduction = 0.0
+        self.base_max_hp, self.base_attack_damage = max_hp, attack_damage
+        self.base_armor, self.base_shield = 25.0, 20.0
+        self.crystal_power = self.bonus_attack_speed = 0.0
+        self.cooldown_reduction = 0.0
+        self.level = 1
         self.is_alive = True
-        self.respawn_at: Optional[float] = None
-
-        self.target_eid: Optional[int] = None
-        self.next_attack_at: float = 0.0
-
-        self.facing = roster.FACING_DEFAULT  # (cos, sin)
-        self.waypoints: List[Tuple[float, float]] = []
-        self.move_target: Optional[Tuple[float, float]] = None
-        self.is_moving = False
-        self._start_emitted = False
-        self.just_respawned = False
-
-    def set_target_eid(self, target_eid: int):
-        """Acquire target entity (c2s 1060). Stops ground pathing to pursue target."""
-        if not self.is_alive:
-            return
-        self.target_eid = target_eid
-        self.waypoints = []
-        self.move_target = None
-
-    def clear_target(self):
-        """Clear current entity target."""
+        self.respawn_at = None
+        self.respawn_relocation_at = None
+        self.respawn_relocated = False
+        self.corpse_hide_at = None
+        self.corpse_hidden = False
+        self.match_elapsed = 0.0
         self.target_eid = None
+        self.next_attack_at = 0.0
+        self.order_version = 0
+        self.channeling = False
+        self._pursuit_destination = None
+        self.facing = roster.FACING_DEFAULT
+        self.waypoints, self.move_target = [], None
+        self.is_moving = self._start_emitted = self.just_respawned = False
+        self.recall_started_at = self.recall_completes_at = None
+        self.last_recall_completed_at = None
+        self._next_fountain_laser_at = 0.0
 
-    def apply_damage(
-        self,
-        amount: float,
-        attacker_eid: int,
-        now: float,
-        damage_type: str = "weapon",
-        status_manager: Optional[Any] = None,
-        modifier_queue: Optional[Any] = None,
-    ) -> List[Tuple[int, bytes]]:
-        """Apply damage to hero: emits 1053 type-6 HP stat delta.
-        If HP reaches 0: hero dies and emits death chain (1073 + 1067 + 1162)."""
+    @property
+    def x(self):
+        return self._x_fixed / SCALE
+
+    @x.setter
+    def x(self, value):
+        self._x_fixed = fixed(value)
+
+    @property
+    def y(self):
+        return self._y_fixed / SCALE
+
+    @y.setter
+    def y(self, value):
+        self._y_fixed = fixed(value)
+
+    @property
+    def position_fixed(self):
+        return self._x_fixed, self._y_fixed
+
+    @property
+    def attr_0x11C(self):
+        return self.base_speed
+
+    @attr_0x11C.setter
+    def attr_0x11C(self, value):
+        self.base_speed = value
+
+    @property
+    def attr_0x68(self):
+        return self.item_move_speed
+
+    @attr_0x68.setter
+    def attr_0x68(self, value):
+        self.item_move_speed = value
+
+    @property
+    def speed(self):
+        """Unbuffed base plus equipment speed, for legacy stat consumers."""
+        return self.base_speed + self.item_move_speed
+
+    @speed.setter
+    def speed(self, value):
+        self.base_speed = value - self.item_move_speed
+
+    def add_speed_modifier(self, key, *, bonus=0.0, multiplier=0.0, expires_at):
+        self._speed_modifiers[key] = bonus, multiplier, expires_at
+
+    def remove_speed_modifier(self, key):
+        self._speed_modifiers.pop(key, None)
+
+    def effective_speed(self, now=None, status_multiplier=1.0, status_manager=None):
+        flat, ratio = self.attr_0x68, self.attr_0x284
+        for key in sorted(self._speed_modifiers):
+            bonus, multiplier, expires_at = self._speed_modifiers[key]
+            if now is None or expires_at > now:
+                flat += bonus
+                ratio += multiplier
+        if status_manager is not None and now is not None:
+            if hasattr(status_manager, 'get_flat_speed_bonus'):
+                flat += status_manager.get_flat_speed_bonus(self.eid, now)
+            if hasattr(status_manager, 'get_move_speed_bonus_ratio'):
+                ratio += status_manager.get_move_speed_bonus_ratio(self.eid, now)
+        return max(0.0, ((1 + ratio) * self.attr_0x11C + flat) * (1 + self.attr_0x1D0) * status_multiplier)
+
+    def is_in_base(self, team=None):
+        base_team = self.team if team is None else team
+        center = roster.HERO_SPAWNS[1500 if base_team == 1 else 1517]
+        dx, dy = self._x_fixed - fixed(center[0]), self._y_fixed - fixed(center[1])
+        return dx * dx + dy * dy <= fixed(BASE_RADIUS) ** 2
+
+    def _energy_frames(self, delta):
+        if not delta or self.energy_stat_type is None:
+            return []
+        return [(wire.OP.ENTITY_STAT, roster.build_hero_stat(self.eid, delta, stat_type=self.energy_stat_type, tail=bytes.fromhex('0001000000')))]
+
+    def spend_energy(self, amount):
+        if not math.isfinite(amount) or amount < 0 or amount > self.energy:
+            raise ValueError('invalid or unaffordable energy cost')
+        self.energy -= amount
+        return self._energy_frames(-amount)
+
+    def heal(self, amount, now=0.0, status_manager=None):
+        if not self.is_alive or amount <= 0:
+            return []
+        if status_manager is not None and hasattr(status_manager, 'get_healing_multiplier'):
+            amount *= status_manager.get_healing_multiplier(self.eid, now)
+        actual = min(max(0.0, amount), self.max_hp - self.hp)
+        self.hp += actual
+        return [(wire.OP.ENTITY_STAT, roster.build_hero_stat(self.eid, actual, stat_type=0, tail=bytes.fromhex('0001000000')))] if actual else []
+
+    def start_recall(self, now):
         if not self.is_alive:
             return []
+        self.order_version += 1
+        frames = self.stop(input_order=False)
+        self.target_eid = None
+        self.recall_started_at, self.recall_completes_at = now, now + RECALL_SECONDS
+        return frames
 
+    def cancel_recall(self):
+        was_active = self.recall_completes_at is not None
+        self.recall_started_at = self.recall_completes_at = None
+        return was_active
+
+    def respawn_seconds(self, match_elapsed=None):
+        if self.respawn_duration is not None:
+            return self.respawn_duration
+        elapsed = self.match_elapsed if match_elapsed is None else match_elapsed
+        return 6.0 + self.level * 2.5 + max(0, int(elapsed // 60)) * RESPAWN_SECONDS_PER_MINUTE
+
+    def tick_lifecycle(self, dt, now, match_elapsed=None, status_manager=None):
+        if dt < 0 or not math.isfinite(dt):
+            raise ValueError('invalid lifecycle delta time')
+        if match_elapsed is not None:
+            self.match_elapsed = max(0.0, match_elapsed)
+        if not self.is_alive:
+            return self.check_respawn(now)
+        frames = []
+        if self.recall_completes_at is not None:
+            if status_manager is not None and (
+                not status_manager.can_cast(self.eid, now) or not status_manager.can_move(self.eid, now)
+            ):
+                self.cancel_recall()
+            elif now >= self.recall_completes_at:
+                self.cancel_recall()
+                frames.extend(self.teleport(self.spawn_x, self.spawn_y))
+                self.last_recall_completed_at = now
+                # Successful Recall has a one-time 25% refill before ordinary
+                # fountain regeneration. The native positive self-1054 changes
+                # HP itself, so discard heal()'s alternative 1053 encoding.
+                before_hp = self.hp
+                if self.hp < self.max_hp:
+                    self.heal(self.max_hp * recall_wire.RECALL_RESOURCE_FRACTION, now, status_manager)
+                healed = self.hp - before_hp
+                if healed:
+                    frames.append((wire.OP.COMBAT_DELTA, roster.build_combat_delta(
+                        self.eid, self.eid, healed, tail=roster.COMBAT_DELTA_HERO_TAIL)))
+                before_energy = self.energy
+                self.energy = min(self.max_energy, self.energy
+                    + self.max_energy * recall_wire.RECALL_RESOURCE_FRACTION)
+                frames.extend(self._energy_frames(self.energy - before_energy))
+        in_base = self.is_in_base()
+        if in_base:
+            frames.extend(self.heal(self.max_hp * FOUNTAIN_REGEN_FRACTION * dt, now, status_manager))
+        old_energy = self.energy
+        regeneration = self.energy_regen + (self.max_energy * FOUNTAIN_REGEN_FRACTION if in_base else 0)
+        self.energy = min(self.max_energy, self.energy + regeneration * dt)
+        frames.extend(self._energy_frames(self.energy - old_energy))
+        if self.is_in_base(2 if self.team == 1 else 1) and now >= self._next_fountain_laser_at:
+            self._next_fountain_laser_at = now + 1.0
+            frames.extend(self.apply_damage(FOUNTAIN_LASER_DAMAGE, attacker_eid=0, now=now, damage_type='true'))
+        return frames
+
+    def set_target_eid(self, target_eid):
+        if not self.is_alive:
+            return
+        self.order_version += 1
+        self.cancel_recall()
+        self.target_eid = target_eid
+        self.waypoints, self.move_target = [], None
+        self._pursuit_destination = None
+
+    def clear_target(self):
+        self.target_eid = None
+        self._pursuit_destination = None
+
+    def apply_damage(self, amount, attacker_eid, now, damage_type='weapon', status_manager=None, modifier_queue=None):
+        if not self.is_alive or amount <= 0:
+            return []
         actual_hp_damage = amount
         if modifier_queue is not None:
             from .status_effects import DamageContext, DamageType
-            dtype = DamageType.WEAPON if damage_type == "weapon" else (
-                DamageType.CRYSTAL if damage_type == "crystal" else DamageType.TRUE
-            )
-            ctx = DamageContext(
-                source_eid=attacker_eid,
-                target_eid=self.eid,
-                damage_type=dtype,
-                raw_amount=amount,
-                now=now,
-                armor=self.armor,
-                shield=self.shield,
-                armor_pierce=self.armor_pierce,
-                shield_pierce=self.shield_pierce,
+            dtype = DamageType.WEAPON if damage_type == 'weapon' else DamageType.CRYSTAL if damage_type == 'crystal' else DamageType.TRUE
+            result = modifier_queue.resolve(DamageContext(
+                source_eid=attacker_eid, target_eid=self.eid, damage_type=dtype,
+                raw_amount=amount, now=now, armor=self.armor, shield=self.shield,
+                armor_pierce=self.armor_pierce, shield_pierce=self.shield_pierce,
                 damage_reduction=self.damage_reduction,
-            )
-            res = modifier_queue.resolve(ctx, status_manager=status_manager)
-            actual_hp_damage = res.final_damage
+            ), status_manager=status_manager)
+            actual_hp_damage = result.final_damage
         elif status_manager is not None:
             actual_hp_damage, _ = status_manager.absorb_damage_with_barrier(self.eid, amount, now)
-
-        self.hp = max(0.0, self.hp - actual_hp_damage)
-        frames: List[Tuple[int, bytes]] = [
-            (wire.OP.ENTITY_STAT, roster.build_hero_stat(self.eid, -actual_hp_damage, stat_type=6))
-        ]
+        actual_hp_damage = min(self.hp, max(0.0, actual_hp_damage))
+        if actual_hp_damage:
+            self.cancel_recall()
+        self.hp -= actual_hp_damage
+        frames = [(wire.OP.ENTITY_STAT, roster.build_hero_stat(self.eid, -actual_hp_damage, stat_type=0, tail=bytes.fromhex('0001000000')))]
         if self.hp <= 0:
             self.is_alive = False
-            self.respawn_at = now + self.respawn_duration
+            duration = self.respawn_seconds()
+            self.respawn_at = now + duration
+            self.respawn_relocation_at = max(now,
+                self.respawn_at - lifecycle_wire.HERO_RESPAWN_TRANSITION_SECONDS)
+            self.respawn_relocated = False
+            self.corpse_hide_at = min(now + lifecycle_wire.HERO_CORPSE_SECONDS, self.respawn_relocation_at)
+            self.corpse_hidden = False
             self.target_eid = None
-            self.waypoints = []
-            self.move_target = None
-            # Death chain: 1067 ENTITY_STATE (dead corpse) + 1162 TIMER_TICK (respawn countdown).
-            # Note: Heroes never get 1073 DESTROY (destroying a hero actor crashes the client on tick).
-            frames.append((wire.OP.ENTITY_STATE, roster.build_hero_death_state(self.eid)))
-            frames.append((wire.OP.TIMER_TICK, roster.build_timer_tick(
-                self.eid, 0xb855d752, self.respawn_duration)))
+            self.waypoints, self.move_target = [], None
+            self.is_moving = False
+            self.cancel_recall()
+            self.order_version += 1
+            # 1072 carries the killer; 1075 starts the countdown. The later
+            # 1073 hides the corpse but never releases the actor with 1035.
+            frames.append((lifecycle_wire.OP_HERO_DEATH, lifecycle_wire.build_hero_death(self.eid, attacker_eid)))
+            frames.append((lifecycle_wire.OP_RESPAWN_COUNTDOWN, lifecycle_wire.build_respawn_countdown(self.eid, duration)))
         return frames
 
-    def check_respawn(self, now: float) -> List[Tuple[int, bytes]]:
-        """If dead and respawn timer has elapsed, resurrect at spawn base with full HP."""
+    def check_respawn(self, now):
         if self.is_alive or self.respawn_at is None:
             return []
+        frames = []
+        if not self.corpse_hidden and self.corpse_hide_at is not None and now >= self.corpse_hide_at:
+            frames.append((lifecycle_wire.OP_HERO_CORPSE_HIDE,
+                           lifecycle_wire.build_hero_corpse_hide(self.eid)))
+            self.corpse_hidden = True
+            self.corpse_hide_at = None
+        if not self.respawn_relocated and self.respawn_relocation_at is not None and now >= self.respawn_relocation_at:
+            # Native 1011 snapshots during this transition still contain HP0
+            # at the new base position. 1033 does not complete resurrection.
+            self.facing = roster.FACING_DEFAULT
+            frames.append((lifecycle_wire.OP_HERO_RESPAWN,
+                           lifecycle_wire.build_hero_respawn(self.eid, self.spawn_x, self.spawn_y)))
+            frames.extend(self.teleport(self.spawn_x, self.spawn_y))
+            self.respawn_relocated = True
+            self.respawn_relocation_at = None
         if now < self.respawn_at:
-            return []
-
-        self.is_alive = True
-        self.respawn_at = None
-        self.just_respawned = True
-        self.hp = self.max_hp
-        self.x = self.spawn_x
-        self.y = self.spawn_y
-        self.waypoints = []
-        self.move_target = None
-        self.is_moving = False
-        self.facing = roster.FACING_DEFAULT
-
-        frames: List[Tuple[int, bytes]] = []
-        pos_frame = roster.build_position(self.eid, self.x, self.y)
-        frames.append((wire.OP.POSITION, pos_frame))
-        frames.append((wire.OP.POSITION, pos_frame))
-        # Restore full HP bar on HUD
-        frames.append((wire.OP.ENTITY_STAT, roster.build_hero_stat(self.eid, self.max_hp, stat_type=6)))
+            return frames
+        self.is_alive, self.respawn_at, self.just_respawned = True, None, True
+        self.respawn_relocated, self.respawn_relocation_at = False, None
+        self.corpse_hidden, self.corpse_hide_at = False, None
+        self.hp, self.energy = self.max_hp, self.max_energy
+        # 1074 completes the measured transition and restores native pools;
+        # no extra full-pool HP/energy deltas accompany it in the corpus.
+        frames.append((lifecycle_wire.OP_HERO_RESPAWN_COMPLETE,
+                       lifecycle_wire.build_hero_respawn_complete(self.eid, self.spawn_x, self.spawn_y)))
         return frames
 
-    def set_target(self, tx: float, ty: float) -> List[Tuple[int, bytes]]:
-        """Set a single target destination. Move command clears entity target (orb-walk)."""
-        if not self.is_alive:
-            return []
-        self.target_eid = None
+    def set_target(self, tx, ty):
         return self.set_path([(tx, ty)])
 
-    def set_path(self, waypoints: List[Tuple[float, float]]) -> List[Tuple[int, bytes]]:
-        """Set a multi-waypoint path.
-
-        Anti-rubberband design:
-        If already in motion, waypoints update seamlessly from current (x, y) without
-        resetting position or re-emitting an outdated start anchor.
-        If stationary, emits initial 1070 anchor at current position to acknowledge motion start.
-        """
+    def set_path(self, waypoints):
         if not self.is_alive:
             return []
+        self.order_version += 1
+        self.cancel_recall()
         self.target_eid = None
-        if not waypoints:
-            self.waypoints = []
-            self.move_target = None
-            self.is_moving = False
-            return []
-
-        self.waypoints = list(waypoints)
-        self.move_target = self.waypoints[-1]
+        route, origin = [], (self.x, self.y)
+        for target in waypoints:
+            destination = fixed(target[0]) / SCALE, fixed(target[1]) / SCALE
+            segment = self.navigation.find_path(origin, destination) if self.navigation is not None else [destination]
+            if not segment:
+                break
+            route.extend(segment)
+            origin = segment[-1]
+        if not route:
+            return self.stop(input_order=False)
+        self.waypoints, self.move_target = route, route[-1]
         was_moving = self.is_moving
         self.is_moving = True
+        self.facing = roster.facing_toward(self.x, self.y, *route[0])
+        if was_moving:
+            return []
+        self._start_emitted = True
+        return [(wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y))]
 
-        # Update facing toward next waypoint
-        next_wp = self.waypoints[0]
-        self.facing = roster.facing_toward(self.x, self.y, next_wp[0], next_wp[1])
+    def _advance(self, dt, speed):
+        numerator = fixed(speed) * fixed(dt) + self._movement_remainder
+        remaining, self._movement_remainder = divmod(numerator, SCALE)
+        while remaining > 0 and self.waypoints:
+            tx, ty = map(fixed, self.waypoints[0])
+            dx, dy = tx - self._x_fixed, ty - self._y_fixed
+            squared = dx * dx + dy * dy
+            distance = math.isqrt(squared)
+            if distance * distance < squared:
+                distance += 1
+            if distance <= remaining:
+                self._x_fixed, self._y_fixed = tx, ty
+                remaining -= distance
+                self.waypoints.pop(0)
+            else:
+                nx = self._x_fixed + (abs(dx) * remaining // distance) * (1 if dx >= 0 else -1)
+                ny = self._y_fixed + (abs(dy) * remaining // distance) * (1 if dy >= 0 else -1)
+                if self.navigation is not None:
+                    endpoint = self.navigation.clamp_segment((self.x, self.y), (nx / SCALE, ny / SCALE))
+                    nx, ny = map(fixed, endpoint)
+                self._x_fixed, self._y_fixed = nx, ny
+                remaining = 0
+            if self.waypoints:
+                self.facing = roster.facing_toward(self.x, self.y, *self.waypoints[0])
+        frame = (wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y))
+        if not self.waypoints:
+            self.is_moving, self.move_target = False, None
+            return [frame, frame]
+        return [frame]
 
-        frames = []
-        if not was_moving:
-            # Emit start anchor frame
-            frames.append((wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y)))
-            # The session emits slot-addressed 1016 to activate navigation.
-            # 1067 modifies visibility and must not be invented for movement.
-            self._start_emitted = True
-
-        return frames
-
-    def step(
-        self,
-        dt: float,
-        now: Optional[float] = None,
-        target_pos: Optional[Tuple[float, float]] = None,
-        status_manager: Optional[Any] = None,
-    ) -> List[Tuple[int, bytes]]:
-        """Advance hero simulation:
-        - If dead: checks respawn countdown.
-        - If knockback active: displaces position and emits 1070.
-        - If stunned/rooted: disables motion.
-        - If slowed: scales motion speed.
-        - If stunned/disarmed: suppresses basic attack.
-        - If target_eid is set and target_pos provided:
-          * If distance > attack_range: walks toward target.
-          * If distance <= attack_range: stops, faces target, and attacks on cooldown (1054).
-        - If no target_eid: advances along waypoints with anti-rubberband 1070 pacing.
-        """
+    def step(self, dt, now=None, target_pos=None, status_manager=None):
+        if dt < 0 or not math.isfinite(dt):
+            raise ValueError('invalid movement delta time')
         self.just_respawned = False
         if not self.is_alive:
-            if now is not None:
-                return self.check_respawn(now)
-            return []
-
-        # 1. Knockback displacement (forced displacement interrupts pathing)
-        frames: List[Tuple[int, bytes]] = []
+            return self.check_respawn(now) if now is not None else []
+        if self.channeling:
+            return self.stop(input_order=False)
         if status_manager is not None and now is not None:
-            kb_dx, kb_dy = status_manager.get_knockback_displacement(self.eid, dt, now)
-            if abs(kb_dx) > 1e-5 or abs(kb_dy) > 1e-5:
-                self.x += kb_dx
-                self.y += kb_dy
-                self.is_moving = False
-                self.waypoints = []
-                self.move_target = None
-                frames.append((wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y)))
-                return frames
-
-        # 2. Status restrictions
-        can_move = True
-        can_attack = True
-        speed_mult = 1.0
-        if status_manager is not None and now is not None:
+            dx, dy = status_manager.get_knockback_displacement(self.eid, dt, now)
+            if dx or dy:
+                self.cancel_recall()
+                endpoint = self.x + dx, self.y + dy
+                if self.navigation is not None:
+                    endpoint = self.navigation.clamp_segment((self.x, self.y), endpoint)
+                return self.teleport(*endpoint)
             can_move = status_manager.can_move(self.eid, now)
-            can_attack = status_manager.can_attack(self.eid, now)
-            speed_mult = status_manager.get_speed_multiplier(self.eid, now)
-
-        effective_speed = self.speed * speed_mult
-
-        # Target pursuit & basic attack
+            multiplier = status_manager.get_speed_multiplier(self.eid, now)
+        else:
+            can_move, multiplier = True, 1.0
+        speed = self.effective_speed(now, multiplier, status_manager)
         if self.target_eid is not None:
-            if target_pos is not None:
-                tx, ty = target_pos
-                dx = tx - self.x
-                dy = ty - self.y
-                dist = math.hypot(dx, dy)
-                if dist > self.attack_range:
-                    # Pursue target if allowed to move
-                    if can_move:
-                        move_dist = min(effective_speed * dt, dist - self.attack_range + 0.1)
-                        if move_dist > 0:
-                            self.x += (dx / dist) * move_dist
-                            self.y += (dy / dist) * move_dist
-                            self.facing = roster.facing_toward(self.x, self.y, tx, ty)
-                            self.is_moving = True
-                            return [(wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y))]
+            if target_pos is None:
+                self.clear_target()
+            else:
+                dx, dy = target_pos[0] - self.x, target_pos[1] - self.y
+                if within_distance((self.x, self.y), target_pos, self.attack_range):
+                    frames = self.stop(input_order=False)
+                    self.facing = roster.facing_toward(self.x, self.y, *target_pos)
+                    return frames
+                if can_move:
+                    moved = self._pursuit_destination is None or sum((target_pos[k] - self._pursuit_destination[k]) ** 2 for k in (0, 1)) >= 0.25 ** 2
+                    if self.navigation is not None:
+                        if moved or not self.waypoints:
+                            route = self.navigation.find_path((self.x, self.y), target_pos)
+                            self._pursuit_destination = target_pos
+                        else:
+                            route = self.waypoints
                     else:
-                        if self.is_moving:
-                            frames.extend(self.stop())
-                        return frames
-                else:
-                    # In attack range: stop and attack
-                    if self.is_moving:
-                        frames.extend(self.stop())
-                    self.facing = roster.facing_toward(self.x, self.y, tx, ty)
-                    if can_attack and now is not None and now >= self.next_attack_at:
-                        self.next_attack_at = now + self.attack_cooldown
-                        frames.append((wire.OP.COMBAT_DELTA, roster.build_combat_delta(
-                            self.eid, self.target_eid, -self.attack_damage,
-                            tail=roster.COMBAT_DELTA_HERO_TAIL)))
-                    return frames
-            else:
-                # Target dead or vanished
-                self.target_eid = None
-
+                        route = [target_pos]
+                    if route:
+                        self.waypoints, self.move_target, self.is_moving = route, route[-1], True
+                        if len(route) == 1:
+                            fx = fixed(target_pos[0]) - self._x_fixed
+                            fy = fixed(target_pos[1]) - self._y_fixed
+                            squared = fx * fx + fy * fy
+                            distance = math.isqrt(squared)
+                            distance += distance * distance < squared
+                            # _advance rounds each axis toward the origin.
+                            # Step two coordinate quanta inside the range so
+                            # an oblique approach cannot stall just outside it.
+                            approach = max(0, distance - fixed(self.attack_range) + 2)
+                            speed = min(speed, approach / SCALE / dt) if dt else 0.0
+                    else:
+                        return self.stop(input_order=False)
         if not can_move:
-            if self.is_moving:
-                return self.stop()
+            self.cancel_recall()
+            return self.stop(input_order=False)
+        if not self.is_moving or not self.waypoints or dt == 0 or speed <= 0:
             return []
+        return self._advance(dt, speed)
 
-        if not self.is_moving or not self.waypoints:
+    def stop(self, *, input_order=True):
+        if input_order:
+            self.order_version += 1
+            self.cancel_recall()
+        was_moving = self.is_moving
+        self.is_moving, self.waypoints, self.move_target = False, [], None
+        if not was_moving:
             return []
+        frame = (wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y))
+        return [frame, frame]
 
-        remaining_dist = effective_speed * dt
-        frames: List[Tuple[int, bytes]] = []
+    def teleport(self, x, y):
+        self.x, self.y = x, y
+        self.waypoints, self.move_target, self.is_moving = [], None, False
+        self._movement_remainder = 0
+        self.cancel_recall()
+        return [(wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y))]
 
-        while remaining_dist > 0 and self.waypoints:
-            tx, ty = self.waypoints[0]
-            dx = tx - self.x
-            dy = ty - self.y
-            seg_dist = math.hypot(dx, dy)
-
-            if seg_dist <= remaining_dist:
-                # Reached this waypoint
-                self.x = tx
-                self.y = ty
-                remaining_dist -= seg_dist
-                self.waypoints.pop(0)
-
-                if self.waypoints:
-                    # Still have more waypoints in path: update facing toward next
-                    next_wp = self.waypoints[0]
-                    self.facing = roster.facing_toward(self.x, self.y, next_wp[0], next_wp[1])
-                else:
-                    # Reached final destination!
-                    self.is_moving = False
-                    self.move_target = None
-                    pos_frame = roster.build_position(self.eid, self.x, self.y)
-                    # Confirm arrival without changing the actor's visibility.
-                    frames.append((wire.OP.POSITION, pos_frame))
-                    frames.append((wire.OP.POSITION, pos_frame))
-                    return frames
-            else:
-                # Advance along current segment
-                frac = remaining_dist / seg_dist
-                self.x += dx * frac
-                self.y += dy * frac
-                self.facing = roster.facing_toward(self.x, self.y, tx, ty)
-                remaining_dist = 0.0
-
-        if self.is_moving:
-            # Traveling: emit current position at cadence
-            frames.append((wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y)))
-
-        return frames
-
-    def stop(self) -> List[Tuple[int, bytes]]:
-        """Stop movement immediately at current position."""
-        if not self.is_moving:
+    def dash_to(self, x, y, now=None):
+        if not self.is_alive:
             return []
-        self.is_moving = False
-        self.waypoints = []
-        self.move_target = None
-        pos_frame = roster.build_position(self.eid, self.x, self.y)
-        return [
-            (wire.OP.POSITION, pos_frame),
-            (wire.OP.POSITION, pos_frame),
-        ]
-
-    def teleport(self, x: float, y: float) -> List[Tuple[int, bytes]]:
-        """Teleport hero to exact position (e.g. spawn, respawn)."""
-        self.x = x
-        self.y = y
-        self.waypoints = []
-        self.move_target = None
-        self.is_moving = False
-        return [
-            (wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y)),
-        ]
+        endpoint = self.navigation.dash_endpoint((self.x, self.y), (x, y)) if self.navigation is not None else (x, y)
+        self.order_version += 1
+        return self.teleport(*endpoint)

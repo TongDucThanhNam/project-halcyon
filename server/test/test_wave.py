@@ -56,10 +56,10 @@ class TestMinionSpawn1010(unittest.TestCase):
         self.assertEqual(left[122:], bytes(4))
         self.assertNotEqual(right[4:8], bytes(4))            # class present
 
-    def test_seq_byte_wraps_u8(self):
-        body = roster.build_minion_spawn_1010(
-            366, 4610, 71.28, 12.93, 0x1FF, roster.ENTITY_STATE_SIDE_RIGHT)
-        self.assertEqual(body[116], 0xFF)
+    def test_actor_slot_rejects_overflow_instead_of_aliasing_live_entity(self):
+        with self.assertRaises(ValueError):
+            roster.build_minion_spawn_1010(
+                366, 4610, 71.28, 12.93, 0x1FF, roster.ENTITY_STATE_SIDE_RIGHT)
 
 
 class TestEntityState1067(unittest.TestCase):
@@ -166,7 +166,7 @@ class TestWaveDirector(unittest.TestCase):
         self.assertEqual(len(states), 20)                    # 10 × (00 + 0f)
         spawners = [struct.unpack_from(">I", p, 0)[0] for p in spawns]
         self.assertEqual(spawners[::2],
-                         [366, 366, 367, 365, 365])          # wave-1 measured
+                         [366, 366, 366, 365, 365])          # requested three melee + two ranged
         for pair in range(5):
             right_i, left_i = 2 * pair, 2 * pair + 1
             xr = struct.unpack_from(">f", spawns[right_i], 12)[0]
@@ -227,12 +227,12 @@ class TestWaveDirector(unittest.TestCase):
 class TestCombatBuilders(unittest.TestCase):
     """s2c 1054 / 1073 / 1035 — shapes pinned on the vg5 corpus
     (measure_combat*.py): tail 00050400… in 400/400 minion-target frames;
-    death = destroy then despawn, tail 0000, same instant."""
+    corpse removal = destroy then despawn, tail 0000, same instant."""
 
     def test_combat_delta_1054(self):
         p = roster.build_combat_delta(4610, 4611, -19.4)
         self.assertEqual(len(p), roster.COMBAT_DELTA_PAYLOAD_SIZE)
-        self.assertEqual(struct.unpack_from(">II", p, 0), (4610, 4611))
+        self.assertEqual(struct.unpack_from(">II", p, 0), (4611, 4610))
         self.assertAlmostEqual(struct.unpack_from(">f", p, 8)[0], -19.4,
                                places=2)   # f32 roundtrip
         self.assertEqual(p[12:], roster.COMBAT_DELTA_TAIL)
@@ -247,7 +247,8 @@ class TestCombatBuilders(unittest.TestCase):
 class TestCombatDirector(unittest.TestCase):
     """The fight at the lane meeting point: first blood is 4610 -> 4611
     (corpus-measured pair) once both walkers hold their endpoints 2.0 apart;
-    repeat hits every 0.6 s; death = 1073 then 1035, no more heartbeats.
+    repeat hits every 0.6 s; death1072 stops heartbeats, followed by
+    corpse removal1073/1035 after the measured retention period.
     The wave grid is shrunk (spawn at +0.5 s) — walk time to the meeting
     point stays real, so first blood lands ~16.5 s in."""
 
@@ -276,7 +277,7 @@ class TestCombatDirector(unittest.TestCase):
         for op, p in frames:
             if op != 1054:
                 continue
-            s, t = struct.unpack_from(">II", p, 0)
+            t, s = struct.unpack_from(">II", p, 0)
             if (src is None or s == src) and (tgt is None or t == tgt):
                 out.append((s, t, struct.unpack_from(">f", p, 8)[0]))
         return out
@@ -294,7 +295,7 @@ class TestCombatDirector(unittest.TestCase):
         d = self._director()
         frames = self._pump_until(d, roster.WAVE_FIRST_SPAWN_AT + 20.0)
         seq4610 = [op for op, p in frames if op == 1054
-                   and struct.unpack_from(">II", p, 0) == (4610, 4611)]
+                   and struct.unpack_from(">II", p, 0) == (4611, 4610)]
         self.assertGreaterEqual(len(seq4610), 2)
         # 0.6 s cadence over a ~4.5 s window: bounded burst, never a flood
         self.assertLessEqual(len(seq4610), 8)
@@ -351,9 +352,11 @@ class TestMinionClassesAndRanged(unittest.TestCase):
             d._spawn_pair(100.0, pair)
 
         self.assertEqual(len(d.minions), 10)
-        expected_classes = ["lead_melee", "melee", "captain", "ranged", "ranged"]
-        expected_damages = [19.4, 27.8, 38.8, 50.0, 50.0]
-        expected_ranges = [2.0, 2.0, 5.0, 6.0, 6.0]
+        # Accepted sandbox composition supersedes the old inferred captain
+        # range, while roster.MINION_PAIR_CLASSES retains that corpus profile.
+        expected_classes = ["lead_melee", "melee", "melee", "ranged", "ranged"]
+        expected_damages = [19.4, 27.8, 27.8, 50.0, 50.0]
+        expected_ranges = [2.0, 2.0, 2.0, 6.5, 6.5]
 
         for pair in range(5):
             m_r = d.minions[2 * pair]
@@ -380,9 +383,11 @@ class TestMinionClassesAndRanged(unittest.TestCase):
 
         # Pump combat at now=100.0
         frames = d.pump(100.0)
+        self.assertFalse(any(op == wave.OP_COMBAT_1054 for op, _ in frames))
+        frames = d.pump(101.35)
         hits = [f for f in frames if f[0] == wave.OP_COMBAT_1054]
         self.assertTrue(hits)
-        src, tgt, delta = struct.unpack_from(">IIf", hits[0][1], 0)
+        tgt, src, delta = struct.unpack_from(">IIf", hits[0][1], 0)
         self.assertEqual(src, m_r.eid)
         self.assertEqual(tgt, m_l.eid)
         self.assertAlmostEqual(delta, -50.0, places=1)

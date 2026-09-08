@@ -1,5 +1,14 @@
 # Next steps — close T1, open the T3 thin slice
 
+> **2026-09-08 implementation:** the operator's seven-subsystem Tier 1
+> **solo sandbox** brief is tracked in [solo-sandbox.md](solo-sandbox.md).
+> Acceptance is reopened after operator testing exposed missing Skye skills,
+> projectile visuals and defective minion movement. The earlier 758-test and
+> performance baseline does not establish these client behaviors.
+> That name describes gameplay acceptance, not the platform T1 tier below.
+> The historical zero-simulation and unknown-spawn statements in this plan
+> are superseded by the implementation/evidence record linked there.
+
 Research brief produced 2026-09-05 (advisor pass + main-thread selective
 verification). Role of this file: the **active hand-off plan** between
 Phase 0 (closed — `phase0.md`) and the T1→T3 build work. It is a decision

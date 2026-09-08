@@ -282,10 +282,11 @@ class TestLockCommitAndWorldInit(unittest.TestCase):
         self.assertEqual(setup[100:102], b"\x01\x00")
 
     def test_timer_tick_shape(self):
-        tick = roster.build_timer_tick(1519, 0x1234ABCD, 5.0)
+        tick = roster.build_timer_tick(1519, 0x1234ABCD, 5.0, 10.0)
         self.assertEqual(len(tick), roster.TIMER_TICK_PAYLOAD_SIZE)
-        eid, tag, pad, value = struct.unpack_from(">IIHf", tick, 0)
-        self.assertEqual((eid, tag, pad, value), (1519, 0x1234ABCD, 0, 5.0))
+        eid, tag, remaining, duration = struct.unpack_from(">IIff", tick, 0)
+        self.assertEqual((eid, tag, remaining, duration), (1519, 0x1234ABCD, 5.0, 10.0))
+        self.assertEqual(tick[16:], bytes(6))
 
 
 class TestMovementSlice(unittest.TestCase):
@@ -379,11 +380,13 @@ class TestEntityFullUpdate1010(unittest.TestCase):
         with self.assertRaises(ValueError):
             roster.build_entity_full_update(1, 1, 0.0, 0.0, seq=0, hp=(1.0,))
 
-    def test_tick_passthrough_and_seq_wrap(self):
+    def test_tick_passthrough_and_actor_slot_validation(self):
         body = roster.build_entity_full_update(1500, 0x12345678, 0.0, 0.0,
-                                               seq=0x105)
+                                               seq=0x05)
         self.assertEqual(struct.unpack_from(">I", body, 8)[0], 0x12345678)
         self.assertEqual(body[116], 0x05)
+        with self.assertRaises(ValueError):
+            roster.build_entity_full_update(1500, 1, 0, 0, seq=0x105)
         ticks = [struct.unpack_from(">I", roster.build_entity_full_update(
             1500, t, 0.0, 0.0, seq=t), 8)[0] for t in (1, 2, 7)]
         self.assertEqual(ticks, sorted(ticks))                       # monotonic

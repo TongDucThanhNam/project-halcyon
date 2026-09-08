@@ -1,7 +1,8 @@
 """Unit tests for Project Halcyon jungle camps, monsters, objectives, leashing, and brush."""
+import struct
 import unittest
 
-from server import economy, hero_movement, jungle, wire
+from server import economy, hero_movement, jungle, level_wire, roster, wire
 
 
 class TestJungleCampsInitialization(unittest.TestCase):
@@ -75,19 +76,44 @@ class TestMonsterCombatAndBounty(unittest.TestCase):
         )
         self.assertFalse(treant.is_alive)
 
-        # Emits 1073 DESTROY and 1035 DESPAWN
+        # Native1072 death retains the Treant corpse until its4-second removal.
         opcodes = [op for op, _ in frames]
-        self.assertIn(wire.OP.DESTROY, opcodes)
-        self.assertIn(wire.OP.DESPAWN, opcodes)
-
-        # Treant heals killer (+220 HP)
-        self.assertEqual(self.hero.hp, 500.0 + 220.0)
-        self.assertIn(wire.OP.ENTITY_STAT, opcodes)
-
-        # Killer receives gold bounty (65g) and XP (70 XP)
+        self.assertIn(wire.OP.ENTITY_DEATH, opcodes)
+        self.assertNotIn(wire.OP.DESTROY, opcodes)
+        self.assertNotIn(wire.OP.DESPAWN, opcodes)
+        # The 70 XP bounty crosses the native first requirement of 68. The
+        # fixture gains one 70-HP level increase as well as one Treant heal.
         player_econ = self.econ.get_or_create(1500)
+        self.assertEqual(economy.XP_LEVEL_THRESHOLDS[1], 68.0)
+        self.assertEqual((player_econ.level, self.hero.level), (2, 2))
+        self.assertEqual(player_econ.ability_points, 2)
+        self.assertEqual(self.hero.max_hp, 800.0 + 70.0)
+        self.assertEqual(self.hero.hp, 500.0 + 220.0 + 70.0)
+
+        # Native1076 already grows client HP. Only the +220 heal belongs in
+        # additive1053 HP traffic; publishing +70 again would double growth.
+        hp_frames = [(op, p) for op, p in frames
+                     if op == wire.OP.ENTITY_STAT and p[8] == roster.STAT_HEALTH]
+        self.assertEqual(hp_frames, [(wire.OP.ENTITY_STAT,
+                                     roster.build_hero_stat(1500, 220.0, roster.STAT_HEALTH))])
+        levels = [p for op, p in frames if op == level_wire.OP_LEVEL_INCREMENT]
+        self.assertEqual(levels, [level_wire.build_level_increment(1500)])
+        xp_index = next(i for i, (op, p) in enumerate(frames)
+                        if op == wire.OP.ENTITY_STAT and p[8] == roster.STAT_EXPERIENCE)
+        self.assertEqual(struct.unpack_from(">f", frames[xp_index][1], 4)[0], 70.0)
+        self.assertLess(xp_index, opcodes.index(level_wire.OP_LEVEL_INCREMENT))
+
+        # Killer receives the bounty once, including after another corpse hit.
         self.assertEqual(player_econ.gold, init_gold + 65.0)
         self.assertEqual(player_econ.xp, 70.0)
+        repeated = self.jm.apply_damage_to_monster(
+            treant.eid, 800.0, self.hero, now=10.1,
+            economy_mgr=self.econ, all_heroes=self.heroes)
+        self.assertEqual(repeated, [])
+        self.assertEqual((self.hero.hp, self.hero.max_hp, self.hero.level), (790.0, 870.0, 2))
+        self.assertEqual((player_econ.gold, player_econ.xp), (init_gold + 65.0, 70.0))
+        removal = self.jm.step(0.05, 14.0, {})
+        self.assertEqual([op for op, _ in removal], [wire.OP.DESTROY, wire.OP.DESPAWN])
 
 
 class TestCampRespawn(unittest.TestCase):
@@ -100,16 +126,16 @@ class TestCampRespawn(unittest.TestCase):
         treant = next(m for m in jm.monsters.values() if m.camp_id == "LCampA")
         jm.apply_damage_to_monster(treant.eid, 1000.0, hero, now=10.0)
 
-        # Camp A respawn duration is 85s -> respawns at 95.0s
+        # Native Camp A respawn duration is 60s -> respawns at 70.0s.
         self.assertIn("LCampA", jm.camp_respawns)
-        self.assertEqual(jm.camp_respawns["LCampA"], 95.0)
+        self.assertEqual(jm.camp_respawns["LCampA"], 70.0)
 
-        # Step at 90.0s (not yet respawned)
-        jm.step(dt=1.0, now=90.0, all_heroes=heroes)
+        # A tick immediately before the deadline must not respawn the camp.
+        jm.step(dt=0.05, now=69.95, all_heroes=heroes)
         self.assertFalse(any(m.camp_id == "LCampA" and m.is_alive for m in jm.monsters.values()))
 
-        # Step at 95.1s -> respawns with fresh eid!
-        spawn_frames = jm.step(dt=1.0, now=95.1, all_heroes=heroes)
+        # The first tick at the deadline respawns with a fresh EID.
+        spawn_frames = jm.step(dt=0.05, now=70.0, all_heroes=heroes)
         self.assertNotIn("LCampA", jm.camp_respawns)
         new_treant = next(m for m in jm.monsters.values() if m.camp_id == "LCampA" and m.is_alive)
         self.assertIsNotNone(new_treant)

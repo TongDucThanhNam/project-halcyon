@@ -33,11 +33,23 @@ decompile mining · `[X]` documented ceiling (out of band).
 | 12 | Controls / HUD / camera / feel | **[M]** closed | teardown §4/§11/§13/§14 |
 | 13 | Match transport & protocol | **[M]** closed | wire leaf §15 |
 
-## §8 Jungle & objectives — measured 2026-09-03 (match-2 corpus, ±7 s chunk quantization)
+## §8 Jungle & objectives — native camp timing correction, 2026-09-08
 
-- Camps open together at **~42-45 s** (first monster 1010 after match start).
-- Respawn after clearing: **Camps B/C/D ≈ 71 s, Camp A ≈ 85 s** after the
-  kill (respawn anchored to clear time, not global clock — B cleared 70.6 → respawned 141.2; C 84.7 → 155.3; D 98.8 → 169.4; A 56.5 → 141.2).
+- The older opening estimate **~42–45 s** was chunk-derived; the camp-timer
+  correction below does not establish a match-clock opening schedule.
+- Respawn after full clear: **Treant camps A/C = 60 s; bear camps B/D = 50 s**.
+  This replaces the old **A≈85 / B/C/D≈71 s** chunk-index estimates. Exact
+  timestamps from 26 complete generations in two matches give A/C
+  59.996834–60.097252 s and B/D 50.011421–50.095108 s. Camp identity is joined
+  by class, archetype and unchanged creation position; a pair's timer starts
+  at its last member's death. Original match-2 files themselves provide the
+  correction: left A 44.946995→105.011223, B 50.632389→100.693619,
+  C 58.551327→118.631599, D 70.919754→121.014862. Those files have 10-second
+  timestamp spans per chunk, not the ~14.12-second multiplier reproducing
+  the old estimates. All 13 matching `vgfull` camp intervals agree with
+  byte-equal TCP events within 0.014808 s. See
+  `Docs/Plan/solo-sandbox-camp-respawn.md` for locations, source rows, checks
+  and the separate limits of hero UI-clock evidence in §19.3.
 - Camp composition + maxHP scaling per spawn wave: A = 1×750→930;
   B = 2×600→730; C = 1×750→930; D = 2×480→580. Camp monsters get **fresh
   eids each spawn** — track by position, never by id.
@@ -155,6 +167,14 @@ decompile mining · `[X]` documented ceiling (out of band).
 
 ## §12 Item offset map — anchored 2026-09-03 (agent sweep + spot-verified)
 
+**Superseded by the 2026-09-07 structured item audit:** the final 64-bit INST
+root `+72` relocation addresses a pointer array of typed 16-byte attribute
+records. All 36 implemented catalog items now match this graph, and all eight
+active cooldowns match named native ability records. Use
+[`solo-sandbox-items.md`](../Plan/solo-sandbox-items.md#complete-native-static-stat-audit)
+and `Tools/Teardown/inspect_item_constants.py` for current values. The fixed
+offset table below is historical, type-blind evidence, not a catalog schema.
+
 The DB `bonus_floats` reader is **type-blind**: 497/1,308 values decode to
 printable ASCII (`NAME`, `TORE`, `_ITE`…) — 4-byte string fragments
 (perk/buff identifiers) misread as floats. Any offset value >~2,000 with
@@ -188,8 +208,13 @@ stat block is anchored on T1/T3 items (spot-verified against the DB):
    **closed via 1011** (see offline combat-math pass above); remaining:
    exact f(A) per-sample fit is **infeasible offline** (no auto-attack
    class in bot hero↔hero traffic — clean negative); 1052 non-39 type
-   semantics; per-hero XP curves from 1053 type-2 still lack thresholds
-   (game_modes DB empty; guide timeline is time-based only).
+   semantics. **Progression correction (2026-09-07):** `1053` type 2 is
+   energy and type 8 is XP. Native `1011` explicitly stores hero level,
+   unspent points, within-level XP and requirement; 852 snapshots establish
+   requirements `68 + 16*(level-1)`, while `1076` increments level and `1052`
+   attribute 39 sets the new requirement. Exact offsets, cumulative thresholds,
+   capture rollovers and reproduction are in
+   [the progression implementation leaf](../Plan/solo-sandbox-level-progression.md).
 2. **New passive captures** (each = one adb-driven match + one question):
    deliberate death (on-screen respawn countdown = ground truth); mine
    capture; kraken capture; turret dive (aggro switch rules); bush
@@ -429,6 +454,11 @@ mined straight from the shipped files:
   ARMOR_PEN 0.1 / SHRED 3.0 / DURATION 5.0, `Item_Contraption` Charges
   20 / Cooldown 5. Fields not in the TSV are the passive descriptions
   (prose, already cite-covered) and the decoy engine constants.
+  **2026-09-07 correction:** those TSV labels were shifted relative to their
+  numeric records. The PTCH name-pointer route gives Crucible Cooldown **75**
+  and RANGE **12**, Atlas Cooldown **45** and DURATION **4**; do not implement
+  the older adjacent-string readings. The current item evidence leaf above
+  records native values and the operator's explicit effect overrides separately.
 - **Vision (Domain 10) — numeric radii CLOSED as an evidenced offline
   ceiling [X]**: the 22-name vision buff grammar stands inventoried
   (`Buff_{Stealth, TrueSight, Revealed, UnobstructedVision,

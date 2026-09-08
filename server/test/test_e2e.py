@@ -12,12 +12,44 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from server import gateway, match_server, roster, wire
-from server import hero_catalog
+from server import hero_catalog, cooldown_wire, buff_wire, entity_spawn
 
 MATCH_ID = "00000000-1111-4222-8333-444455556666"
 SESSION_UUID = "ea4c7fda-4b61-481d-abb7-1c757d24ae58"
 ROSTER_SIZE = roster.SNAPSHOT_ROSTER_SIZE
 STRIDE = roster.SNAPSHOT_RECORD_STRIDE
+
+
+class _NativeShopFrames:
+    """Validate only the two measured shop messages interleaved with gameplay."""
+
+    def __init__(self, case):
+        self.case = case
+        self.owners = {player.eid for player in roster.default_solo_bots(SESSION_UUID, MATCH_ID)}
+        self.instances = set()
+
+    def consume(self, opcode, payload):
+        if opcode == 1087:
+            self.case.assertEqual(len(payload), 38)
+            state = buff_wire.parse_buff_state(payload)
+            buff = state.buff
+            self.case.assertEqual((buff.kind, buff.duration, state.state_count, state.words),
+                                  (174, 1.5, 1, (0, 0, 452, 0)))
+            self.case.assertEqual(state.encode(), payload)
+        elif opcode == 1086:
+            self.case.assertEqual(len(payload), 22)
+            buff = buff_wire.parse_buff_add(payload)
+            self.case.assertEqual((buff.kind, buff.duration), (173, -1.0))
+            self.case.assertEqual(buff.encode(), payload)
+        else:
+            return False
+        self.case.assertIn(buff.target_eid, self.owners)
+        self.case.assertEqual(buff.source_eid, buff.target_eid)
+        self.case.assertGreater(buff.instance_id, 0)
+        self.case.assertNotIn(buff.instance_id, self.instances,
+                              "shop adds and permission refreshes require fresh identities")
+        self.instances.add(buff.instance_id)
+        return True
 
 
 class TestNoTapeFlag(unittest.TestCase):
@@ -103,7 +135,8 @@ class TestGatewayFlow(unittest.TestCase):
         shutil.rmtree(cls.tempdir, ignore_errors=True)
 
     def setUp(self):
-        # tests drive the 1116-only world fallback; the operator's corpus
+        # Tests drive the live world fallback, including native shop permission;
+        # the operator's corpus
         # tape (if present) must not make frames appear mid-assertion
         self._old_tape_path = match_server.WORLD_TAPE_PATH
         match_server.WORLD_TAPE_PATH = os.path.join(self.tempdir, "no-tape.bin")
@@ -170,12 +203,14 @@ class TestGatewayFlow(unittest.TestCase):
                 self.fail("expected pick-phase frame not arrived")
 
             def read_world(pred, timeout=5.0):
-                """World-phase reader: skips (and shape-checks) 1116/1010;
-                1070 frames pass through for the pred to collect."""
+                """Validate native shop frames alongside existing world traffic;
+                movement frames pass through for the predicate to collect."""
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
                     op, payload = self._read_message(
                         client, timeout=max(0.05, deadline - time.monotonic()))
+                    if shop_frames.consume(op, payload):
+                        continue
                     if pred(op, payload):
                         return op, payload
                     self.assertIn(op, (wire.OP.SLOT_FLAGS_PING,
@@ -187,6 +222,7 @@ class TestGatewayFlow(unittest.TestCase):
                                          roster.SLOT_FLAGS_PAYLOAD_SIZE)
                 self.fail("expected world frame not arrived")
 
+            shop_frames = _NativeShopFrames(self)
             read_pick(lambda op, p: op == wire.OP.SNAPSHOT_JOIN, strict=False)
             selection = struct.pack(">II", 925, 0x2fd7245d) + bytes(6)
             client.sendall(wire.encode_message(self.cipher, wire.OP.JOIN_1118,
@@ -212,11 +248,14 @@ class TestGatewayFlow(unittest.TestCase):
             # 1087 batch) → 1134 echo; 1137 → verbatim echo
             blocks = []
             saw = []
+            init_sequence = [0]
 
             def _await_echo(op, payload):
                 saw.append(op)
                 if op == wire.OP.HERO_BLOCK:
                     blocks.append(payload)
+                if op == wire.OP.ENTITY_FULL_UPDATE:
+                    init_sequence[0] = payload[116]
                 return op == wire.OP.SHOP_OPEN
 
             client.sendall(wire.encode_message(self.cipher, wire.OP.SHOP_OPEN,
@@ -241,7 +280,7 @@ class TestGatewayFlow(unittest.TestCase):
             self.assertEqual((tick, x, y),
                              (1, roster.SPAWN_X, roster.SPAWN_Y))
             self.assertEqual(z, roster.GROUND_Z)
-            self.assertEqual(first[116], 1)                  # seq u8
+            self.assertEqual(first[116], 0)  # persistent local-hero actor slot
 
             # movement: 1010s and 1070s stay position-consistent
             target = (roster.SPAWN_X + 2.0, roster.SPAWN_Y)
@@ -270,7 +309,7 @@ class TestGatewayFlow(unittest.TestCase):
                     px, pz, py = struct.unpack_from(">fff", payload, 12)
                     self.assertEqual(py, roster.SPAWN_Y)
                     self.assertGreater(ptick, last_1010[0])   # monotonic tick
-                    self.assertEqual((last_1010[1] + 1) & 0xFF, payload[116])
+                    self.assertEqual(last_1010[1], payload[116])
                     last_1010 = (ptick, payload[116])
                     # along the walked segment, never beyond the target
                     self.assertGreaterEqual(px, roster.SPAWN_X)
@@ -481,8 +520,9 @@ class TestGatewayFlow(unittest.TestCase):
             block_ops = [o for o, _ in dump]
             blocks = [i for i, o in enumerate(block_ops) if o == wire.OP.HERO_BLOCK]
             self.assertEqual(len(blocks), 6)
-            self.assertEqual(block_ops[blocks[0] + 1:blocks[0] + 8],
-                             [wire.OP.TIMER_TICK] * 7)
+            initial = cooldown_wire.build_initial_timers(1519, roster.BOT_HERO_CHOICES[-1][0])
+            self.assertEqual(dump[blocks[0] + 1:blocks[0] + 1 + len(initial)],
+                             [(wire.OP.TIMER_TICK, p) for p in initial])
             first_block = dump[blocks[0]][1]
             self.assertEqual(len(first_block), roster.HERO_BLOCK_PAYLOAD_SIZE)
             self.assertEqual(struct.unpack_from(">I", first_block, 8)[0], 1519)  # reverse
@@ -515,12 +555,15 @@ class TestGatewayFlow(unittest.TestCase):
                 struct.pack(">ff", *target) + bytes(6)))
             seen = []
             move_targets = []
+            shop_frames = _NativeShopFrames(self)
             deadline = time.monotonic() + 4.0
             while time.monotonic() < deadline:
                 try:
                     op, payload = self._read_message(client, timeout=0.8)
                 except (AssertionError, TimeoutError):
                     break                       # quiet: movement finished
+                if shop_frames.consume(op, payload):
+                    continue
                 if op == wire.OP.MOVE_TO:
                     self.assertEqual(seen, [], "1016 must precede the first correction")
                     self.assertEqual(payload, struct.pack(">Bff", 0, *target) + bytes(5))
@@ -534,8 +577,13 @@ class TestGatewayFlow(unittest.TestCase):
                     seen.append((x, y))
                 elif op == wire.OP.ENTITY_STATE:
                     pass
+                elif op == wire.OP.ENTITY_STAT:
+                    self.assertEqual(len(payload), 14)
+                    self.assertIn(payload[8], (roster.STAT_GOLD, roster.STAT_EXPERIENCE))
+                    self.assertAlmostEqual(struct.unpack_from(">f", payload, 4)[0],
+                                           6.0 if payload[8] == roster.STAT_GOLD else 1.0)
                 else:
-                    self.assertEqual(op, wire.OP.SLOT_FLAGS_PING)  # 1116-only world
+                    self.assertEqual(op, wire.OP.SLOT_FLAGS_PING)
             self.assertEqual(len(move_targets), 1)
             self.assertTrue(seen, "no 1070 position frames after 1012")
             self.assertEqual(seen[0], (roster.SPAWN_X, roster.SPAWN_Y))
@@ -679,11 +727,27 @@ class TestWaveE2E(unittest.TestCase):
             self.cipher, wire.OP.PLAYER_UUID,
             SESSION_UUID.encode("ascii") + bytes(34)))
 
+        self._last_join_1010_seq = 0
+        self._non_wave_teams = {p.eid: p.team for p in
+                               roster.default_solo_bots(SESSION_UUID, MATCH_ID)}
+        self._non_wave_slots = {p.slot: p.eid for p in
+                               roster.default_solo_bots(SESSION_UUID, MATCH_ID)}
         def await_op(want, timeout=8.0):
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 op, payload = self._read_message(
                     client, timeout=deadline - time.monotonic())
+                if op == wire.OP.ENTITY_FULL_UPDATE:
+                    self.assertEqual(len(payload), roster.ENTITY_FULL_UPDATE_PAYLOAD_SIZE)
+                    archetype, actor_class, eid = struct.unpack_from(">III", payload)
+                    classes = {entity_spawn.STRUCTURE_CLASS: entity_spawn.STRUCTURE_ARCHETYPES,
+                               entity_spawn.JUNGLE_CLASS: entity_spawn.JUNGLE_ARCHETYPES}
+                    self.assertIn(actor_class, classes)
+                    self.assertIn(archetype, classes[actor_class])
+                    self.assertIn(payload[121], (0, 1, 2))
+                    self._non_wave_teams[eid] = payload[121]
+                    self._non_wave_slots[payload[116]] = eid
+                    self._last_join_1010_seq = payload[116]
                 if op == want:
                     return payload
             self.fail(f"expected opcode {want} not arrived")
@@ -719,13 +783,22 @@ class TestWaveE2E(unittest.TestCase):
         self.assertEqual(await_op(wire.OP.HERO_READY, timeout=5.0), ready)
 
     def _read_wave_stream(self, client, seconds):
-        """Collect minion-layer frames for a while; only 1116 pings may
-        interleave. 1054/1073/1035 are part of the live stream now — the
+        """Collect minion frames while validating shop/resources and team vision.
+        1045/1037/1054/1073/1035 are part of the live stream now — the
         walkers meet and fight inside this window (combat layer)."""
         allowed = {wire.OP.SLOT_FLAGS_PING, wire.OP.ENTITY_FULL_UPDATE,
                    wire.OP.POSITION, wire.OP.ENTITY_STATE, wire.OP.ENTITY_FLOAT,
-                   wire.OP.COMBAT_DELTA, wire.OP.DESTROY, wire.OP.DESPAWN}
+                   wire.OP.TARGET_ACQUIRE, wire.OP.COMBAT_DELTA,
+                   wire.OP.DESTROY, wire.OP.DESPAWN, 1037}
         out = []
+        shop_frames = _NativeShopFrames(self)
+        self._wave_teams = {}
+        wave_archetypes = {}
+        wave_slots = {}
+        attacks_started = set()
+        projectiles_released = set()
+        projectile_ids = set()
+        self._non_wave_visibility = []
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             try:
@@ -733,6 +806,72 @@ class TestWaveE2E(unittest.TestCase):
                     client, timeout=deadline - time.monotonic())
             except (socket.timeout, TimeoutError):
                 break
+            if shop_frames.consume(op, payload):
+                continue
+            if op == wire.OP.ENTITY_STAT:
+                # The live economy runs alongside lane actors. Validate its
+                # measured resource channels before collecting the wave layer.
+                self.assertEqual(len(payload), 14)
+                self.assertIn(payload[8], (roster.STAT_GOLD, roster.STAT_EXPERIENCE))
+                self.assertAlmostEqual(struct.unpack_from(">f", payload, 4)[0],
+                                       6.0 if payload[8] == roster.STAT_GOLD else 1.0)
+                continue
+            if op == wire.OP.ENTITY_FULL_UPDATE:
+                self.assertEqual(len(payload), roster.ENTITY_FULL_UPDATE_PAYLOAD_SIZE)
+                archetype, actor_class, eid = struct.unpack_from(">III", payload)
+                self.assertEqual(actor_class, roster.LANE_MINION_CLASS)
+                self.assertIn(archetype, entity_spawn.LANE_ARCHETYPES)
+                self.assertIn(payload[121], (1, 2))
+                self.assertNotIn(eid, self._non_wave_teams)
+                self.assertNotIn(eid, self._wave_teams)
+                self._wave_teams[eid] = payload[121]
+                wave_archetypes[eid] = archetype
+                wave_slots[payload[116]] = eid
+            if op == wire.OP.TARGET_ACQUIRE:
+                self.assertEqual(len(payload), 14)
+                source, target, action = struct.unpack_from(">IIB", payload)
+                self.assertIn(source, self._wave_teams)
+                self.assertIn(target, self._wave_teams.keys() | self._non_wave_teams.keys())
+                self.assertIn(action, (0, 1, 2) if wave_archetypes[source] == 366 else (0, 1))
+                self.assertEqual(payload[9:], bytes(5))
+                attacks_started.add((source, target))
+            if op == 1037:
+                self.assertEqual(len(payload), 22)
+                instance, socket_hash, argument, kind, source_slot, owner_slot, target_slot = struct.unpack_from(
+                    '>IIfHBBB', payload)
+                self.assertEqual((socket_hash, kind, payload[17:]), (0x005DD10C, 79, bytes(5)))
+                self.assertEqual(owner_slot, source_slot)
+                self.assertIn(source_slot, wave_slots)
+                source = wave_slots[source_slot]
+                slots = {**self._non_wave_slots, **wave_slots}
+                self.assertIn(target_slot, slots)
+                target = slots[target_slot]
+                self.assertIn(wave_archetypes[source], (365, 367))
+                self.assertIn((source, target), attacks_started)
+                self.assertEqual(argument, 15.0 if target in roster.HERO_SPAWNS else 50.0)
+                self.assertNotIn(instance, projectile_ids | self._wave_teams.keys() | self._non_wave_teams.keys())
+                projectile_ids.add(instance)
+                projectiles_released.add((source, target))
+            if op == wire.OP.COMBAT_DELTA:
+                victim, attacker = struct.unpack_from(">II", payload)
+                if attacker in self._wave_teams:
+                    self.assertIn((attacker, victim), attacks_started)
+                    if wave_archetypes[attacker] in (365, 367):
+                        self.assertIn((attacker, victim), projectiles_released)
+            if op == wire.OP.ENTITY_STATE:
+                self.assertEqual(len(payload), 14)
+                eid, viewer, field_a, field_b, field_c = struct.unpack_from(">IBBBB", payload)
+                self.assertIn(viewer, (1, 2))
+                self.assertEqual((field_a, field_c, payload[8:]), (1, 0, bytes(6)))
+                if eid in self._non_wave_teams:
+                    owner = self._non_wave_teams[eid]
+                    self.assertIn(field_b, (15,) if viewer == owner else (0, 1))
+                    self._non_wave_visibility.append((eid, viewer, field_b))
+                    continue
+                # Unknown IDs must fail even with waves disabled. Only actors
+                # created by a lane-class 1010 belong to the collected layer.
+                self.assertIn(eid, self._wave_teams)
+                self.assertIn(field_b, (0, 15) if viewer == self._wave_teams[eid] else (0, 1))
             self.assertIn(op, allowed)
             if op != wire.OP.SLOT_FLAGS_PING:
                 out.append((op, payload))
@@ -759,10 +898,10 @@ class TestWaveE2E(unittest.TestCase):
         self.assertEqual(struct.unpack_from(">I", spawn0, 4)[0],
                          roster.LANE_MINION_CLASS)
         self.assertEqual(struct.unpack_from(">I", spawn0, 8)[0], 4610)
-        self.assertEqual(spawn0[116], 1)                 # seq: tape-less → 1
+        self.assertEqual(spawn0[116], (self._last_join_1010_seq + 1) & 255)
         spawn1 = frames[3][1]
         self.assertEqual(struct.unpack_from(">I", spawn1, 8)[0], 4611)
-        self.assertEqual(spawn1[116], 2)
+        self.assertEqual(spawn1[116], (spawn0[116] + 1) & 255)
         # 10 minions, eids sequential, spawners = wave-1 measured set
         spawns = [p for op, p in frames if op == wire.OP.ENTITY_FULL_UPDATE]
         self.assertEqual(
@@ -772,19 +911,21 @@ class TestWaveE2E(unittest.TestCase):
         self.assertEqual([struct.unpack_from(">I", p, 8)[0] for p in spawns],
                          list(range(4610, 4620)))
         self.assertEqual([struct.unpack_from(">I", p, 0)[0] for p in spawns],
-                         [s for s in roster.LANE_SPAWNER_EIDS for _ in (0, 1)])
-        # 20 1067s; per minion exactly one SPAWNED (00) then one MOVING (0f)
-        # — the corpus emits each pair's moving states WAVE_STATE_DELAY after
-        # its own spawn, so the flat order interleaves across pairs
+                         [s for s in (366, 366, 366, 365, 365) for _ in (0, 1)])
+        # 1067 is visibility, not a movement-state command. The owner bank
+        # receives the corpus birth 00, the live vision 0f, and the delayed
+        # corpus 0f. Opposing-team 00/01 setters remain in the stream and were
+        # validated above; they must not be mistaken for extra actor births.
         states = [p for op, p in frames if op == wire.OP.ENTITY_STATE]
-        self.assertEqual(len(states), 20)
         state_hist = {}
         for p in states:
-            state_hist.setdefault(struct.unpack_from(">I", p, 0)[0], []) \
-                     .append(p[6])
+            eid = struct.unpack_from(">I", p, 0)[0]
+            if p[4] == self._wave_teams[eid]:
+                state_hist.setdefault(eid, []).append(p[6])
         self.assertEqual(set(state_hist), set(range(4610, 4620)))
         for hist in state_hist.values():
             self.assertEqual(hist, [roster.ENTITY_STATE_SPAWNED,
+                                    roster.ENTITY_STATE_MOVING,
                                     roster.ENTITY_STATE_MOVING])
         # walking: eid 4610 advances toward its first lane point (x drops
         # from 71.28), then rests at the lane end (speed-patched 30 u/s)
@@ -794,9 +935,14 @@ class TestWaveE2E(unittest.TestCase):
         self.assertGreaterEqual(len(path), 4)
         self.assertAlmostEqual(path[0][0], roster.LANE_SPAWN_RIGHT[0], places=3)
         self.assertLess(path[-1][0], 65.62)              # past the first node
-        self.assertEqual((round(path[-1][0], 2), round(path[-1][1], 2)),
-                         (round(roster.LANE_PATH_RIGHT[-1][0], 2),
-                          round(roster.LANE_PATH_RIGHT[-1][1], 2)))
+        # Opposing waves meet and stop in attack range before traversing every
+        # remaining waypoint. Every correction must remain on the real mesh.
+        nav = match_server._map_navigation()
+        self.assertTrue(all(nav.contains(point) for point in path))
+        self.assertLess((path[-1][0] ** 2 + (path[-1][1] - 5) ** 2) ** .5, 10)
+        self.assertIn(wire.OP.COMBAT_DELTA, ops)
+        self.assertIn(wire.OP.TARGET_ACQUIRE, ops)
+        self.assertIn(1037, ops)
 
     def test_no_wave_env_kills_the_layer(self):
         old = os.environ.get("HALCYON_NO_WAVE")
@@ -807,7 +953,9 @@ class TestWaveE2E(unittest.TestCase):
             self.addCleanup(client.close)
             self._join_to_world(client)
             frames = self._read_wave_stream(client, 3.0)
-            self.assertEqual(frames, [])                 # 1116-only world
+            self.assertEqual(frames, [])                 # no minion-layer frames
+            self.assertEqual(self._wave_teams, {})
+            self.assertTrue(self._non_wave_visibility)  # ordinary team vision still runs
         finally:
             if old is None:
                 os.environ.pop("HALCYON_NO_WAVE", None)
