@@ -17,10 +17,12 @@ import subprocess
 import sys
 import time
 
-STACK_DIR = os.path.join(os.environ.get("TEMP", "."), "halcyon_stack")
+from server.paths import pc_data_dir, stack_dir
+
+STACK_DIR = str(stack_dir())
 ANSWERS_PATH = os.path.join(STACK_DIR, "answers.json")
 HTTP_LOG = os.path.join(STACK_DIR, "http_log.txt")
-CLIENT_DIR = r"D:\Downloads\vg\pc\Vainglory 4.13\Vainglory"
+CLIENT_DIR = str(pc_data_dir().parent)
 CLIENT_EXE = os.path.join(CLIENT_DIR, "Vainglory.exe")
 WAIT_S = 40
 

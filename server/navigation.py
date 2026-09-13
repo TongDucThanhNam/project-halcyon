@@ -15,9 +15,11 @@ import os
 from pathlib import Path
 import struct
 
+from .paths import pc_data_dir
+
 SCALE = 1_000_000
 CELL = 8 * SCALE
-DEFAULT_A001_PATH = Path("D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data/4B/4BD271EAAC785AEB0C2BCED99515D401")
+DEFAULT_A001_PATH = pc_data_dir() / "4B/4BD271EAAC785AEB0C2BCED99515D401"
 
 
 def fixed(value: float) -> int:

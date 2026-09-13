@@ -16,12 +16,13 @@ talks to before the match socket opens:
       - gamefeed / server-status / misc          — logged, benign defaults;
   * the T2 gateway + heartbeat relay from server.gateway run alongside.
 
-All of it is 127.0.0.1-only and logged under $TEMP/halcyon_stack/. No
-traffic ever leaves the machine; nothing of SEMC's real infrastructure is
-touched (the hosts entries actively PREVENT the client from reaching it).
+Logs/configuration use server.paths.stack_dir(). For same-host operation,
+use --bind-host 127.0.0.1 --match-host 127.0.0.1 and configure the owned
+emulator through guest_setup. The default bind is configurable; LAN operation
+requires the corresponding owned-device routing and firewall setup.
 
 Usage:  python -m server.platform.local_stack
-Edit $TEMP/halcyon_stack/answers.json while the client runs — it is
+Edit answers.json in that runtime directory while the client runs — it is
 re-read on every request.
 """
 from __future__ import annotations
@@ -43,7 +44,9 @@ if __package__ in (None, ""):
 else:
     from .. import gateway
 
-STACK_DIR = os.path.join(os.environ.get("TEMP", "."), "halcyon_stack")
+from server.paths import stack_dir
+
+STACK_DIR = str(stack_dir())
 LOG_PATH = os.path.join(STACK_DIR, "http_log.txt")
 RPC_LOG_PATH = os.path.join(STACK_DIR, "rpc.jsonl")
 ANSWERS_PATH = os.path.join(STACK_DIR, "answers.json")

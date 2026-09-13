@@ -2,12 +2,13 @@
 
 Builds one self-signed RSA-2048 cert covering every hostname the local
 platform stack serves (SAN), CA:TRUE so Windows accepts it in the Root
-store, writes PEM key/cert for Python's ssl module into $TEMP/halcyon_stack
-(private key never enters the repo), plus a .cer for Import-Certificate.
+store, writes PEM key/cert for Python's ssl module into the private runtime
+directory (private key stays Git-ignored), plus a .cer for Import-Certificate.
 
 Usage:
-  python -m server.platform.mkcert            # writes PEMs to $TEMP
-  then (admin): Import-Certificate -FilePath <cer> -CertStoreLocation `
+  python -m server.platform.mkcert            # see server.paths.stack_dir
+  LDPlayer: python -m server.platform.guest_setup
+  legacy PC only (admin): Import-Certificate -FilePath <cer> -CertStoreLocation `
                 Cert:\\LocalMachine\\Root
 """
 from __future__ import annotations
@@ -20,7 +21,9 @@ from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
 from Crypto.Signature import PKCS1_v1_5
 
-STACK_DIR = os.path.join(os.environ.get("TEMP", "."), "halcyon_stack")
+from server.paths import stack_dir
+
+STACK_DIR = str(stack_dir())
 
 DNS_NAMES = [
     "platform.superevil.net",
@@ -146,9 +149,8 @@ def main() -> None:
     with open(os.path.join(STACK_DIR, "platform.cer"), "wb") as fh:
         fh.write(cert_der)
     print(f"cert for {len(DNS_NAMES)} SANs written to {STACK_DIR}")
-    print("next (admin): Import-Certificate -FilePath "
-          f"\"{os.path.join(STACK_DIR, 'platform.cer')}\" "
-          "-CertStoreLocation Cert:\\LocalMachine\\Root")
+    print("next for LDPlayer: python -m server.platform.guest_setup "
+          "(installs guest CA trust; Windows root-store import is only for legacy PC use)")
 
 
 if __name__ == "__main__":

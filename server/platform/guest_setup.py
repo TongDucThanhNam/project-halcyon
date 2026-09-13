@@ -12,22 +12,25 @@ Docs/Teardown/vainglory-mobile-local-stack.md:
      127.0.0.1:80->8080 and :443->8443 REDIRECT
   4. adb reverse ×4: 8080, 8443 + the current gateway/heartbeat ports
 
-Idempotent: every step checks its current state first — already-applied
-items are reported and skipped, never re-inserted. /data/local/tmp survives
-reboots, so the overlay files themselves are only expected to exist; when
-they don't, the script fails with the recovery pointer instead of inventing
-state. The final step verifies from inside the guest that
-rpc.kindred-live.net resolves to 127.0.0.1.
+Creates missing hosts/CA overlays on a fresh rooted emulator and discovers
+the installed game's UID unless --uid is supplied. Each step checks the
+current content before reuse, including the mounted public CA certificate.
+Private configuration follows server.paths.stack_dir(). The final step
+verifies that rpc.kindred-live.net resolves to the requested host.
 
 A reboot clears the bind mounts; an adb-server restart clears every reverse
 mapping; either may happen independently — this script is safe to re-run in
 any combination of half-applied state.
 """
 import argparse
+import ipaddress
 import os
+import re
 import subprocess
 import sys
 import time
+
+from server.paths import stack_dir
 
 HOSTS_SRC = "/data/local/tmp/halcyon-hosts-20260905"
 CACERTS_SRC = "/data/local/tmp/halcyon-cacerts-20260905"
@@ -73,15 +76,30 @@ def su(serial, cmd, timeout=20):
 
 def preflight(serial):
     """Bounded shell-service check; on timeout, one adb-server restart."""
-    probe = run(["adb", "-s", serial, "shell", "echo ok"], timeout=10)
-    if probe.returncode == 0 and "ok" in probe.stdout:
-        return True
+    try:
+        probe = run(["adb", "-s", serial, "shell", "echo ok"], timeout=10)
+        if probe.returncode == 0 and "ok" in probe.stdout:
+            return True
+    except subprocess.TimeoutExpired:
+        pass
     print("[adb] shell not responding — restarting adb server once")
     for step in SHELL_RECOVERY:
         run(step, timeout=30)
     time.sleep(1.0)
     probe = run(["adb", "-s", serial, "shell", "echo ok"], timeout=10)
     return probe.returncode == 0 and "ok" in probe.stdout
+
+
+def package_uid(serial):
+    """Discover this installation's UID before installing owner firewall rules."""
+    result = run(["adb", "-s", serial, "shell", "pm", "list", "packages",
+                  "-U", "com.superevilmegacorp.game"])
+    match = re.search(r"^package:com\.superevilmegacorp\.game\s+uid:(\d+)\s*$",
+                      result.stdout, re.MULTILINE)
+    if result.returncode != 0 or not match:
+        raise ValueError("Cannot discover Vainglory UID; install the APK first "
+                         "and check `adb shell pm list packages -U`.")
+    return int(match[1])
 
 
 # -- bind mounts -------------------------------------------------------------
@@ -105,18 +123,34 @@ def mount_state(lines, target, src_hint):
 
 def hosts_content_ok(serial, host="127.0.0.1"):
     res = su(serial, f"grep rpc.kindred-live.net {HOSTS_TARGET}")
-    return res.returncode == 0 and host in res.stdout
+    return res.returncode == 0 and hosts_map(res.stdout).get(VERIFY_HOST) == host
 
 
-def cacerts_content_ok(serial):
-    res = su(serial, f"ls {CACERTS_TARGET}/41e9eb4e.0")
-    return res.returncode == 0 and "41e9eb4e.0" in res.stdout
+def hosts_map(content):
+    mappings = {}
+    for line in content.splitlines():
+        fields = line.split("#", 1)[0].split()
+        if len(fields) >= 2:
+            mappings.update((name, fields[0]) for name in fields[1:])
+    return mappings
+
+
+def cacerts_content_ok(serial, cert_path=None):
+    certificate = cert_path or str(stack_dir() / "platform_cert.pem")
+    if not os.path.isfile(certificate):
+        return False
+    with open(certificate, encoding="ascii") as stream:
+        expected = stream.read().strip()
+    res = su(serial, f"cat {CACERTS_TARGET}/41e9eb4e.0")
+    return res.returncode == 0 and res.stdout.strip() == expected
 
 
 def ensure_hosts_source(serial, host="127.0.0.1"):
     """Ensure /data/local/tmp/halcyon-hosts-20260905 exists and maps SEMC names to host."""
+    host = str(ipaddress.IPv4Address(host))
     check = su(serial, f"cat {HOSTS_SRC} 2>/dev/null")
-    if check.returncode == 0 and host in check.stdout:
+    mappings = hosts_map(check.stdout)
+    if check.returncode == 0 and all(mappings.get(name) == host for name in DNS_NAMES):
         return True
     lines = [
         "127.0.0.1 localhost",
@@ -125,7 +159,7 @@ def ensure_hosts_source(serial, host="127.0.0.1"):
     for d in DNS_NAMES:
         lines.append(f"{host} {d}")
     content = "\\n".join(lines) + "\\n"
-    res = su(serial, f"printf '{content}' > {HOSTS_SRC} && chmod 0644 {HOSTS_SRC}")
+    res = su(serial, f'printf "%b" "{content}" > {HOSTS_SRC} && chmod 0644 {HOSTS_SRC}')
     if res.returncode != 0:
         print(f"[hosts] FAILED to write {HOSTS_SRC}: {res.stderr.strip()}")
         return False
@@ -137,8 +171,21 @@ def ensure_cacerts_source(serial, cert_path=None):
     """Ensure /data/local/tmp/halcyon-cacerts-20260905 contains Halcyon CA cert 41e9eb4e.0."""
     cert_hash = "41e9eb4e.0"
     target_cert = f"{CACERTS_SRC}/{cert_hash}"
-    check = su(serial, f"[ -f {target_cert} ] && echo present")
-    if "present" in check.stdout:
+    if cert_path is not None and not os.path.isfile(cert_path):
+        print(f"[cacerts] FAILED: explicit certificate not found: {cert_path}")
+        return False
+    if cert_path is None:
+        cert_path = str(stack_dir() / "platform_cert.pem")
+        if not os.path.isfile(cert_path):
+            if (stack_dir() / "platform_key.pem").exists():
+                print("[cacerts] FAILED: key exists without certificate; restore the pair")
+                return False
+            from . import mkcert
+            mkcert.main()
+    with open(cert_path, encoding="ascii") as certificate:
+        expected_cert = certificate.read().strip()
+    check = su(serial, f"cat {target_cert}")
+    if check.returncode == 0 and check.stdout.strip() == expected_cert:
         return True
 
     dir_check = su(serial, f"[ -d {CACERTS_SRC} ] && echo present")
@@ -149,21 +196,14 @@ def ensure_cacerts_source(serial, cert_path=None):
             print(f"[cacerts] FAILED to clone system cacerts: {res.stderr.strip()}")
             return False
 
-    if not cert_path or not os.path.isfile(cert_path):
-        default_cert = os.path.join(os.environ.get("TEMP", "."), "halcyon_stack", "platform_cert.pem")
-        if os.path.isfile(default_cert):
-            cert_path = default_cert
-        else:
-            print(f"[cacerts] generating certificate via mkcert...")
-            from . import mkcert
-            mkcert.main([])
-            cert_path = default_cert
-
     push_res = run(["adb", "-s", serial, "push", cert_path, f"/data/local/tmp/{cert_hash}"])
     if push_res.returncode != 0:
         print(f"[cacerts] FAILED to push cert: {push_res.stderr.strip()}")
         return False
-    su(serial, f"cp /data/local/tmp/{cert_hash} {target_cert} && chmod 0644 {target_cert}")
+    installed = su(serial, f"cp /data/local/tmp/{cert_hash} {target_cert} && chmod 0644 {target_cert}")
+    if installed.returncode != 0:
+        print(f"[cacerts] FAILED to install certificate: {installed.stderr.strip()}")
+        return False
     print(f"[cacerts] installed {cert_hash} into {CACERTS_SRC}")
     return True
 
@@ -214,7 +254,8 @@ def rule_present(serial, binary, table_args, markers):
     appear), so presence is judged by marker substrings — the tag comment
     plus whatever makes THIS rule distinct (e.g. --to-ports)."""
     res = su(serial, f"{binary} {' '.join(table_args)} -S OUTPUT".strip())
-    return all(m in res.stdout for m in markers)
+    return res.returncode == 0 and any(
+        all(m in line for m in markers) for line in res.stdout.splitlines())
 
 
 def ensure_rule(serial, binary, table_args, rule, markers):
@@ -245,13 +286,13 @@ def ensure_firewall(serial, uid, http, https, host="127.0.0.1", redirect_lan=Fal
             ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
              "!", "-d", "127.0.0.0/8", "-m", "comment",
              "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
-            [LOCAL_ONLY_COMMENT])
+            [LOCAL_ONLY_COMMENT, f"--uid-owner {uid} "])
         ok &= ensure_rule(
             serial, "ip6tables", [],
             ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
              "!", "-d", "::1/128", "-m", "comment",
              "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
-            [LOCAL_ONLY_COMMENT])
+            [LOCAL_ONLY_COMMENT, f"--uid-owner {uid} "])
         ok &= ensure_rule(
             serial, "iptables", ["-t", "nat"],
             ["-I", "OUTPUT", "1", "-d", "127.0.0.1", "-p", "tcp",
@@ -275,21 +316,21 @@ def ensure_firewall(serial, uid, http, https, host="127.0.0.1", redirect_lan=Fal
             ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
              "-d", f"{host}/32", "-m", "comment",
              "--comment", marker_host, "-j", "ACCEPT"],
-            [marker_host])
+            [marker_host, f"--uid-owner {uid} "])
         # Rule 2: reject other non-loopback IPv4 traffic (no internet leak)
         ok &= ensure_rule(
             serial, "iptables", [],
             ["-I", "OUTPUT", "2", "-m", "owner", "--uid-owner", str(uid),
              "!", "-d", "127.0.0.0/8", "-m", "comment",
              "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
-            [LOCAL_ONLY_COMMENT])
+            [LOCAL_ONLY_COMMENT, f"--uid-owner {uid} "])
         # Rule 3: reject non-loopback IPv6 traffic
         ok &= ensure_rule(
             serial, "ip6tables", [],
             ["-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", str(uid),
              "!", "-d", "::1/128", "-m", "comment",
              "--comment", LOCAL_ONLY_COMMENT, "-j", "REJECT"],
-            [LOCAL_ONLY_COMMENT])
+            [LOCAL_ONLY_COMMENT, f"--uid-owner {uid} "])
         if redirect_lan:
             ok &= ensure_rule(
                 serial, "iptables", ["-t", "nat"],
@@ -358,13 +399,13 @@ def main(argv=None):
                     "(bind mounts + tagged firewall + adb reverses).")
     ap.add_argument("--serial", default="emulator-5554",
                     help="adb device serial (default emulator-5554)")
-    ap.add_argument("--host", default="127.0.0.1",
+    ap.add_argument("--host", default="127.0.0.1", type=lambda value: str(ipaddress.IPv4Address(value)),
                     help="target platform/match host IP (default 127.0.0.1; set to LAN IP for remote client)")
     ap.add_argument("--cert", default=None,
                     help="path to platform certificate PEM (default: auto-detect/generate)")
-    ap.add_argument("--uid", type=int, default=10060,
+    ap.add_argument("--uid", type=int, default=None,
                     help="game package uid for the local-only REJECT "
-                         "(installation-specific, default 10060)")
+                         "(default: discover from the installed Vainglory package)")
     ap.add_argument("--http", type=int, default=8080,
                     help="host http port behind the 80 REDIRECT")
     ap.add_argument("--https", type=int, default=8443,
@@ -397,6 +438,21 @@ def main(argv=None):
               "emulator or adb (leaf: 'ADB shells timing out')")
         return 2
 
+    root = su(args.serial, "id")
+    if root.returncode != 0 or not re.search(r"\buid=0\b", root.stdout):
+        print("[guest] ROOT unavailable; enable Root permission in LDPlayer and reboot")
+        return 2
+    if args.uid is None:
+        try:
+            args.uid = package_uid(args.serial)
+        except ValueError as exc:
+            print(f"[guest] {exc}")
+            return 2
+    if args.uid <= 0:
+        print("[guest] invalid game UID")
+        return 2
+    print(f"[guest] using game UID {args.uid}")
+
     ok = True
     ok &= ensure_hosts_source(args.serial, args.host)
     ok &= ensure_cacerts_source(args.serial, args.cert)
@@ -405,7 +461,7 @@ def main(argv=None):
     ok &= ensure_mount(args.serial, lines, HOSTS_SRC, HOSTS_TARGET,
                        lambda s: hosts_content_ok(s, args.host))
     ok &= ensure_mount(args.serial, lines, CACERTS_SRC, CACERTS_TARGET,
-                       cacerts_content_ok)
+                       lambda serial: cacerts_content_ok(serial, args.cert))
     ok &= ensure_firewall(args.serial, args.uid, args.http, args.https,
                           host=args.host, redirect_lan=args.redirect_lan)
     if args.host == "127.0.0.1":

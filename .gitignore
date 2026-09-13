@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .zcode-dispatch/
 /session*.png
+
+# Operator-owned game installs, captures, runtime certificates and local tools.
+# Physically inside the project for portability; never stage or distribute.
+/Local/
+/.venv/
+/.pytest_cache/

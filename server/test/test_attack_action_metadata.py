@@ -1,9 +1,8 @@
 """Join external named attack groups to independently recorded wire ordinals."""
-import os
-from pathlib import Path
 import unittest
 
 from Tools.Teardown.inspect_attack_actions import read_attack_actions
+from server.paths import pc_data_dir, research_dir
 from server import attack_wire
 from server.hero_balance import HERO_NAMES
 
@@ -11,8 +10,8 @@ from server.hero_balance import HERO_NAMES
 class TestAttackMetadata(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.root = Path('D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data')
-        names = Path(os.environ.get('TEMP', '')) / 'vg_max/inst_names.tsv'
+        cls.root = pc_data_dir()
+        names = research_dir('vg_max') / 'inst_names.tsv'
         if not cls.root.is_dir() or not names.is_file():
             raise unittest.SkipTest('operator-owned hero store/name index unavailable')
         cls.paths = {row[0]: cls.root / row[1] for line in names.read_text().splitlines()

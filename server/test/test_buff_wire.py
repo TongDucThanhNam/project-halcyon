@@ -1,16 +1,16 @@
 """Half-float buff durations and instance cancellation against independent bytes."""
 import math
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import pc_data_dir
 from server import buff_wire
 from server.test.test_item_input import CAPTURE, item_capture
 from server.test.test_cooldown_wire import CORPUS_ROOT, CORPUS_FILES, recorded_frames
 from Tools.Teardown.inspect_item_constants import read_last_instance
 
 
-NATIVE_BUFFS = Path("D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data/55/551BCB541D80053BACD0A897B7993A77")
+NATIVE_BUFFS = pc_data_dir() / '55/551BCB541D80053BACD0A897B7993A77'
 
 
 class TestBuffWireValidation(unittest.TestCase):

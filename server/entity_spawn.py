@@ -14,6 +14,7 @@ from pathlib import Path
 import struct
 
 from . import decode, roster
+from .paths import research_dir, runtime_corpus_dir
 
 JUNGLE_CLASS = 0x4DD5B7D0
 JUNGLE_ARCHETYPES = frozenset(range(357, 365))
@@ -255,10 +256,9 @@ def _source_paths(path=None):
     elif os.environ.get('HALCYON_SPAWN_CORPUS'):
         paths = tuple(os.environ['HALCYON_SPAWN_CORPUS'].split(os.pathsep))
     else:
-        temporary = Path(os.environ.get('TEMP', '.'))
-        paths = (str(temporary / 'vg_phaseB' / 'vgr_live'),
-                 str(temporary / 'vg_max' / 'vgr5' / 'vgr5'),
-                 str(temporary / 'vg_max' / 'vgr' / 'vgrtmp'))
+        paths = (str(runtime_corpus_dir()),
+                 str(research_dir('vg_max') / 'vgr5' / 'vgr5'),
+                 str(research_dir('vg_max') / 'vgr' / 'vgrtmp'))
     return paths
 
 

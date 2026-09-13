@@ -14,6 +14,7 @@ from pathlib import Path
 import struct
 
 from . import buff_wire, decode, entity_spawn, lifecycle_wire
+from .paths import runtime_corpus_dir
 from .vision import VisibilityUpdate
 
 
@@ -26,7 +27,7 @@ _MATCH = 'ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e
 @lru_cache(maxsize=1)
 def native_volley_templates():
     base = Path(os.environ.get('HALCYON_SKYE_VOLLEY_CORPUS',
-                str(Path(os.environ.get('TEMP', '.')) / 'vg_phaseB/vgr_live')))
+                str(runtime_corpus_dir())))
     result = {}
     for archetype, chunk, row in ((LINE_ARCHETYPE, 32, 1136), (CLUSTER_ARCHETYPE, 36, 326)):
         frames, stats = decode.walk_vgr(base / f'{_MATCH}.{chunk}.vgr')

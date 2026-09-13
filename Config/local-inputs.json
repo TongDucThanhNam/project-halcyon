@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "reviewed": "2026-09-13",
+  "description": "Structural inventory only; files themselves are operator-owned and never tracked. Paths relative to Local or HALCYON_LOCAL_ROOT.",
+  "files": [
+    {
+      "role": "android-client",
+      "path": "vainglory/vg-4.13.4-147219-base.apk",
+      "bytes": 30497305,
+      "sha256": "e82a6beed517db32536cd0f85a703d84dda84e1d184c990728dfb7c87d561d2d",
+      "provenance": "Owned CE Android base APK; package com.superevilmegacorp.game 4.13.4/147219"
+    },
+    {
+      "role": "android-client",
+      "path": "vainglory/main.147219.com.superevilmegacorp.game.obb",
+      "bytes": 1394159471,
+      "sha256": "bcbe9aff2f161e59eb7f75ab57a124e35ee46ae708b5c933d74e912cba0478fb",
+      "provenance": "Owned matching Android expansion data"
+    },
+    {
+      "role": "navigation",
+      "path": "vainglory/pc/Vainglory 4.13/Vainglory/Data/4B/4BD271EAAC785AEB0C2BCED99515D401",
+      "bytes": 24239,
+      "sha256": "71ebf471a0566036f83390cd3af8245d074c845fcbff0d3ba4f10b959ef87f7e",
+      "provenance": "Owned PC 4.13 store A001 navigation record"
+    },
+    {
+      "role": "world-capture",
+      "path": "research/vg_max/vgfull.pcap",
+      "bytes": 1357284,
+      "sha256": "4b226dd1e6b01ef7f2d8471564c7c611a8fb631fe4679513b8fdd45d14691afc",
+      "provenance": "Owned capture; match b9f511e0-11cd-4cfa-ad62-dc8612b8d270; input to Tools/build_world_tape.py"
+    },
+    {
+      "role": "world-tape",
+      "path": "runtime/halcyon_stack/world_tape.bin",
+      "bytes": 46292,
+      "sha256": "20c553224e5523ff354536fc4594230ebec76e1ea72755de8c855b8cead1d341",
+      "provenance": "Measured trimmed production world-init tape; builder/loader digest pin"
+    },
+    {
+      "role": "spawn-record",
+      "path": "research/runtime-corpus/ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e889.72.vgr",
+      "bytes": 63757,
+      "sha256": "5326d608f77f3d5c34ed818ffcd53c13c8b725673e1740731881d000e68d3502",
+      "provenance": "halcyon-ckpt13corr3-kraken-spawn-corpus-06cc680a-20260912/corpus-rebuild"
+    },
+    {
+      "role": "volley-record",
+      "path": "research/runtime-corpus/ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e889.32.vgr",
+      "bytes": 65315,
+      "sha256": "f6cbe0a33d19a4f1903a83e65208c0c01e85d7a50f52254d44d800da76007a5c",
+      "provenance": "halcyon-ckpt13corr7-volley-anchors-ce646625-20260912/volley-rebuild"
+    },
+    {
+      "role": "volley-record",
+      "path": "research/runtime-corpus/ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e889.36.vgr",
+      "bytes": 75920,
+      "sha256": "4a116a66e79459e1f8d0b95affef2b0f5d007b05e95a7140ff50efeaf1e89f2c",
+      "provenance": "halcyon-ckpt13corr7-volley-anchors-ce646625-20260912/volley-rebuild"
+    }
+  ]
+}

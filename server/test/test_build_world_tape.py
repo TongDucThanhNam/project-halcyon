@@ -5,7 +5,6 @@ safety paths (destinations, exclusivity, digest distinction) always run.
 """
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import sys
@@ -18,9 +17,10 @@ if str(ROOT) not in sys.path:
 
 sys.path.insert(0, str(ROOT / "Tools"))
 
+from server.paths import research_dir
 import build_world_tape as bwt   # noqa: E402
 
-PCAP = Path(os.environ.get("TEMP", ".")) / "vg_max" / "vgfull.pcap"
+PCAP = research_dir('vg_max') / "vgfull.pcap"
 MATCH = "b9f511e0-11cd-4cfa-ad62-dc8612b8d270"
 HAVE_PCAP = PCAP.is_file()
 

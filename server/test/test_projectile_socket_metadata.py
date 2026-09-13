@@ -1,16 +1,15 @@
 """Independent source-name guards for native 1037 launch-socket hashes."""
-import os
-from pathlib import Path
 import unittest
 
+from server.paths import pc_data_dir, research_dir
 from Tools.Teardown.inspect_projectile_sockets import read_projectile_sockets
 
 
 class ProjectileSocketMetadataTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        root = Path('D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data')
-        names = Path(os.environ.get('TEMP', '')) / 'vg_max/inst_names.tsv'
+        root = pc_data_dir()
+        names = research_dir('vg_max') / 'inst_names.tsv'
         if not root.is_dir() or not names.is_file():
             raise unittest.SkipTest('operator-owned unit store/name index unavailable')
         cls.paths = {row[0]: root / row[1] for line in names.read_text().splitlines()

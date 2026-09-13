@@ -1,27 +1,26 @@
 """UI upgrade slots and native rank-action ordinals are different domains."""
 import json
-import os
 from pathlib import Path
 import struct
 import tempfile
 import unittest
 
+from server.paths import pc_data_dir, research_dir, stack_dir
 from server import abilities, ability_wire, cooldown_wire, decode, hero_balance, hero_movement
 from server import match_server, roster, sandbox_qa
 from server.navigation import NavMesh
 from Tools.Teardown.inspect_ability_actions import read_actions
 
 
-EXTERNAL = Path(os.environ.get("TEMP", "/tmp"))
-CATHERINE_REPLAY = EXTERNAL / "vg_phaseB/vgr_live"
+CATHERINE_REPLAY = research_dir("vg_phaseB") / "vgr_live"
 CATHERINE_PREFIX = "ea4c7fda-4b61-481d-abb7-1c757d24ae58-1574e27a-e851-492b-8d91-94fc4bd66985"
-DATA = Path("D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data")
-NAMES = EXTERNAL / "vg_max/inst_names.tsv"
+DATA = pc_data_dir()
+NAMES = research_dir("vg_max") / "inst_names.tsv"
 
 
 class TestNativeAbilityRanks(unittest.TestCase):
     def test_owned_catherine_client_cast_and_recall_requests_use_native_actions(self):
-        path = EXTERNAL / "halcyon_stack/wire-1788799203725554700.jsonl"
+        path = stack_dir() / "wire-1788799203725554700.jsonl"
         if not path.is_file():
             self.skipTest("operator-owned Catherine input trace unavailable")
         rows = [json.loads(line) for line in path.read_text().splitlines()]

@@ -30,7 +30,7 @@ import time
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from server import vgdecode, wire
+from server import paths, vgdecode, wire
 
 
 def get_ffmpeg_exe() -> str:
@@ -356,7 +356,7 @@ def main():
     print(f"Gateway port: {args.gateway_port}")
 
     # Ensure suppress file is clear before starting
-    suppress_cfg = Path(os.environ.get("TEMP", ".")) / "halcyon_stack" / "suppress_1070.json"
+    suppress_cfg = paths.stack_dir() / "suppress_1070.json"
     if suppress_cfg.exists():
         suppress_cfg.unlink()
 
@@ -417,4 +417,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

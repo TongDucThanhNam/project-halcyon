@@ -1,16 +1,15 @@
 """1162 grammar, exact native identity, and external replay evidence guards."""
 import math
-import os
-from pathlib import Path
 import pickle
 import re
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import cooldown_wire as timers
 from server import economy
 
-CORPUS_ROOT = Path(os.environ.get("TEMP", "/tmp")) / "vg_max"
+CORPUS_ROOT = research_dir('vg_max')
 CORPUS_FILES = ("m2frames.pkl", "m3frames.pkl", "m4frames.pkl", "vgr5frames.pkl")
 
 

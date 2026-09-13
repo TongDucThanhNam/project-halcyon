@@ -3,12 +3,11 @@
 The silence replay is Vox: it proves the shared buff primitive, not Catherine's
 cast geometry or timing. Catherine's own duration is joined from her CFF record.
 """
-import os
-from pathlib import Path
 import pickle
 import struct
 import unittest
 
+from server.paths import pc_data_dir, research_dir
 from server import abilities, buff_wire, jungle, match_server, roster, wave, wire
 from server.navigation import NavMesh
 from server.status_effects import StatusEffect, StatusType
@@ -18,10 +17,10 @@ from Tools.Teardown.inspect_ability_constants import (
 from Tools.Teardown.inspect_kindred_registry import registry_entries
 
 
-DATA = Path('D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data')
+DATA = pc_data_dir()
 BUFF_REGISTRY = DATA / '55/551BCB541D80053BACD0A897B7993A77'
 CATHERINE = DATA / '98/98B6FF5C43A2EB13831F4EAD75CD0886'
-VOX_REPLAY = Path(os.environ.get('TEMP', '')) / 'vg_max/vgr5frames.pkl'
+VOX_REPLAY = research_dir('vg_max') / 'vgr5frames.pkl'
 
 
 def revisions(path):

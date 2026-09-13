@@ -1572,6 +1572,16 @@ def run_headless(names: list[str], out_dir: Path, navmesh_path: Path,
         run_dir = out_dir / f"run-seed{seed}"
         run_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
+        # Workers execute a source-only snapshot outside the checkout. Resolve
+        # owned inputs here so Local/ is not mistaken for a snapshot-relative path.
+        from server import entity_spawn, paths
+        env["HALCYON_LOCAL_ROOT"] = str(paths.local_root().resolve())
+        env["HALCYON_STACK_DIR"] = str(paths.stack_dir().resolve())
+        env["HALCYON_SPAWN_CORPUS"] = os.pathsep.join(
+            str(Path(path).resolve()) for path in entity_spawn._source_paths())
+        env["HALCYON_SKYE_VOLLEY_CORPUS"] = str(Path(
+            os.environ.get("HALCYON_SKYE_VOLLEY_CORPUS") or
+            paths.runtime_corpus_dir()).resolve())
         for name in ISOLATED_ENVIRONMENT:
             env.pop(name, None)
         env["HALCYON_NO_TAPE"] = "1"

@@ -1,10 +1,9 @@
 """Ground lane action ordinals and preserve the existing combat cadence."""
-import os
-from pathlib import Path
 import struct
 import unittest
 
 from Tools.Teardown.inspect_jungle_actions import read_jungle_actions
+from server.paths import pc_data_dir, research_dir
 from server import attack_wire, decode, wave
 from server.hero_movement import HeroMovement
 from server.status_effects import StatusEffect, StatusManager, StatusType
@@ -12,7 +11,7 @@ from server.status_effects import StatusEffect, StatusManager, StatusType
 
 class TestLaneAttackEvidence(unittest.TestCase):
     def test_native_npc_vectors_match_melee_ranged_siege_and_captain_actions(self):
-        root = Path('D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data')
+        root = pc_data_dir()
         paths = {
             365: '74/74C3647809896C485179091260963244',
             366: '8D/8D300EEC712D921FE908FC39FD554FAB',
@@ -38,7 +37,7 @@ class TestLaneAttackEvidence(unittest.TestCase):
                                      ['DefaultAttack', 'AltAttack'])
 
     def test_nine_complete_native_actions_and_later_damage_pairs(self):
-        root = Path(os.environ.get('TEMP', '')) / 'vg_max/vgr2'
+        root = research_dir('vg_max') / 'vgr2'
         prefix = 'ea4c7fda-4b61-481d-abb7-1c757d24ae58-591146df-33f2-4f12-9a04-8d800d239821'
         paths = {chunk: root / f'{prefix}.{chunk}.vgr' for chunk in (3, 10, 11)}
         if not all(path.is_file() for path in paths.values()):

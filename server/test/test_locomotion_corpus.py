@@ -1,17 +1,16 @@
 """Optional external-corpus gate for the recovered hero movement contract."""
-import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir, stack_dir
 from server import decode, wire, world_tape
 
 
-CORPUS_DIR = Path(os.environ.get("TEMP", ".")) / "vg_max"
+CORPUS_DIR = research_dir('vg_max')
 PCAP = CORPUS_DIR / "vgfull.pcap"
 C2S = CORPUS_DIR / "c2s.bin"
 MATCH_ID = "b9f511e0-11cd-4cfa-ad62-dc8612b8d270"
-STACK_DIR = Path(os.environ.get("TEMP", ".")) / "halcyon_stack"
+STACK_DIR = stack_dir()
 ORIGINAL_TAPE = STACK_DIR / "world_tape_pre_cancel_20260907-142422.bin"
 CANDIDATE_TAPE = STACK_DIR / "world_tape_cancel_only_candidate.bin"
 

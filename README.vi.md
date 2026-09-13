@@ -31,7 +31,7 @@ Server được xây dựng phân tầng theo mô hình 3 tầng (T1 – T2 – 
                                        │
         ┌──────────────────────────────┼──────────────────────────────┐
         │                              │                              │
-   HTTPS/TLS (8443)             TCP Gateway (7100+)            UDP Relay (2112)
+   HTTPS/TLS (8443)             TCP Gateway (7100+)            TCP Heartbeat (2112)
         │                              │                              │
         ▼                              ▼                              ▼
 ┌──────────────────┐          ┌──────────────────┐          ┌──────────────────┐
@@ -114,64 +114,34 @@ Tiến độ được ghi nhận đến hết ngày 12/09:
 
 ---
 
-## 4. Thiết lập và kiểm chứng cục bộ
+## 4. Local Setup and Verification
 
-### Yêu cầu tiên quyết
+Start with the **[complete Windows development setup guide](Docs/Setup/windows-local-development.md)**.
+It documents required downloads and exact client hashes, LDPlayer 9 installation,
+root and ADB settings, APK/OBB installation, local routing/CA trust, startup,
+troubleshooting, and how to continue development.
 
-- **Quy trình live đã ghi nhận**: Windows, LDPlayer 9 có quyền root, ADB và client Android CE 4.13.4 sở hữu hợp lệ (build 147219). Helper `live_up` dùng công cụ tiến trình Windows; đây chưa phải hướng dẫn Linux hoặc client PC đã kiểm chứng.
-- **Python**: 3.11+ và PyCryptodome cho công cụ giao thức/chứng chỉ; Pillow cho driver client có hình ảnh và các bài kiểm thử. Inspector native tùy chọn cần thêm Capstone.
-- **Dữ liệu sở hữu ngoài repository**: bản ghi navigation A001, corpus spawn rừng/Skye và `world_tape.bin` khớp production. Payload capture và tài sản client không nằm trong Git. Clone mới riêng lẻ không đủ để tái lập toàn bộ môi trường test/live.
-- **Platform cục bộ**: chứng chỉ/khóa, cấu hình answers, định tuyến và CA trust trên giả lập. [Hồ sơ thiết lập mobile](Docs/Teardown/vainglory-mobile-local-stack.md) mô tả quy trình; kết quả chỉ vào menu ngày 05/09 trong tài liệu đó là lịch sử.
+Original owned game files and research inputs now live physically in the ignored
+`Local/` directory. They are absent from Git and must be acquired separately on
+another machine. `Tools/import_local_data.ps1` copies existing archives with
+SHA-256 verification and preserves the originals. The tracked
+[input inventory](Config/local-inputs.json) records required filenames and provenance.
 
-Chạy lệnh từ thư mục gốc repository. Đặt đường dẫn dữ liệu ngoài Git của
-bạn trong PowerShell trước khi chạy test hoặc khởi động server:
-
-```powershell
-$env:HALCYON_NAVMESH = '<đường dẫn tuyệt đối tới bản ghi navigation A001 sở hữu>'
-$env:HALCYON_SPAWN_CORPUS = '<thư mục tuyệt đối chứa bản ghi spawn sở hữu, gồm Kraken>'
-$env:HALCYON_SKYE_VOLLEY_CORPUS = '<thư mục tuyệt đối chứa volley chunk 32 và 36 của Skye>'
-```
-
-Stack live đọc cấu hình, chứng chỉ và world tape tại
-`$env:TEMP/halcyon_stack`; giữ các file này ngoài checkout.
-[Hồ sơ scenario](Docs/Plan/solo-sandbox-scenarios.md) mô tả corpus cần thiết
-và [công cụ dựng lại world tape](Tools/build_world_tape.py). Thiếu corpus là
-lỗi thiết lập, chưa phải bằng chứng gameplay bị hồi quy.
-
-### 1. Chạy toàn bộ Test Suite (Đảm bảo hồi quy an toàn)
+After following the guide and installing `requirements.txt` into your venv:
 
 ```powershell
+python -B Tools/setup_local.py --init
+python -B Tools/setup_local.py --check --serial emulator-5554
 python -B -W error::ResourceWarning -m unittest discover -s server/test -t .
-```
-Số test lịch sử chỉ áp dụng cho source và môi trường được ghi nhận; xem
-[trạng thái hiện tại](Docs/Plan/current-status.md). Source đang được đánh giá
-phải chạy sạch. Chạy riêng các scenario kiểm tra tính lặp lại:
-
-```powershell
-python Tools/run_scenarios.py --mode headless --scenario all
+python -B Tools/run_scenarios.py --mode headless --scenario all
+python -B -m server.platform.live_up --bind-host 127.0.0.1 --match-host 127.0.0.1
 ```
 
-Đầu ra nằm ngoài Git. Khi chưa có fixture tham chiếu độc lập, kết quả tham
-chiếu vẫn là `UNAVAILABLE` dù kiểm tra lặp lại nội bộ đạt.
-
-### 2. Khởi động Máy chủ Host
-
-Khi đã chuẩn bị dữ liệu bên ngoài và giả lập, khởi chạy platform, gateway,
-relay và thiết lập định tuyến guest. Helper dừng stack cũ trước khi chạy lại:
-```powershell
-python -m server.platform.live_up
-```
-Để thông báo địa chỉ LAN, với định tuyến và CA trust được cấu hình riêng cho
-từng thiết bị:
-```powershell
-python -m server.platform.live_up --match-host <IP_LAN_CỦA_BẠN>
-```
-
-### 3. Kết nối & Trải nghiệm trên Client
-
-1. Mở Vainglory trên giả lập hoặc điện thoại đã cấu hình DNS/Hosts trỏ về máy chủ.
-2. Theo luồng solo đã ghi nhận: **PLAY → SOLO BOTS → 3V3 → VERY EASY**.
-3. Chọn tướng có bộ kỹ năng đã cài đặt, ví dụ Skye, khóa chọn và vào trận. Chọn được tướng không đồng nghĩa bộ kỹ năng đã được hỗ trợ.
+The live helper restarts prior local stack processes and applies guest routing.
+Follow **PLAY → SOLO BOTS → 3V3 → VERY EASY**, select an implemented hero such
+as Skye, lock in and choose **Manual Build** when offered. Keep QA output outside
+the checkout. A passing headless run establishes internal repeatability;
+independent reference remains `UNAVAILABLE` without a supplied reference fixture.
 
 ---
 

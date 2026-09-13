@@ -1,10 +1,9 @@
 """Native action list and packet contracts, including external golden joins."""
-import os
-from pathlib import Path
 import pickle
 import struct
 import unittest
 
+from server.paths import pc_data_dir, research_dir
 from server import ability_wire, decode
 from server.hero_balance import HERO_NAMES
 from Tools.Teardown.inspect_ability_actions import read_actions
@@ -30,8 +29,8 @@ class AbilityActionTests(unittest.TestCase):
             ability_wire.build_ground_cast(1500, float('nan'), 0, 1)
 
     def test_every_retained_action_ordinal_matches_external_native_vector(self):
-        names_path = Path(os.environ.get('TEMP', '')) / 'vg_max/inst_names.tsv'
-        base = Path('D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data')
+        names_path = research_dir('vg_max') / 'inst_names.tsv'
+        base = pc_data_dir()
         if not names_path.exists() or not base.exists():
             self.skipTest('operator-owned CFF source is not installed')
         paths = dict(line.split('\t')[:2] for line in names_path.read_text().splitlines())
@@ -43,7 +42,7 @@ class AbilityActionTests(unittest.TestCase):
                 self.assertEqual(tuple(actual), retained)
 
     def test_catherine_target_actions_match_capture_and_named_buff(self):
-        base = Path(os.environ.get('TEMP', '')) / 'vg_phaseB/vgr_live'
+        base = research_dir('vg_phaseB') / 'vgr_live'
         prefix = 'ea4c7fda-4b61-481d-abb7-1c757d24ae58-1574e27a-e851-492b-8d91-94fc4bd66985'
         for chunk, row, action, kinds in [(4, 506, 'A', (371, 372)),
                                           (13, 1119, 'B', (373,)),
@@ -62,7 +61,7 @@ class AbilityActionTests(unittest.TestCase):
             self.assertTrue(set(kinds) <= buffs)
 
     def test_ground_cast_native_action_is_not_an_impact_kind(self):
-        path = Path(os.environ.get('TEMP', '')) / 'vg_max/match6.halcyon_spawn_audit.pkl'
+        path = research_dir('vg_max') / 'match6.halcyon_spawn_audit.pkl'
         if not path.exists():
             self.skipTest('operator-owned match6 cache is not installed')
         frames = pickle.loads(path.read_bytes())[0]

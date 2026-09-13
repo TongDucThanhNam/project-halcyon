@@ -34,9 +34,11 @@ simulation server-side. That is the actual work.
 | `Tools/Teardown/` | Read-only inspectors + reproduction scripts (content store, BC1, navmesh, codec probe, memory scan, placement) |
 | `Docs/Research/` | Reference design + working determinism spike (input-stream model, delta replay) — the seed for the server-authoritative sim |
 
-Artifacts that are **never** in this repository (by IP rule, see below):
+Artifacts that are **never tracked in Git** (by IP rule, see below):
 `.pcap`, `.vgr`, decrypted payloads, extracted textures/models, the deobfuscated
-binary — all such collection lives outside the repo (see `TEMP` paths below).
+binary. Per the operator's 2026-09-13 relocation request, owned inputs may
+live physically under the project's Git-ignored `Local/` directory. New QA
+evidence stays outside the checkout. See `Docs/Setup/windows-local-development.md`.
 
 ---
 
@@ -53,7 +55,9 @@ mix of legal discipline and technical safety.
 
 2. **No proprietary payloads/assets in the repo.** No Vainglory texture, model,
    shader implementation, executable, decrypted store payload or `.vgr`/`.pcap`
-   enters the repository. We keep structure, constants and reproducible
+   enters Git or a distributed source archive. Operator-owned copies may live
+   under ignored `Local/`; do not force-add or redistribute that directory.
+   We keep structure, constants and reproducible
    commands. (The 64-byte obfuscation salt is a constant, not payload content.)
 
 3. **Private, non-commercial operation.** This is a friend-group server. Do not
@@ -82,6 +86,7 @@ in the leaf; this entry point holds routes and brief status only.
 
 | Task | Open first | Reveal next only when needed |
 |---|---|---|
+| New developer setup, downloads, LDPlayer/root, local files or migration | `Docs/Setup/windows-local-development.md` | `vainglory-mobile-local-stack.md` for historical routing evidence |
 | Overall protocol, transport, crypto, join sequence | `Docs/Teardown/vainglory-protocol-wire.md` (§15) | `vainglory-netcode-backend.md` (§14) for topology |
 | Backend / gateway / relay architecture | `Docs/Teardown/vainglory-netcode-backend.md` (§14) | `vainglory-protocol-wire.md` §15.1–15.2 for the gateway route-request + heartbeat |
 | Mobile CE local-server startup, LDPlayer routing/TLS, or lobby entry | `Docs/Teardown/vainglory-mobile-local-stack.md` | `vainglory-runtime-reconstruction.md` only for additional emulator capture methods |
@@ -130,9 +135,11 @@ are not, and must be derived or rebuilt.
 - The determinism reference implementation is pure Python under
   `Docs/Research/spikes/determinism/` (`engine.py` / `run_process.py` /
   `verify.py`) — a working input-stream sim skeleton we can evolve into T3.
-- Corpus / TEMP locations are **outside** the repo and are up to the operator:
-  `D:/Downloads/vg/` (client / store / PC build), `$TEMP/vg_max/` (decrypted
-  + extracted outputs), an emulator capture tag. Never copy payloads in.
+- Owned client/store inputs live in ignored `Local/vainglory/`, research inputs
+  in `Local/research/`, and platform configuration in `Local/runtime/halcyon_stack/`.
+  `server/paths.py` supports explicit overrides and legacy locations. Historical
+  `D:/Downloads/vg/` and `$TEMP/vg_max/` references remain evidence provenance.
+  Keep new QA output outside the checkout; never track payloads in Git.
 
 ## Verification strategy
 

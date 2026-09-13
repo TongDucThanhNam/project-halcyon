@@ -1,9 +1,8 @@
 """Unit creation fields and byte-exact reproduction of external jungle spawns."""
-import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import entity_spawn, jungle, roster, wire
 from server.hero_movement import HeroMovement
 
@@ -128,7 +127,7 @@ class TestNonheroSpawn(unittest.TestCase):
             entity_spawn.load_spawn_catalog('missing-original-corpus')
 
 
-EXTERNAL_CORPUS = Path(os.environ.get('TEMP', '.')) / 'vg_phaseB' / 'vgr_live'
+EXTERNAL_CORPUS = research_dir('vg_phaseB') / 'vgr_live'
 
 
 @unittest.skipUnless(EXTERNAL_CORPUS.is_dir(), 'external jungle spawn corpus unavailable')

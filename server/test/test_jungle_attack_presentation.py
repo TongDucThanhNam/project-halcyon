@@ -1,10 +1,9 @@
 """Native NPC ordinals and one presentation action per actual jungle attack."""
-import os
-from pathlib import Path
 import struct
 import unittest
 
 from Tools.Teardown.inspect_jungle_actions import read_jungle_actions
+from server.paths import pc_data_dir, research_dir
 from server import decode, jungle, jungle_attack_wire, structures
 from server.hero_movement import HeroMovement
 from server.navigation import within_distance
@@ -24,7 +23,7 @@ STORE_PATHS = {
 
 class TestJungleActionEvidence(unittest.TestCase):
     def test_external_direct_vectors_identify_ordinary_and_exclude_special_actions(self):
-        root = Path('D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data')
+        root = pc_data_dir()
         if not all((root / path).is_file() for path in STORE_PATHS.values()):
             self.skipTest('operator-owned jungle CFFs unavailable')
         for archetype, path in STORE_PATHS.items():
@@ -44,21 +43,20 @@ class TestJungleActionEvidence(unittest.TestCase):
             jungle_attack_wire.build_basic_attack(100000, 1500, 999)
 
     def test_eight_complete_native_actions_and_independent_damage_pairs(self):
-        root = Path(os.environ.get('TEMP', ''))
         session = 'ea4c7fda-4b61-481d-abb7-1c757d24ae58-'
         match = '591146df-33f2-4f12-9a04-8d800d239821'
         elder = '045f86d4-7ef2-4125-a835-e70a96288c88'
         samples = [
-            ('vg_max/vgr2', match, 5, 1254, 1295, 357),
-            ('vg_max/vgr2', match, 5, 1041, 1094, 357),
-            ('vg_max/vgr2', match, 4, 1026, 1103, 359),
-            ('vg_max/vgr2', match, 4, 1132, 1169, 359),
-            ('vg_max/vgr2', match, 4, 333, 373, 360),
-            ('vg_max/vgr2', match, 3, 960, 1048, 360),
-            ('vg_max/vgr5b', elder, 8, 330, 352, 358),
-            ('vg_max/vgr5b', elder, 8, 822, 881, 358),
+            (research_dir('vg_max') / 'vgr2', match, 5, 1254, 1295, 357),
+            (research_dir('vg_max') / 'vgr2', match, 5, 1041, 1094, 357),
+            (research_dir('vg_max') / 'vgr2', match, 4, 1026, 1103, 359),
+            (research_dir('vg_max') / 'vgr2', match, 4, 1132, 1169, 359),
+            (research_dir('vg_max') / 'vgr2', match, 4, 333, 373, 360),
+            (research_dir('vg_max') / 'vgr2', match, 3, 960, 1048, 360),
+            (research_dir('vg_max') / 'vgr5b', elder, 8, 330, 352, 358),
+            (research_dir('vg_max') / 'vgr5b', elder, 8, 822, 881, 358),
         ]
-        paths = [root / folder / f'{session}{match_id}.{chunk}.vgr'
+        paths = [folder / f'{session}{match_id}.{chunk}.vgr'
                  for folder, match_id, chunk, *_ in samples]
         if not all(path.is_file() for path in paths):
             self.skipTest('operator-owned jungle attack corpus unavailable')

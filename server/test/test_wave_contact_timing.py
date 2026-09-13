@@ -1,9 +1,8 @@
 """Empirical NPC contact policy: exact tick boundaries and original identities."""
 import unittest
-import os
-from pathlib import Path
 import struct
 
+from server.paths import research_dir
 from server import decode, wave
 from server.hero_movement import HeroMovement
 from server.status_effects import StatusEffect, StatusManager, StatusType
@@ -20,7 +19,7 @@ class TestWaveContactTiming(unittest.TestCase):
         return director, source, target
 
     def test_native_release_precedes_contact_with_recorded_timing_spread(self):
-        path = Path(os.environ.get('TEMP', '')) / ('vg_phaseB/vgr_live/'
+        path = research_dir('vg_phaseB') / 'vgr_live' / (
             'ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e889.3.vgr')
         if not path.is_file():
             self.skipTest('operator-owned ranged release corpus unavailable')

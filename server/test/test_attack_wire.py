@@ -1,9 +1,9 @@
 """Complete payload and ordering checks from external basic attacks."""
 import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import attack_wire
 from server import decode
 from server.test.test_corpus import VGFULL_PCAP, _cached_frames
@@ -20,18 +20,17 @@ class TestMeasuredVariantSelection(unittest.TestCase):
 
 class TestOtherRecordedHeroAttacks(unittest.TestCase):
     def test_amael_koshka_phinn_and_catherine_variants_match_external_attack_payloads(self):
-        root = Path(os.environ.get('TEMP', ''))
         session = 'ea4c7fda-4b61-481d-abb7-1c757d24ae58-'
         samples = [
-            ('vg_phaseB/vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120', 15, 1057, 1096, 925),
-            ('vg_phaseB/vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120', 29, 252, 285, 925),
-            ('vg_max/vgr2', '591146df-33f2-4f12-9a04-8d800d239821', 5, 815, 870, 245),
-            ('vg_max/vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88', 4, 344, 361, 279),
-            ('vg_max/vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88', 4, 1067, 1082, 279),
-            ('vg_phaseB/vgr_live', '1574e27a-e851-492b-8d91-94fc4bd66985', 4, 715, 724, 242),
-            ('vg_phaseB/vgr_live', '1574e27a-e851-492b-8d91-94fc4bd66985', 5, 234, 281, 242),
+            (research_dir('vg_phaseB') / 'vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120', 15, 1057, 1096, 925),
+            (research_dir('vg_phaseB') / 'vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120', 29, 252, 285, 925),
+            (research_dir('vg_max') / 'vgr2', '591146df-33f2-4f12-9a04-8d800d239821', 5, 815, 870, 245),
+            (research_dir('vg_max') / 'vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88', 4, 344, 361, 279),
+            (research_dir('vg_max') / 'vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88', 4, 1067, 1082, 279),
+            (research_dir('vg_phaseB') / 'vgr_live', '1574e27a-e851-492b-8d91-94fc4bd66985', 4, 715, 724, 242),
+            (research_dir('vg_phaseB') / 'vgr_live', '1574e27a-e851-492b-8d91-94fc4bd66985', 5, 234, 281, 242),
         ]
-        paths = [root / folder / f'{session}{match}.{chunk}.vgr' for folder, match, chunk, *_ in samples]
+        paths = [folder / f'{session}{match}.{chunk}.vgr' for folder, match, chunk, *_ in samples]
         if not all(path.is_file() for path in paths):
             self.skipTest('external multi-match hero attack corpus unavailable')
         for path, (_, _, _, start, impact, hero_id) in zip(paths, samples):

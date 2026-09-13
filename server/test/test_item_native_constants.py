@@ -1,11 +1,11 @@
 """Compare the complete item catalog with native structured metadata outside Git."""
-from pathlib import Path
 import unittest
 
+from server.paths import pc_data_dir
 from server import cooldown_wire, economy, items
 from Tools.Teardown.inspect_item_constants import read_item_stats, read_named_constants
 
-STORE = Path("D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data")
+STORE = pc_data_dir()
 # Native manifest identities mapped to operator-owned CFF metadata paths. These
 # are structural references, not copied proprietary payloads or asset content.
 ITEM_FILES = {

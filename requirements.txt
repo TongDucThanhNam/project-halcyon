@@ -1,0 +1,3 @@
+# Versions measured in the Windows reproduction environment (2026-09-13).
+pycryptodome==3.23.0
+Pillow==12.3.0

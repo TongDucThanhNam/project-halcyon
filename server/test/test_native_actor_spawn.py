@@ -1,9 +1,8 @@
 """Native structure creation and retained live/corpse reconnect state."""
-import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import entity_spawn, roster, wave
 from server.actor_slots import ActorSlots
 from server.structures import StructureManager
@@ -92,7 +91,7 @@ class TestNativeActorCatalog(unittest.TestCase):
         self.assertNotIn(dead.eid, director.actor_slots.by_eid)
 
 
-EXTERNAL_CORPUS = Path(os.environ.get('TEMP', '.')) / 'vg_phaseB' / 'vgr_live'
+EXTERNAL_CORPUS = research_dir('vg_phaseB') / 'vgr_live'
 
 
 @unittest.skipUnless(EXTERNAL_CORPUS.is_dir(), 'external native actor corpus unavailable')

@@ -1,0 +1,8 @@
+-r requirements.txt
+# Optional read-only native inspection and bounded codec tooling.
+capstone==5.0.9
+lz4==4.4.5
+zstandard==0.25.0
+numpy==2.5.2
+imageio==2.37.4
+imageio-ffmpeg==0.6.0

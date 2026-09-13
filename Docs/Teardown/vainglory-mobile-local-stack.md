@@ -1,5 +1,12 @@
 # Mobile CE client against the local stack — 2026-09-05
 
+For a **new developer setup**, use the current
+[Windows reproduction guide](../Setup/windows-local-development.md): downloads,
+LDPlayer/root/ADB, APK+OBB installation, ignored `Local/` inputs, configuration,
+trust and verification. Paths and installation-specific UID defaults in the
+dated records below are historical; the current tooling discovers the game UID
+and supports project-local data paths.
+
 ## Result and boundary
 
 **[Observed]** The installed Android **4.13.4 (147219)** client reached its

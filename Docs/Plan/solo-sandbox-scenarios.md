@@ -1,5 +1,11 @@
 # Repeatable scenario verification — pilot record
 
+**Environment setup (2026-09-13):** the
+[Windows reproduction guide](../Setup/windows-local-development.md) documents
+the ignored project-local input layout, exact file inventory, importer and
+preflight checks. The runner propagates resolved input paths into source-only
+worker snapshots. Dated external paths below remain evidence provenance.
+
 Updated 2026-09-12 to reflect the reviewed evidence through the ckpt13corr20
 round (the declared-fixture live A/B/C runs, the corpus-restored headless
 integration run, the failure-path fix, and the two finite minion-push

@@ -1,9 +1,9 @@
 """Independent native projectile records and production release boundaries."""
 import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import abilities, decode, projectile_wire, roster, wire
 from server.test.test_corpus import VGFULL_PCAP, _cached_frames
 from server.test.test_sandbox_simulation import session, ticks
@@ -27,7 +27,7 @@ class TestProjectileCorpus(unittest.TestCase):
             self.assertEqual(struct.unpack_from('>II', frames[hit][1]), (target, source))
 
     def test_skye_and_ranged_minion_projectiles_join_real_compact_actor_slots(self):
-        path = Path(os.environ.get('TEMP', '')) / ('vg_phaseB/vgr_live/'
+        path = research_dir('vg_phaseB') / 'vgr_live' / (
             'ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e889.3.vgr')
         if not path.is_file():
             self.skipTest('external Skye match unavailable')

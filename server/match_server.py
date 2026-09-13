@@ -79,6 +79,7 @@ if __package__ in (None, ""):
     import vision
     from sandbox_qa import SandboxQA
     from actor_slots import ActorSlots
+    from paths import stack_dir
 else:
     from . import hero_catalog
     from . import roster
@@ -96,6 +97,7 @@ else:
     from . import item_input, lifecycle_wire, entity_spawn, ability_wire, shop_wire, recall_wire, level_wire, vision
     from .sandbox_qa import SandboxQA
     from .actor_slots import ActorSlots
+    from .paths import stack_dir
 
 # Re-exports kept for callers of the old stub API (tests, tools).
 SNAPSHOT_PAYLOAD_SIZE = roster.SNAPSHOT_PAYLOAD_SIZE
@@ -120,8 +122,7 @@ WORLD_DUMP_FALLBACK = 40.0        # s after finalize before dumping regardless
 # 1053/1086/1067 deltas, 1010 full updates) is not simulated yet (T3); the
 # WORLD phase replays the corpus-measured tape instead, then serves live
 # movement: c2s 1012 → 1070 for the local hero entity.
-WORLD_TAPE_PATH = os.path.join(os.environ.get("TEMP", "."), "halcyon_stack",
-                               "world_tape.bin")
+WORLD_TAPE_PATH = str(stack_dir() / "world_tape.bin")
 SIM_TICK = 0.05
 WORLD_PUMP_TICK = 0.05            # s, world-loop pump/tick granularity
 
@@ -596,7 +597,7 @@ class SnapshotStream(threading.Thread):
                 self.move_count += 1
                 suppress_sec = self.suppress_periodic_1070_sec
                 suppress_move = self.suppress_periodic_1070_move
-                cfg_path = os.path.join(os.environ.get("TEMP", "."), "halcyon_stack", "suppress_1070.json")
+                cfg_path = str(stack_dir() / "suppress_1070.json")
                 if os.path.exists(cfg_path):
                     try:
                         with open(cfg_path, "r") as f:
@@ -1596,6 +1597,7 @@ class MatchServer:
         self._trace_path = None
         self._trace_lock = threading.Lock()
         if os.environ.get("HALCYON_TRACE_WIRE"):
+            # Wire captures are QA evidence, not portable runtime inputs.
             trace_dir = os.path.join(os.environ["TEMP"], "halcyon_stack")
             os.makedirs(trace_dir, exist_ok=True)
             self._trace_path = os.path.join(trace_dir, f"wire-{time.time_ns()}.jsonl")

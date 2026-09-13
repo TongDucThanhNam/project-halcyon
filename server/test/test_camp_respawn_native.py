@@ -1,10 +1,10 @@
 """Camp timers tied to complete native actor generations and exact timestamps."""
 from functools import lru_cache
-import os
 from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import decode, jungle
 from server.hero_movement import HeroMovement
 from server.test.test_corpus import _cached_frames, VGFULL_PCAP
@@ -20,7 +20,7 @@ MATCHES = {
 
 @lru_cache(maxsize=2)
 def native_match(match):
-    root = Path(os.environ.get('TEMP', '')) / 'vg_max' / MATCHES[match]
+    root = research_dir('vg_max') / MATCHES[match]
     paths = sorted(root.glob(f'*-{match}.*.vgr'), key=lambda path: int(path.name.split('.')[-2]))
     if not paths:
         raise unittest.SkipTest(f'external VGR match unavailable: {root}')

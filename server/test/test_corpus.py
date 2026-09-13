@@ -1,7 +1,7 @@
 """Phase 0 acceptance 2 & 3 — corpus validation (integration).
 
-Skipped automatically when the canonical corpus is not present (IP rule:
-corpus lives outside the repo under $TEMP/vg_max — never copied in).
+Skipped automatically when the canonical private corpus is not present.
+Its location is selected by server.paths; captured payloads stay outside Git.
 
   acceptance 2: decode vgfull.pcap with match b9f511e0-… → 32,640 frames,
                 100 % coverage, and the exact §15.8 opcode histogram.
@@ -18,9 +18,10 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
+from server.paths import research_dir
 from server import decode, roster, wire
 
-VG_MAX = os.path.join(os.environ.get("TEMP", ""), "vg_max")
+VG_MAX = str(research_dir('vg_max'))
 VGFULL_PCAP = os.path.join(VG_MAX, "vgfull.pcap")
 C2S_BIN = os.path.join(VG_MAX, "c2s.bin")
 VGR_DIR = os.path.join(VG_MAX, "vgr", "vgrtmp")

@@ -1,9 +1,8 @@
 """Production Recall refills use actual deltas and a successful-return marker."""
-import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import decode, recall_wire, wire
 from server.hero_movement import HeroMovement
 from server.status_effects import StatusEffect, StatusManager, StatusType
@@ -95,12 +94,11 @@ class RecallRefillTests(unittest.TestCase):
                 self.assertNotIn(1054, [op for op, _ in frames])
 
     def test_measured_return_heights_rebuild_right_and_stable_left_slots(self):
-        temp = Path(os.environ.get('TEMP', ''))
-        cases = [(temp / 'vg_phaseB/vgr_live', '*-0e7de8af-96d9-4e3a-b3c2-609ed5e71120.17.vgr', 1026, 2, 1517),
-                 (temp / 'vg_phaseB/vgr_live', '*-5ac8f358-2683-4205-9b7b-969ea31b3c72.19.vgr', 297, 2, 1518),
-                 (temp / 'vg_max/vgr5b', '*-045f86d4-7ef2-4125-a835-e70a96288c88.26.vgr', 1088, 2, 1519),
-                 (temp / 'vg_phaseB/vgr_live', '*-1574e27a-e851-492b-8d91-94fc4bd66985.18.vgr', 1287, 1, 1515),
-                 (temp / 'vg_max/vgr5b', '*-045f86d4-7ef2-4125-a835-e70a96288c88.47.vgr', 619, 1, 1500)]
+        cases = [(research_dir('vg_phaseB') / 'vgr_live', '*-0e7de8af-96d9-4e3a-b3c2-609ed5e71120.17.vgr', 1026, 2, 1517),
+                 (research_dir('vg_phaseB') / 'vgr_live', '*-5ac8f358-2683-4205-9b7b-969ea31b3c72.19.vgr', 297, 2, 1518),
+                 (research_dir('vg_max') / 'vgr5b', '*-045f86d4-7ef2-4125-a835-e70a96288c88.26.vgr', 1088, 2, 1519),
+                 (research_dir('vg_phaseB') / 'vgr_live', '*-1574e27a-e851-492b-8d91-94fc4bd66985.18.vgr', 1287, 1, 1515),
+                 (research_dir('vg_max') / 'vgr5b', '*-045f86d4-7ef2-4125-a835-e70a96288c88.47.vgr', 619, 1, 1500)]
         self.assertNotIn(1, recall_wire.RETURN_HEIGHTS)
         self.assertNotIn(1516, recall_wire.RETURN_HEIGHTS_BY_EID)
         for base, pattern, row, team, eid in cases:

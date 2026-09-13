@@ -1,9 +1,9 @@
 """Native jungle death/corpse retention and explicit captured-actor adaptation."""
 import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import pc_data_dir, research_dir
 from server import decode, entity_spawn, jungle, roster
 from server.actor_slots import ActorSlots
 from server.hero_movement import HeroMovement
@@ -161,7 +161,7 @@ class TestNativeJungleLifecycle(unittest.TestCase):
 
 class TestNativeGoldRetirement(unittest.TestCase):
     def test_scheduled_mine_self_hit_and_death_match_two_external_sequences(self):
-        root = Path(os.environ.get('TEMP', '')) / 'vg_phaseB' / 'vgr_live' / 'cache'
+        root = research_dir('vg_phaseB') / 'vgr_live' / 'cache'
         session = 'ea4c7fda-4b61-481d-abb7-1c757d24ae58-'
         samples = [('a683aa80-9811-47c3-bb64-0731a802e889', 940, 946),
                    ('f58e0359-8d83-4994-a33c-217cf863144b', 1090, 1096)]
@@ -189,8 +189,8 @@ class TestNativeGoldRetirement(unittest.TestCase):
 class TestExternalCaptureEvidence(unittest.TestCase):
     def test_native_registry_identifies_neutral_and_captured_kraken_siblings(self):
         from Tools.Teardown.inspect_kindred_registry import registry_entries
-        manifest = Path('D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data/03/03A640B504C2B4D7C8CBF3A04E189223')
-        instance = Path(os.environ.get('TEMP', '')) / 'vg_max' / 'inst_dump' / 'KindredManifest.inst.bin'
+        manifest = pc_data_dir() / '03/03A640B504C2B4D7C8CBF3A04E189223'
+        instance = research_dir('vg_max') / 'inst_dump' / 'KindredManifest.inst.bin'
         if not manifest.is_file() or not instance.is_file():
             self.skipTest('external decoded Kindred registry unavailable')
         entries = registry_entries(manifest.read_bytes(), instance.read_bytes())
@@ -198,7 +198,7 @@ class TestExternalCaptureEvidence(unittest.TestCase):
                          {'HF_GoldMiner': 362, 'HF_Kraken_Jungle': 363, 'HF_Kraken_Captured': 364})
 
     def test_capture_adaptation_preserves_every_unmapped_byte_of_external_neutral_forms(self):
-        root = Path(os.environ.get('TEMP', '')) / 'vg_phaseB' / 'vgr_live'
+        root = research_dir('vg_phaseB') / 'vgr_live'
         if not root.is_dir():
             self.skipTest('external neutral objective corpus unavailable')
         catalog = entity_spawn.load_native_actor_catalog(root)

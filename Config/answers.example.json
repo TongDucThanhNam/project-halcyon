@@ -1,0 +1,112 @@
+{
+  "_comment": "Local CE bootstrap template; setup_local.py generates synthetic local identity. No external credentials.",
+  "status_redirect": {
+    "mode": "raw",
+    "body": "rpc.kindred-live.net:8443"
+  },
+  "getPlayerForGuestAccount": {
+    "code": 0,
+    "returnValue": {
+      "sessionToken": "__HALCYON_LOCAL_SESSION_TOKEN__",
+      "playerUUID": "__HALCYON_LOCAL_SESSION_TOKEN__",
+      "startSessionUrl": "https://rpc.kindred-live.net:8443",
+      "notifyUrl": "ws://rpc.kindred-live.net/notify",
+      "notifyFallbackUrl": "ws://rpc.kindred-live.net/notify",
+      "platformUrl": "https://rpc.kindred-live.net:8443",
+      "bucketIncrementer": 3000,
+      "failoverThreshold": 4000,
+      "state": "menus",
+      "linked": false,
+      "playerInfo": {
+        "name": "Guest",
+        "xp": 0,
+        "level": 1,
+        "targeting": {
+          "cohort": 1704067200
+        }
+      },
+      "enableStateUpdates": true,
+      "missedStateUpdateMessagesThreshold": 10,
+      "supportUrls": [],
+      "chatUrl": "",
+      "chatPass": "",
+      "teamUUID": ""
+    }
+  },
+  "startSessionForPlayer": {
+    "code": 0,
+    "returnValue": {
+      "sessionToken": "__HALCYON_LOCAL_SESSION_TOKEN__",
+      "playerUUID": "__HALCYON_LOCAL_SESSION_TOKEN__",
+      "startSessionUrl": "https://rpc.kindred-live.net:8443",
+      "notifyUrl": "ws://rpc.kindred-live.net/notify",
+      "notifyFallbackUrl": "ws://rpc.kindred-live.net/notify",
+      "platformUrl": "https://rpc.kindred-live.net:8443",
+      "bucketIncrementer": 3000,
+      "failoverThreshold": 4000,
+      "state": "menus",
+      "linked": false,
+      "playerInfo": {
+        "name": "Guest",
+        "xp": 0,
+        "level": 1,
+        "targeting": {
+          "cohort": 1704067200
+        }
+      },
+      "enableStateUpdates": true,
+      "missedStateUpdateMessagesThreshold": 10,
+      "supportUrls": [],
+      "chatUrl": "",
+      "chatPass": "",
+      "teamUUID": ""
+    }
+  },
+  "getPlayerInfo": {
+    "code": 0,
+    "returnValue": {
+      "name": "Guest",
+      "targeting": {
+        "cohort": 1704067200
+      }
+    }
+  },
+  "getTalentsData": {
+    "code": 0,
+    "returnValue": {}
+  },
+  "getSkinManifest": {
+    "code": 0,
+    "returnValue": "{\"themes\":[{\"themeKey\":\"halcyon_probe\",\"heroKey\":\"Catherine\"}],\"skins\":[{\"skinKey\":\"halcyon_probe\",\"heroKey\":\"Catherine\",\"themeKey\":\"halcyon_probe\",\"visible\":false,\"obtainable\":false}]}"
+  },
+  "getBuffManifest": {
+    "code": 0,
+    "returnValue": "{\"buffs\":{}}"
+  },
+  "getSeasonRewardsManifest": {
+    "code": 0,
+    "returnValue": "{\"season\":1,\"rewards\":[]}"
+  },
+  "friendListAll": {
+    "code": 0,
+    "returnValue": {
+      "friends": [],
+      "pending": [],
+      "confirmed": [],
+      "numOffline": 0
+    }
+  },
+  "update": {
+    "code": 0,
+    "returnValue": {
+      "state": "playing",
+      "host": "127.0.0.1",
+      "matchId": "00000000-1111-4222-8333-444455556666",
+      "port": 7100
+    }
+  },
+  "_match_host": "127.0.0.1",
+  "_bind_host": "127.0.0.1",
+  "_gw_port": 7100,
+  "_hb_port": 2112
+}

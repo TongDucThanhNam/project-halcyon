@@ -1,16 +1,15 @@
 """Native inventory-instance input validation and independent passive evidence."""
 from functools import lru_cache
 import math
-import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import buff_wire, cooldown_wire, economy, item_input
 from Tools.Teardown.inspect_item_input import inspect_uses, read_capture
 
 
-CAPTURE = Path(os.environ.get("TEMP", "/tmp")) / "vg_max/vg5_final.pcap"
+CAPTURE = research_dir('vg_max') / 'vg5_final.pcap'
 MATCH_UUID = "045f86d4-7ef2-4125-a835-e70a96288c88"
 
 

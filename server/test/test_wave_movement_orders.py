@@ -1,9 +1,8 @@
 """Native lane order evidence and continuous stop/turn/resume presentation."""
-import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import decode, roster, wave
 from server.hero_movement import HeroMovement
 from server.status_effects import StatusEffect, StatusManager, StatusType
@@ -16,7 +15,7 @@ def goals(frames, slot):
 
 class TestNativeLaneMovementOrders(unittest.TestCase):
     def test_native_first_wave_receives_lane_turns_and_combat_destination_changes(self):
-        root = Path(os.environ.get('TEMP', '')) / 'vg_max/vgr2'
+        root = research_dir('vg_max') / 'vgr2'
         prefix = 'ea4c7fda-4b61-481d-abb7-1c757d24ae58-591146df-33f2-4f12-9a04-8d800d239821'
         paths = {chunk: root / f'{prefix}.{chunk}.vgr' for chunk in (1, 2, 3)}
         if not all(path.is_file() for path in paths.values()):

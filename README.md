@@ -32,7 +32,7 @@ The server adopts a decoupled 3-tier architecture:
                                        │
         ┌──────────────────────────────┼──────────────────────────────┐
         │                              │                              │
-   HTTPS/TLS (8443)             TCP Gateway (7100+)            UDP Relay (2112)
+   HTTPS/TLS (8443)             TCP Gateway (7100+)            TCP Heartbeat (2112)
         │                              │                              │
         ▼                              ▼                              ▼
 ┌──────────────────┐          ┌──────────────────┐          ┌──────────────────┐
@@ -117,65 +117,32 @@ The latest recorded progress through September 12 is:
 
 ## 4. Local Setup and Verification
 
-### Prerequisites
+Start with the **[complete Windows development setup guide](Docs/Setup/windows-local-development.md)**.
+It documents required downloads and exact client hashes, LDPlayer 9 installation,
+root and ADB settings, APK/OBB installation, local routing/CA trust, startup,
+troubleshooting, and how to continue development.
 
-- **Recorded live workflow**: Windows, LDPlayer 9 with root access, ADB, and the owned Android CE 4.13.4 client (build 147219). The `live_up` helper uses Windows process tools; this is not a verified Linux or PC-client quick start.
-- **Python**: 3.11+ and PyCryptodome for the wire/certificate tooling; Pillow for the rendered-client driver and its tests. The optional native-contract inspector also needs Capstone.
-- **External owned data**: the A001 navigation record, jungle/Skye spawn corpora and a production-valid `world_tape.bin`. Captured payloads and client assets are intentionally absent from Git. A fresh clone alone cannot reproduce the complete test/live environment.
-- **Local platform setup**: certificate/key, answers configuration, emulator routing and CA trust. The [mobile setup record](Docs/Teardown/vainglory-mobile-local-stack.md) describes the routing and trust procedure; its September 5 menu-only result is historical.
+Original owned game files and research inputs now live physically in the ignored
+`Local/` directory. They are absent from Git and must be acquired separately on
+another machine. `Tools/import_local_data.ps1` copies existing archives with
+SHA-256 verification and preserves the originals. The tracked
+[input inventory](Config/local-inputs.json) records required filenames and provenance.
 
-Run commands from the repository root. Select your own external paths in
-PowerShell before running the tests or starting the server:
+After following the guide and installing `requirements.txt` into your venv:
 
 ```powershell
-$env:HALCYON_NAVMESH = '<absolute path to owned A001 navigation record>'
-$env:HALCYON_SPAWN_CORPUS = '<absolute directory containing owned spawn records, including Kraken>'
-$env:HALCYON_SKYE_VOLLEY_CORPUS = '<absolute directory containing owned Skye volley chunks 32 and 36>'
-```
-
-The live stack reads configuration, certificates and the world tape from
-`$env:TEMP/halcyon_stack`. Keep them outside the checkout. The
-[scenario record](Docs/Plan/solo-sandbox-scenarios.md) documents the required
-corpora and [world-tape builder](Tools/build_world_tape.py); missing corpus
-data is a setup failure, not evidence that a gameplay rule regressed.
-
-### 1. Run the Test Suite
-
-Ensure all regression checks and integration tests pass:
-```powershell
+python -B Tools/setup_local.py --init
+python -B Tools/setup_local.py --check --serial emulator-5554
 python -B -W error::ResourceWarning -m unittest discover -s server/test -t .
-```
-Historical test counts apply only to their recorded source and environment;
-see the [current status](Docs/Plan/current-status.md). Require a clean exit on
-the source being reviewed. Run the bounded repeatability scenarios separately:
-
-```powershell
-python Tools/run_scenarios.py --mode headless --scenario all
+python -B Tools/run_scenarios.py --mode headless --scenario all
+python -B -m server.platform.live_up --bind-host 127.0.0.1 --match-host 127.0.0.1
 ```
 
-Outputs go outside Git. Without an independent reference fixture the reference
-verdict is `UNAVAILABLE`, even when local repeatability passes.
-
-### 2. Launch the Host Server
-
-With the external setup complete and the emulator available, start the local
-platform, gateway and relay, and apply guest routing. This helper stops prior
-local stack processes and restarts the stack:
-```powershell
-python -m server.platform.live_up
-```
-
-To advertise a LAN address, with each device's routing and certificate trust
-configured separately:
-```powershell
-python -m server.platform.live_up --match-host <YOUR_LAN_IP>
-```
-
-### 3. Connect via Client
-
-1. Launch Vainglory on an emulator or physical device configured with DNS/hosts pointing to the server.
-2. Follow the recorded solo route: **PLAY → SOLO BOTS → 3V3 → VERY EASY**.
-3. Select a hero with an implemented kit, such as Skye, lock in, and choose **Manual Build**. Selectability alone does not imply kit support.
+The live helper restarts prior local stack processes and applies guest routing.
+Follow **PLAY → SOLO BOTS → 3V3 → VERY EASY**, select an implemented hero such
+as Skye, lock in and choose **Manual Build** when offered. Keep QA output outside
+the checkout. A passing headless run establishes internal repeatability;
+independent reference remains `UNAVAILABLE` without a supplied reference fixture.
 
 ---
 

@@ -23,7 +23,15 @@ evidence needs its own source identity, setup disclosure and observed result.
 
 ## Verification on September 13
 
-The full discovered unittest suite completed with **1,152 tests in 907.377
+**Later setup/relocation pass:** the fresh venv and imported, Git-ignored
+project-local inputs passed **1,176 tests in 904.996 seconds, OK (27 skipped),
+exit 0**. All six headless scenarios passed exact comparison on source pin
+`e5a71f214dc5f2671fb8d1e8bf93eceac07df8ce83c28cfd193acf613dc87fd2`.
+See the [setup validation record](../Setup/windows-local-development.md#13-relocation-and-validation-record)
+for commands, input inventory, evidence paths and remaining capture limits.
+This pass did not restart the live stack or establish new rendered acceptance.
+
+The earlier status-review unittest suite completed with **1,152 tests in 907.377
 seconds, OK (27 skipped), exit 0**, using `-B -W error::ResourceWarning`.
 The skips concern external captured evidence (some checks use their original
 default paths), including native attack/lifecycle/volley records; they are
@@ -116,15 +124,19 @@ Captured payloads and client data intentionally remain outside Git:
 | A001 navigation record | `HALCYON_NAVMESH`, an absolute path to the owned extracted record; production scenarios require the actual mesh. |
 | Jungle spawn corpus | `HALCYON_SPAWN_CORPUS`, including the owned match-6 Kraken archetype-363 creation record. |
 | Skye volley corpus | `HALCYON_SKYE_VOLLEY_CORPUS`, containing the owned volley chunks 32 and 36. |
-| World initialization tape | `$env:TEMP/halcyon_stack/world_tape.bin`, rebuilt from owned capture data by `Tools/build_world_tape.py` and validated against the production loader digest. |
-| Platform configuration and trust | External `answers.json`, certificate/key in `$env:TEMP/halcyon_stack`, and guest routing/CA trust. |
+| World initialization tape | Ignored `Local/runtime/halcyon_stack/world_tape.bin`, rebuilt from owned capture data by `Tools/build_world_tape.py` and validated against the production loader digest. |
+| Platform configuration and trust | Ignored `Local/runtime/halcyon_stack/answers.json`, certificate/key and guest routing/CA trust; legacy TEMP paths remain fallback locations. |
 | Verification artifacts | Unique external output directories; preserve existing captures and journals. Current durable pilot records are under `%LOCALAPPDATA%/halcyon-evidence/`. |
 
 A fresh clone without these inputs is not a self-contained runnable demo.
 Missing spawn or volley data can fail integration tests during setup; record
 that prerequisite failure separately from a simulated gameplay regression.
-Explicitly set external paths instead of relying on the original operator's
-machine defaults. Follow the [README setup](../../README.md#4-local-setup-and-verification)
+The September 13 relocation adds ignored `Local/vainglory`, `Local/research`,
+and `Local/runtime/halcyon_stack` defaults, a verified importer, input inventory
+and setup checker. Original captures remain distinct from minimal reconstructed
+runtime records; missing full capture fixtures are still unavailable. Use
+`Local/runtime/halcyon_stack/world_tape.bin` for the current local layout.
+Follow the [complete Windows reproduction guide](../Setup/windows-local-development.md)
 and [scenario commands](solo-sandbox-scenarios.md#commands).
 
 ## Next acceptance milestones

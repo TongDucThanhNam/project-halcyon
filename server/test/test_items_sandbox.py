@@ -5,11 +5,10 @@ loadouts directly to isolate combat behavior; purchase scenarios exercise actual
 component consumption. Item-button/HUD mapping remains separately validated.
 """
 from dataclasses import replace
-import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import pc_data_dir, research_dir
 from server import cooldown_wire, economy, hero_movement, items, roster, wire
 from server.status_effects import (DamageContext, DamageModifierQueue, DamageType,
                                    StatusEffect, StatusManager, StatusType)
@@ -464,8 +463,8 @@ class TestItemStatusContracts(ItemScenario):
             economy.bind_item_identity("sprint_boots", 12345, evidence="")
 
 
-_MANIFEST = Path("D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data/03/03A640B504C2B4D7C8CBF3A04E189223")
-_INSTANCE = Path(os.environ.get("TEMP", "")) / "vg_max/inst_dump/KindredManifest.inst.bin"
+_MANIFEST = pc_data_dir() / '03/03A640B504C2B4D7C8CBF3A04E189223'
+_INSTANCE = research_dir('vg_max') / 'inst_dump/KindredManifest.inst.bin'
 
 
 @unittest.skipUnless(_MANIFEST.is_file() and _INSTANCE.is_file(), "native manifest corpus unavailable")

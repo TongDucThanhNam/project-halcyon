@@ -6,7 +6,7 @@
    contains `server.platform.local_stack`; a stale NON-stack holder of
    :80/:443 is left alone — the stack tolerates it by design);
 2. start a fresh `python -m server.platform.local_stack` detached, output
-   to $TEMP/halcyon_stack/live-stdout.txt;
+   to the private runtime directory's live-stdout.txt;
 3. wait until the gateway/heartbeat ports listen (from answers.json
    `_gw_port`/`_hb_port`);
 4. re-apply the guest routing via server.platform.guest_setup (idempotent).

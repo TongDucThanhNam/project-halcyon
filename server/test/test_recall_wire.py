@@ -1,9 +1,8 @@
 """Recall's paired buffs, cancellation, completion and own-corpus goldens."""
-import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import buff_wire, decode, recall_wire
 from server.status_effects import StatusManager
 
@@ -56,7 +55,7 @@ class RecallPresentationTests(unittest.TestCase):
         self.assertEqual(self.recall.active[1500], state)
 
     def test_catherine_complete_and_other_hero_move_cancel_match_raw_vgr(self):
-        base = Path(os.environ.get('TEMP', '')) / 'vg_phaseB/vgr_live'
+        base = research_dir('vg_phaseB') / 'vgr_live'
         prefix = 'ea4c7fda-4b61-481d-abb7-1c757d24ae58-'
         complete = base / f'{prefix}1574e27a-e851-492b-8d91-94fc4bd66985.18.vgr'
         cancel = base / f'{prefix}f58e0359-8d83-4994-a33c-217cf863144b.27.vgr'
@@ -84,7 +83,7 @@ class RecallPresentationTests(unittest.TestCase):
         self.assertEqual(frames[313][1], 1016)
 
     def test_phinn_return_uses_same_trigger_effect_and_flag_zero_relocation(self):
-        base = Path(os.environ.get('TEMP', '')) / 'vg_max/vgr5b'
+        base = research_dir('vg_max') / 'vgr5b'
         matches = [p for p in base.glob('*-045f86d4-7ef2-4125-a835-e70a96288c88.47.vgr')]
         if not matches:
             self.skipTest('operator-owned Phinn VGR is not installed')
@@ -100,7 +99,7 @@ class RecallPresentationTests(unittest.TestCase):
         self.assertEqual(relocation, recall_wire.build_return_relocation(eid, x, y, height))
 
     def test_successful_native_returns_restore_a_quarter_of_max_resources(self):
-        base = Path(os.environ.get('TEMP', '')) / 'vg_phaseB/vgr_live'
+        base = research_dir('vg_phaseB') / 'vgr_live'
         cases = [('0e7de8af-96d9-4e3a-b3c2-609ed5e71120', 17, 1025),
                  ('f58e0359-8d83-4994-a33c-217cf863144b', 22, 1159)]
         for match, chunk, row in cases:

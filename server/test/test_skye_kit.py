@@ -3,9 +3,9 @@
 Geometry and directional speed assertions cover the explicit simulation
 policies; they do not claim a native visual or timing measurement.
 """
-from pathlib import Path
 import unittest
 
+from server.paths import pc_data_dir
 from server import abilities, ability_wire, buff_wire, cooldown_wire, hero_movement
 from server.status_effects import DamageModifierQueue, StatusEffect, StatusManager, StatusType
 from server.structures import Structure
@@ -16,7 +16,7 @@ from Tools.Teardown.inspect_ability_constants import read_records
 
 
 A, B, C = abilities.AbilitySlot
-NATIVE = Path('D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data/0C/0CB20BA22E7D1BBCC89CBCF4895B8E6F')
+NATIVE = pc_data_dir() / '0C/0CB20BA22E7D1BBCC89CBCF4895B8E6F'
 
 
 class SkyeFixture(unittest.TestCase):

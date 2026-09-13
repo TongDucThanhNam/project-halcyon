@@ -1,9 +1,9 @@
 """Real-corpus death/countdown/revival guards; no captured fixture in the repo."""
 import os
-from pathlib import Path
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import decode, lifecycle_wire
 from server.actor_slots import ActorSlots
 from server.hero_movement import HeroMovement
@@ -138,14 +138,14 @@ class TestCorpusLifecycle(unittest.TestCase):
 class TestNativeLocalLifecycle(unittest.TestCase):
     def test_native_snapshots_distinguish_dead_relocation_from_completed_full_pool_revival(self):
         cases = (
-            ('vg_max/vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88',
+            (research_dir('vg_max') / 'vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88',
              (26, 1448), (27, 8), (27, 241), False),
-            ('vg_phaseB/vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120',
+            (research_dir('vg_phaseB') / 'vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120',
              (16, 2131), (17, 8), (16, 2173), True),
         )
         for relative, match, relocation, snapshot, completion, completed in cases:
             with self.subTest(match=match):
-                root = Path(os.environ.get('TEMP', '')) / relative
+                root = relative
                 records = {}
                 for chunk in range(relocation[0], max(snapshot[0], completion[0]) + 1):
                     path = root / f'ea4c7fda-4b61-481d-abb7-1c757d24ae58-{match}.{chunk}.vgr'
@@ -182,18 +182,18 @@ class TestNativeLocalLifecycle(unittest.TestCase):
         # Every complete local-player resurrection in these four original
         # matches. A flag0 Recall relocation is deliberately excluded.
         cases = (
-            ('vg_max/vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88', (26, 421), (26, 634), (26, 1448), (27, 241)),
-            ('vg_max/vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88', (33, 684), (33, 846), (34, 618), (34, 644)),
-            ('vg_phaseB/vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120', (16, 1001), (16, 1414), (16, 2131), (16, 2173)),
-            ('vg_phaseB/vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120', (37, 512), (37, 634), (38, 742), (38, 787)),
-            ('vg_phaseB/vgr_live', '5ac8f358-2683-4205-9b7b-969ea31b3c72', (33, 1525), (34, 379), (35, 316), (35, 355)),
-            ('vg_phaseB/vgr_live', 'a683aa80-9811-47c3-bb64-0731a802e889', (10, 407), (10, 611), (10, 734), (10, 758)),
-            ('vg_phaseB/vgr_live', 'a683aa80-9811-47c3-bb64-0731a802e889', (35, 364), (35, 529), (36, 587), (36, 648)),
+            (research_dir('vg_max') / 'vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88', (26, 421), (26, 634), (26, 1448), (27, 241)),
+            (research_dir('vg_max') / 'vgr5b', '045f86d4-7ef2-4125-a835-e70a96288c88', (33, 684), (33, 846), (34, 618), (34, 644)),
+            (research_dir('vg_phaseB') / 'vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120', (16, 1001), (16, 1414), (16, 2131), (16, 2173)),
+            (research_dir('vg_phaseB') / 'vgr_live', '0e7de8af-96d9-4e3a-b3c2-609ed5e71120', (37, 512), (37, 634), (38, 742), (38, 787)),
+            (research_dir('vg_phaseB') / 'vgr_live', '5ac8f358-2683-4205-9b7b-969ea31b3c72', (33, 1525), (34, 379), (35, 316), (35, 355)),
+            (research_dir('vg_phaseB') / 'vgr_live', 'a683aa80-9811-47c3-bb64-0731a802e889', (10, 407), (10, 611), (10, 734), (10, 758)),
+            (research_dir('vg_phaseB') / 'vgr_live', 'a683aa80-9811-47c3-bb64-0731a802e889', (35, 364), (35, 529), (36, 587), (36, 648)),
         )
         decoded = {}
         for relative, match, death, hide, relocate, revive in cases:
             with self.subTest(match=match, death=death):
-                root = Path(os.environ.get('TEMP', '')) / relative
+                root = relative
                 records = {}
                 for chunk in range(death[0], revive[0] + 1):
                     path = root / f'ea4c7fda-4b61-481d-abb7-1c757d24ae58-{match}.{chunk}.vgr'

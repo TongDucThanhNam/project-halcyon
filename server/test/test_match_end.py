@@ -1,17 +1,16 @@
 """Structure-death/result builders checked against the external natural ending."""
-import os
-from pathlib import Path
 import pickle
 import struct
 import unittest
 
+from server.paths import research_dir
 from server import match_end
 
 
-CORPUS_ROOT = Path(os.environ.get("TEMP", ".")) / "vg_max"
+CORPUS_ROOT = research_dir('vg_max')
 NATURAL_CACHE = CORPUS_ROOT / "match6.halcyon_spawn_audit.pkl"
 SURRENDER_CACHE = CORPUS_ROOT / "vgfull.pcap.halcyon_spawn_audit.pkl"
-NATURAL_FINAL_CHUNK = Path(os.environ.get("TEMP", ".")) / "vg_phaseB" / "vgr_live" / (
+NATURAL_FINAL_CHUNK = research_dir('vg_phaseB') / "vgr_live" / (
     "ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e889.74.vgr")
 
 
