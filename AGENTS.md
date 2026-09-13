@@ -96,6 +96,7 @@ in the leaf; this entry point holds routes and brief status only.
 | How to capture / reproduce evidence on the emulator | `Docs/Teardown/vainglory-runtime-reconstruction.md` | `vainglory-artifact-reproduction.md` for exact counts + corrections |
 | Building the deterministic server-authoritative sim | `Docs/Research/veilbound-multiplayer-design.md` (input-stream model) | the determinism spike under `Docs/Research/spikes/determinism/` |
 | Current Tier 1 solo sandbox implementation and acceptance | `Docs/Plan/solo-sandbox.md` | `solo-sandbox-acceptance-status.md` and the subsystem leaf linked for the scenario |
+| Repeatable Skye/minion scenario verification and reference comparisons | `Docs/Plan/solo-sandbox-scenarios.md` (shipped pilot: `Tools/run_scenarios.py` headless scenarios, two-process exact repeatability, client driver, reference interface) | `solo-sandbox-acceptance-status.md` for active gate status and the relevant subsystem leaf for the scenario under test |
 | After Phase 0: closing T1 (matchmaking schema) and opening the T3 thin slice; RE-asset→server mapping, determinism decisions, open gaps | `Docs/Plan/next-steps.md` | the Teardown leaves it cites per row |
 
 When no row matches, stay with this file and the source. Do not load docs "just
@@ -112,7 +113,7 @@ authoritative**. To self-host we must build three tiers:
 |---|---|---|---|
 | **T1 Front door** | preauth bootstrap + platform RPC (TLS JSON-RPC menu/auth/matchmaking) | **Local CE flow verified** — menu, draft and match entry support the solo sandbox; broader platform/PvP completeness remains separate | Open |
 | **T2 Gateway + match server** | frame grammar `[u16 BE len][body]`, Blowfish ECB per-match key, route-request greeting, join handshake, heartbeat | **Closed** (`mock_gcp.py` round-trip proved encode/decode) | Easy |
-| **T3 Authoritative simulation** | run the actual game logic: movement, ability effects, minion/jungle AI, turret aggro, vision/FoW, XP/gold, death/respawn, win/lose — and emit the event stream | **Solo acceptance reopened** — `Docs/Plan/solo-sandbox.md`; operator testing exposed missing Skye skills, projectile visuals and defective minion movement | Hard |
+| **T3 Authoritative simulation** | run the actual game logic: movement, ability effects, minion/jungle AI, turret aggro, vision/FoW, XP/gold, death/respawn, win/lose — and emit the event stream | **Solo acceptance reopened** — `Docs/Plan/solo-sandbox.md`; September 8 operator defects reopened acceptance; individual Skye/projectile behaviors and minion movement have since been observed locally, but repeatable acceptance and official fidelity remain open | Hard |
 
 **T3 is the real work.** T2 is the provable warm-up. The rule-layer *numbers*
 (kit 97.5 %, combat `D = W/(1+A/100)`, wave 60 s, HP tiers 2500/3000/3500/5000/
@@ -133,15 +134,98 @@ are not, and must be derived or rebuilt.
   `D:/Downloads/vg/` (client / store / PC build), `$TEMP/vg_max/` (decrypted
   + extracted outputs), an emulator capture tag. Never copy payloads in.
 
+## Verification strategy
+
+**Scope:** The full faithful self-hosted PvP / 100 % gameplay target is unchanged.
+The current pilot scenario (repeatable Skye/minion verification) is a workflow
+qualification, not a scope reduction or an overall-completion claim.
+
+**Evidence-driven verification before expanding.** Every defect gets a named scenario
+with: exact source/client version, reproducible initial state, input sequence, observed
+versus expected outcome, and external evidence artifacts. Establish repeatable results
+before adding new gameplay implementation. Reuse `Tools/verify_sandbox.py`,
+`Tools/sandbox_qa.py`, and production `SnapshotStream.advance_simulation`; extend
+these rather than inventing a parallel toy engine.
+
+**Scripts own time-sensitive client execution.** Check HP/energy/ranks/available
+points/cooldowns/target validity and required target lock, perform the bounded UI
+sequence, retain timestamps, input/response trace and video as needed. No model/tool
+reasoning round trips between a basic hit and the dependent short-lived cast.
+Automation must report distinct observed stages: missing input; rejected/ignored input
+(explicit rejection only when actually observed — otherwise unacknowledged with unknown
+reason); accepted operation; and authoritative outcome plus visible presentation.
+Unknown presentation is unverified, not automatically missing. Setup failure must not
+be called a gameplay regression. QA preparation is allowed only within acceptance-leaf
+scope; QA damage/forced casts cannot prove real UI behavior.
+
+**Headless for simulation; rendered client for acceptance.** Use short headless scenarios
+through actual production integration for simulation diagnosis and regression, with
+necessary nav, structures/turrets and lifecycle enabled. Use the rendered CE client to
+establish native presentation. Keep real-duration soak/long-timer tests when those are
+the claim; do not replace acceptance with artificially sped-up time or isolated
+subsystems.
+
+**Independent gameplay fidelity.** Reuse owned captures first, then ordinary-client
+passive observation for missing cases, preserving rank/items/HP/positions/time and
+relevant inputs. Local Halcyon recordings prove Halcyon behavior only. Recorded server
+outputs alone (`.vgr`) are not a complete computation oracle. Compare semantic outcomes
+after explicit identity/time normalization and measured justified tolerances; never claim
+raw packet equality guarantees official fidelity. Determinism within our same
+implementation stays exact.
+
+**Community tooling scope.** VGNA replay/spectator is an evaluation lead for repeated
+visual reference; HackedGlory is capture/decoder research; VGReborn is matchmaking
+integration. None is evidence of a complete replacement simulation. The original Trick 8
+zero-noise/AFK swarm assertions are superseded by the opening review in
+`Docs/Teardown/vainglory-community-ecosystem-tricks.md`. Headless clients only against
+our own server under existing boundaries. Do not restart binary/codec dead ends without
+genuinely new evidence routed through existing leaves.
+
+**Delegation discipline.** Delegate bounded scenario/tool or subsystem changes with
+explicit outputs and checks; one owner per emulator/runtime and per overlapping file set.
+Agent summarizes measured results with artifact paths; parent reviews. Don't spend cycles
+on repeated ad-hoc screenshot probing or re-discovering known trace layouts. Stop a
+failed experiment with preserved evidence and a classified unknown instead of blind
+repeated retries; continue independent work. Do not add permission gates.
+
+**Pilot implementation and evidence (reviewed 2026-09-13).** The repeatable
+command for current Skye and minion/turret cases is
+`python Tools/run_scenarios.py --mode headless --scenario all`: production headless
+scenarios run in two seeded independent processes over one pinned source snapshot and
+are accepted by exact event/state byte comparison, with machine-readable failure
+stages and preserved external evidence. `--mode client --scenario ...` drives the
+implemented rendered-client path (`Tools/scenario_client.py`), which is mock-tested;
+the reviewed September 12 records contain two accepted A attempts in one match
+and two B and two C attempts on separate fresh matches for each ability. Those
+records did not run the compare-pair contract and their presentation remains
+unreviewed. Three bounded minion observation windows establish approach/combat
+but not survivor resumption or structure interaction. The corpus
+`world_tape.bin` was rebuilt byte-faithfully by `Tools/build_world_tape.py`
+(loader-digest-proven). An idle ~30-minute client crash remains open — see
+`Docs/Plan/current-status.md` and `Docs/Plan/solo-sandbox-scenarios.md`;
+independent reference fixtures are an interface only — without one the reference
+status is `UNAVAILABLE`. See
+`Docs/Plan/solo-sandbox-scenarios.md` for commands, schema and the demonstrated
+status. Do not invent another executable path for these scenarios.
+
+**Measurement hierarchy.** Distinguish: harness repeatability, internal determinism,
+visible client acceptance, and independently measured gameplay fidelity. A passing test
+count alone never closes faithful-gameplay acceptance.
+
+**Artifacts.** Keep all QA output outside the repo; never delete old journals/captures
+to prepare a new run; allocate unique output directories. The existing boundary on no
+assets/payloads in the repo remains unchanged.
+
 ## Current phase
 
 Phase 0 is **closed** (2026-09-05; `Docs/Plan/phase0.md`). The current
-gameplay implementation and acceptance record is **`Docs/Plan/solo-sandbox.md`**.
-**Acceptance is reopened:** the operator's Skye test has unavailable skill
-upgrades, missing basic-projectile visuals and defective minion movement.
-The 758-test baseline and two deterministic 960-second replays do not prove
-these client behaviors; the previous completion claim was too broad.
-Consult the linked leaf for active defects and evidence. The operator's "Tier 1" names solo gameplay
+concise progress report is **`Docs/Plan/current-status.md`**; the detailed
+gameplay acceptance record is **`Docs/Plan/solo-sandbox.md`**.
+**Acceptance is reopened:** September 8 operator defects reopened acceptance;
+local fixes and individual Skye/projectile behaviors and minion movement have
+since been observed, but repeatable acceptance and official fidelity remain open.
+Consult the linked leaf for active gates, evidence, and current defect status.
+The operator's "Tier 1" names solo gameplay
 acceptance, distinct from the platform T1 tier in the architecture above.
 
 `Docs/Plan/next-steps.md` retains the historical Phase 0 hand-off and design

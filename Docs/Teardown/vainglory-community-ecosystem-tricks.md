@@ -1,5 +1,123 @@
 # Community Ecosystem Tricks & Leads (VGNA, HackedGlory, VGReborn)
 
+## Research direction correction — 2026-09-12
+
+The operator requested structural understanding of the client and server,
+not another campaign of watching client videos. **Use decoded data, identified
+native consumers and controlled local replay as the primary research loop.**
+Video is supplementary evidence for presentation after a concrete question
+has been narrowed. Further ZCode/native-agent delegation is disabled by the
+operator; the parent owns subsequent investigation.
+
+The phone work did not establish an independent gameplay reference. A normal
+solo/bot menu route and recording transport were exercised, but the
+movement/minimap qualification remains incomplete. Do not keep creating
+recorder revisions or repeated UI attempts as a substitute for protocol work.
+
+### What the community sources actually contribute
+
+Primary sources were rechecked on 2026-09-12. Their claims remain leads until
+matched to our exact build and evidence; agreement with our own derivative
+notes is not independent corroboration.
+
+| Source | Useful contribution | Limit |
+|---|---|---|
+| [HackedGlory protocol writeup](https://github.com/a1cnore/HackedGlory/blob/main/reports/protocol_decryption_writeup.md) | Its transport recovery followed concrete receive, dispatch and key-derivation call chains using static analysis plus existing traffic; it explicitly reports that runtime hooks were unnecessary for that result. | Its older semantic table conflicts with later local measurements. Reuse anchors and methods, not every opcode label. |
+| [HackedGlory decoder benchmark](https://github.com/a1cnore/HackedGlory/blob/main/mitm/match_decryption/autoresearch.md) | Automated reconstruction of scoreboard timelines from recorded matches. | The scored target is levels, K/D/CS, gold, XP and winner information. That is neither a recovered simulation nor proof of ability/AI fidelity. |
+| [HackedGlory CFF0 research](https://github.com/a1cnore/HackedGlory/blob/main/reports/cff0_decryption_and_balance_extraction.md) | Named definitions and pointer-linked subobjects are an entry point into ability/data structure. | Our mechanics-matrix audit already found pollution in the generated balance database. Reproduce values and links from owned source bytes, with revision/type checks. Do not reopen the solved codec or use heuristic field names as facts. |
+| [HackedGlory Android implementation status](https://github.com/a1cnore/HackedGlory/blob/main/mitm/vg_unlock_android/README.md) | A loader shim and no-op control offer a possible route around a particular loader problem. | The documented control works on tested devices; active hook families still fail on one test device. This does not qualify our phone or translated LDPlayer process. |
+| [VGNA client](https://client.vgna.net/) | Advertises stat collection, spectator support and a native Windows Replay Hub. These are leads for transport/replay integration and reusable match data. | The page does not expose the authoritative simulation or establish a supported raw-data export API. Do not infer access to its private backend or install a client merely to repeat visual observation. |
+
+### Preferred investigation loop
+
+1. **Start from an unresolved mechanism and a known anchor.** For the client,
+   trace an identified opcode handler or named CFF action into the constructor,
+   state write and update/destructor path it actually calls. Record binary
+   digest, platform, function address, field offsets and evidence. Our wire
+   leaf already names handlers, and `Tools/Teardown/inspect_ability_actions.py`
+   joins PTCH action-vector entries to native ability names. This is bounded
+   analysis of a known path, not whole-program decompilation or an unanchored
+   RTTI search. Revalidate any historical address before use; iOS, Android and
+   Windows addresses/layouts are not interchangeable.
+2. **Mine owned traffic automatically.** Reuse the existing PCAP/VGR readers
+   and inspectors. Index by match, direction, EID, actor-slot lifetime, action,
+   rank, item state and timestamp. Extract every candidate episode rather
+   than hand-driving one cast for each model turn. Preserve missing-state
+   flags and select a different match for validation. S2C-only VGR permits
+   output/state analysis; it does not supply missing C2S inputs or a complete
+   simulation initial state.
+3. **Test the client contract locally.** Reuse the current gateway, world-tape
+   loader and trace facilities. First prove unmodified replay reaches the
+   relevant client state. Then vary one dependency while preserving required
+   bootstrap, entity/slot ownership and chronology. Record the resulting
+   state/handler outcome. This can establish which message creates an actor,
+   starts presentation, changes a pool or releases a slot. A crash following
+   arbitrary packet deletion is not a semantic result.
+4. **Infer server decisions separately.** Turn recurring official episodes
+   into explicit candidate rules: target eligibility, first-hit delay, pulse
+   interval, cancellation condition, retargeting and expiry. Compare hypotheses
+   on held-out episodes with compatible initial conditions. Only genuinely
+   missing discriminating evidence should trigger another ordinary-client
+   session, using passive bidirectional data from our own connection where
+   available. Our own headless server remains the place for custom clients,
+   active packet experiments and deterministic regression tests.
+5. **Use runtime observation only to resolve a named missing field.** First
+   qualify a matching native ABI/build and resolve the exact loaded module.
+   A no-op attach is insufficient. If qualified, a narrow decoded-message or
+   post-handler state observer is more informative than pixels. The corr32
+   LDPlayer run did not find `libGameKindred` in either enumerated realm;
+   that route is parked. No blind reattach loop or automatic repack follows
+   from this research direction.
+
+The output of each loop is a small protocol/state contract with source
+provenance, an executable local check and separately listed server-rule
+unknowns. Count resolved mechanisms and contradictory observations, not
+screenshots, tool revisions or nominal decoder coverage.
+
+### First bounded question
+
+**2026-09-12 result:** the [Skye C contract review](../Plan/solo-sandbox-abilities.md#2026-09-12-skye-c-native-contract-and-two-production-corrections)
+reproduces ten field lifetimes and 332 owner-attributed hit/damage associations
+from the existing owned cache. Native branches and the production event stream
+exposed two corrected defects: activation published after damage, and the wrong
+cluster/line choice at the exact two-unit threshold. Following the actual native
+vtable also showed that a tempting 2.5 constant reaches an accessor that ignores
+it in this client; it is not a recovered operational damage radius. This is a
+completed first analysis loop, with 37 passing checks and two-process headless
+repeatability, while geometry, damage classification and reconnect remain open.
+
+**Skye C: which native actor/state connects the cast to the persistent field,
+and what controls its start and retirement?** This addresses the existing
+publication-to-pulse and reconnect gaps without searching the whole engine.
+
+Reuse the Skye action/constant evidence in
+[the ability leaf](../Plan/solo-sandbox-abilities.md),
+`inspect_ability_actions.py`, `inspect_ability_constants.py`, and the owned
+VGR/trace parsers. Join native action 4, relevant actor publications, damage
+pulses, cooldown and removal records by identity/lifetime. Inspect only the
+identified consumers and definition references needed to distinguish those
+states. Treat temporal proximity as a candidate relationship until a consumer
+or controlled local intervention supports it.
+
+Deliver: one dependency diagram, a byte/field provenance table, candidate
+episodes with confounders and one local contract check. Do not claim that a
+client presentation timer computes authoritative damage, or that reproducing
+recorded damage demonstrates the server algorithm. If a required native path
+has no verified anchor, preserve that precise gap and continue the available
+offline corpus work; do not fall back to another video automation campaign.
+
+### Corrections to older framing
+
+The original Trick 8 below remains an unaccepted historical proposal. Its
+zero-noise/one-action-one-frame assertions and remote custom-client plan are
+not the research strategy. The “no binary anchors” stopped-avenue note describes
+an earlier unanchored search; it does not erase subsequently documented opcode
+and action-table anchors, and does not authorize reopening every binary path.
+The runtime leaf's former “active instrumentation” and “zero drift oracle”
+claims are corrected there. Client code can reveal parsing, state transitions,
+prediction/presentation and any demonstrated shared helpers; it cannot by
+itself prove undisclosed authoritative rules.
+
 ## Evidence review — 2026-09-07
 
 The original proposal below is retained as an operator-supplied research lead,

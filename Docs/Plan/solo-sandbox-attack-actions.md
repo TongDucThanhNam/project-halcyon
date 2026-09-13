@@ -258,3 +258,30 @@ python -B Tools/Teardown/inspect_live_attack.py "$env:TEMP/halcyon_stack/wire-17
 Frame numbers above come from ffmpeg 7.1 decoding with `-vf showinfo
 -fps_mode passthrough`; no fps conversion or interpolated frames were used.
 This round changed documentation only; it did not alter production or tests.
+
+## 2026-09-09 live Skye basic-attack projectiles (gate 2)
+
+Live operator-path session, emulator client versus the local authoritative
+server. Two full matches; the primary trace is
+`$TEMP/halcyon_stack/wire-1788892077119423800.jsonl`, connection
+`1986304219472`, Skye EID `1500` (wire `000005dc`).
+
+Each targeted basic attack now produces the full native chain:
+
+1. Client taps a minion: `1060` TARGET_ENTITY `[u32 target][u16 0]`.
+2. Server animates: `1045` attack-anim (observed variants `0x0d`/`0x0e`).
+3. Server releases the visible projectile: `1037` targeted projectile
+   `[u32 instance][u32 socket][f32 arg][u16 kind][u8 src][u8 owner][u8 tgt]`
+   with Skye's hero sockets `0x77b4b72a` / `0xb1ab2985` and kind `108`
+   (`0x6c`).
+4. Impact: `1054` damage ticks of `-72` / `-77.7` / `-86.1` on lane minions.
+
+Trace census for match #1: 65+ Skye `1045` animations and **29 Skye `1037`
+hero projectiles**, plus minion ranged shots on socket `0x005dd10c`, kind
+`79` (`0x4f`). The projectile is visible in the client: resampled illustrations
+(fps10 extracted frames 49, 50, 57, 79 from the original 11.7fps 30s recording
+`skye-basic-attacks.mp4`, and frames `vframe_110.png`/`vframe_140.png` from
+`$TEMP/halcyon_stack/gate3_fight.mp4`) show glowing basic-attack rounds in flight,
+muzzle flashes, and impact ticks. These extracts serve as resampled illustrations
+of the rendered presentation rather than high-speed or exact original source frames.
+This closes the repaired basic attack visual defect under Gate 2.

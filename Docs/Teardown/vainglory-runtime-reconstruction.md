@@ -115,20 +115,43 @@ them.
    `(x,z)` multiplicity) is what separates signal from shader noise, not
    raw in-bounds counts.
 
-## 8. Dynamic Instrumentation via Rooted LDPlayer & The Differential Oracle (2026-09-07)
+## 8. Runtime observation and differential comparison — corrected 2026-09-12
 
-### 8.1 Active Instrumentation Stack (Rooted LDPlayer)
-While static analysis of `libGameKindred.so` is blocked by stripped symbols, the rooted Android 9 environment on LDPlayer supports runtime dynamic instrumentation:
-- **`frida-server` (Android x86_64 / arm64 translation)**: Runs under `su` inside the emulator.
-- **In-Memory Opcode Hooking**: Intercepts the 167-case opcode dispatch loop (`vainglory-protocol-wire.md` §15.8) after Blowfish decryption and length framing, capturing in-flight payloads directly before C++ struct deserialization.
-- **JSON-RPC Extraction (T1)**: Hooks HTTPS payload constructors or memory strings immediately before encryption to capture the live `joinLobby` and matchmaking queue schemas without requiring root certificate CA installation.
-- **Entity Lifecycle Capture (T3)**: Hooks component allocators to observe the exact in-memory layout produced by the six early `1087` frames emitted at `+0.194s` after map load.
+The 2026-09-07 version of this section described proposed opcode, JSON-RPC
+and allocator hooks as an active, working instrumentation stack. That claim
+was not supported by the later qualification run and is withdrawn.
 
-### 8.2 The Differential Oracle Methodology
-To guarantee authoritative server simulation parity with zero mathematical drift:
-1. **Recording Phase**: Execute scripted hero actions (attack, move, ability cast, level-up) against an active session on the official/community server. Record the synchronized C2S input stream (`1012`, `1041`, `1060`, `1157`) and the resulting S2C event stream (`1010`, `1054`, `1067`, `1070`).
-2. **Replay Phase**: Inject the exact recorded C2S input stream into the Halcyon test server.
-3. **Automated Diffing**: Compare the emitted S2C event frames between Halcyon and Official:
-   - Satisifies parity if combat deltas (`1054`), arrival timestamps, and animation states (`1067`) match within machine precision.
-   - Any divergence flags an explicit tick or formula error in the server's authoritative simulation.
+In corr32 (`run-1789191266817-b1abe751`), Frida 17.11.0 started and native and
+emulated sessions attached, loaded a no-op observer, enumerated modules and
+detached. Neither enumeration exposed the target `libGameKindred`: the native
+realm reported 196 modules and the emulated realm seven. This is **target not
+observed**, not a working game-state observer, proof of a private loader, or
+proof that every instrumentation route is impossible. The LDPlayer route is
+parked pending a specific new anchor/environment result. Preserved evidence:
+`%LOCALAPPDATA%/halcyon-evidence/halcyon-corr32-observer-final-20260912/`.
 
+The older “static analysis is blocked by stripped symbols” wording was also
+too broad. Symbols are absent, but identified dispatch handlers and CFF
+action/relocation tables provide bounded entry points. Follow the
+[structural investigation loop](vainglory-community-ecosystem-tricks.md#research-direction-correction--2026-09-12)
+before commissioning another capture or loader experiment.
+
+There are two distinct comparisons:
+
+- **Client contract:** feed a dependency-preserving recorded stream through
+  our local stack to the owned client, then inspect identified state changes
+  or presentation. This investigates how the client consumes server output.
+- **Authoritative behavior:** replay compatible C2S intents through production
+  `SnapshotStream.advance_simulation`, with a known initial state and relevant
+  rules, then compare semantic outcomes against independent observations.
+  Missing input, rank/item state, bot actions or timing makes a comparison
+  incomplete, not automatically a formula defect. S2C-only VGR is insufficient
+  to recreate those missing causes.
+
+The former promise of “zero mathematical drift” from packet comparison is
+withdrawn. Raw packet equality does not establish universal gameplay parity;
+identity mapping, publication order, sampling and clock alignment matter.
+Reference comparisons require measured, justified tolerances and explicit
+unknowns. Determinism of our own implementation remains an exact comparison.
+Use current measured opcode semantics (including `1078` skill upgrades), not
+the old illustrative `1157` upgrade or `1067` animation assumptions.

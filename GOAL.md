@@ -1,5 +1,15 @@
 # GOAL.md — Project Halcyon MASTER GOAL
 
+> **Status routing, reviewed 2026-09-13:** The full faithful private 3v3/PvP
+> objective remains unchanged. This file retains the original milestone plan
+> and dated implementation history. Use [current status](Docs/Plan/current-status.md),
+> [acceptance gates](Docs/Plan/solo-sandbox-acceptance-status.md), and the
+> [scenario record](Docs/Plan/solo-sandbox-scenarios.md) for present readiness.
+> Old test totals and early protocol descriptions below are historical; later
+> measured corrections in the acceptance/subsystem records take precedence.
+> Implemented multiplayer routing and simulated-client tests do not close the
+> unchecked real-client multiplayer milestones.
+
 > Toàn bộ phần còn lại của server Vainglory self-hosted, chia theo milestone → slice →
 > checkbox. Tick khi có bằng chứng (test xanh / live verify), không tick vì "chắc là xong".
 > Đã qua 1 vòng sage critique (2026-09-06): thứ tự turrets-trước-abilities, đội ước lượng

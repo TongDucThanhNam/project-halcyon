@@ -493,3 +493,41 @@ server.test.test_item_presentation server.test.test_idle_effect_work` passed
 **67 tests in 0.070 seconds**. The full source suite subsequently passed
 **758 tests in 61.721 seconds**, including these fixes. Source pins and timing
 evidence are recorded separately in [production verification](solo-sandbox-performance.md).
+
+## 2026-09-09 live Skye purchase, active use and consumable use
+
+Live operator-path session (emulator client, Halcyon 3v3 versus bots), wire
+trace `$TEMP/halcyon_stack/wire-1788894917131102000.jsonl`, connection
+`1986324652112`, hero Skye EID `1500`. Offsets are seconds from the trace's
+connection start (`1788894917.0`).
+
+- Bootstrap (+88.6 s): the world's default consumables arrive as
+  `1085` `item=457 instance=2000` (healing flask) and `1085` `item=526
+  instance=2001` (vision totem), matching the economy manager's
+  `default_items` instances 2000/2001.
+- +225.8 s: actual shop click emits `1081` `000005dc000001d9...`
+  (EID 1500, item 473 Hourglass — a passive CDR/energy-regen tier-1), the
+  server echoes it and grants `1085` `item=473 instance=2002`. Gold
+  debit and the inventory slot are visible in the client UI.
+- +544.7 s: `1081` item 477 Sprint Boots (active, 150 s sprint cooldown) is
+  granted as `1085` `item=477 instance=2003`. The client HUD shows the boots
+  activation button.
+- +666.8 s: pressing that HUD button emits `1096` `000007d00000`
+  (item use, instance 2003). The server applies the sprint status (the
+  matching `1086` buff add is on the wire in the same second) and the boots
+  button shows its 150-second cooldown (~121 s remaining visible on the next
+  screen capture). This is the live active-item activation.
+- +825.3 s: `1096` `000007d00000` with instance 2000 — the healing flask
+  consumable was used mid-fight. The flask's 120-second bootstrap timer and
+  consumption are server-authoritative (`economy.PlayerEconomy.default_items`).
+- +266.6/271.9/290.6 s (counter-example, retained on purpose): client clicks
+  offering items 481 (Flare Gun) and 518 produce `1081` requests that receive
+  **no** `1085` grant — those catalog entries do not exist in
+  `server/economy.py` `ITEMS`, and the purchase is rejected server-side
+  instead of being invented. Closing the client's shop shows no inventory
+  change for them.
+
+At +1983.8 s (session end) a full inventory bootstrap re-lists instances
+2000-2003, confirming persistence across the session. Purchases during the
+"Choose a Build" phase ride the same match connection; no separate menu-RPC
+purchase path was used.

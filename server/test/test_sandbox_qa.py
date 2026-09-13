@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from server import buff_wire, economy, sandbox_qa
+from server import wave as wave_module
 from server.status_effects import StatusEffect, StatusType
 from server.test.test_sandbox_simulation import session
 from server.test.test_level_reconnect import NativeProgression
@@ -37,6 +38,61 @@ class TestSandboxQA(unittest.TestCase):
         self.assertEqual(result['tick'], 200)
         self.assertEqual(result['time'], 10)
         return result
+
+    def test_lane_minions_census_is_read_only_and_team_filtered(self):
+        from server import wave as wave_module
+        self.world._enter_world()
+        self.world.wave_director = wave_module.Director(0.0, seq_1010=[0])
+        self.world.wave_director.minions = [
+            wave_module.Minion(4610, 1, 0.0), wave_module.Minion(4620, 2, 0.0)]
+        self.world.wave_director.minions[1].x = 12.5
+        result = self.run_command({'command': 'lane_minions'})
+        rows = result['result']['minions']
+        self.assertEqual(result['result']['count'], 2)
+        self.assertEqual([row['eid'] for row in rows], [4610, 4620])
+        self.assertEqual([row['team'] for row in rows], [1, 2])
+        self.assertTrue(all(row['alive'] if 'alive' in row else row['hp'] > 0
+                            for row in rows))
+        filtered = self.run_command({'command': 'lane_minions', 'team': 2}, 'two')
+        self.assertEqual([row['eid'] for row in filtered['result']['minions']],
+                         [4620])
+        self.assertEqual(filtered['result']['count'], 1)
+
+    def test_diagnostics_reports_loaded_state_identity(self):
+        """The diagnostics receipt ties to the actual process and reports the
+        loaded bootstrap identity (world.tape_frames), source digests for
+        startup vs current, tape file identity, and env config."""
+        import struct as _struct
+        self.world._enter_world()
+        self.world.wave_director = wave_module.Director(0.0, seq_1010=[0])
+        self.world.tape_frames = [(0, _struct.pack(">H", 1087) + b"\x00" * 8),
+                                  (500, _struct.pack(">H", 1053) + b"\x00" * 8)]
+        result = self.run_command({'command': 'diagnostics'})
+        receipt = result['result']
+        self.assertEqual(receipt['pid'], os.getpid())
+        self.assertTrue(receipt['source_startup_digest'])
+        self.assertIn(receipt['source_unchanged_since_startup'], (True, False))
+        self.assertEqual(receipt['tape_loaded']['records'], 2)
+        self.assertTrue(receipt['tape_loaded']['sha256'])
+        self.assertIn('match_id', receipt)
+        self.assertIn('phase', receipt)
+        self.assertIn('tape_file_identity', receipt)
+
+    def test_diagnostics_reports_unknown_loaded_tape_without_frames(self):
+        self.world._enter_world()
+        self.world.tape_frames = None
+        result = self.run_command({'command': 'diagnostics'})
+        receipt = result['result']
+        self.assertEqual(receipt['tape_loaded']['identity'], 'UNKNOWN',
+                         'unobservable loaded frames must be UNKNOWN, not '
+                         'silently accepted')
+
+    def test_lane_minions_requires_world_phase(self):
+        self.world.phase = self.world.LOCKED
+        self.queue({'command': 'lane_minions'})
+        result, = self.qa.pump(self.world)
+        self.assertFalse(result['ok'])
+        self.assertIn('WORLD', result['error'])
 
     def test_default_is_disabled_and_external_absolute_directory_is_required(self):
         with patch.dict(os.environ, {}, clear=True):

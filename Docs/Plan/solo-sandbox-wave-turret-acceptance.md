@@ -533,3 +533,23 @@ session compact-slot projectile creation with one mitigated hit after source
 death. The active user match still runs the preceding loaded source. These
 changes have not yet received post-reload live client acceptance, and the
 wave gate remains open.
+
+## 2026-09-09 live minion locomotion and ongoing wave buildup defect (gate 5: OPEN/PARTIAL)
+
+Live Skye sessions on the local server. The original defect where spawned minions received only a single `1016` move order and subsequently halted or drifted has been repaired by continuous waypoint and turn re-issuance.
+
+In the earlier movement trace `$TEMP/halcyon_stack/wire-1788894917131102000.jsonl` (connection `1986324652112`), the first lane wave spawned at +121.6..125.5 s from connection start as actor slots 45..54 (EIDs `4610`..`4619`, melee/ranged mixed, both sides).
+
+Census of `1016` move intents addressed to each wave-1 actor during its first ~25 s on the lane (window +118..+148 s):
+
+| Slot | 45 | 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1016 orders | 22 | 22 | 20 | 19 | 19 | 18 | 17 | 17 | 16 | 16 |
+
+Every lane actor received **16-22 orders in 25 s** (native reference observation is roughly 13-18; same order, same cadence). Per-actor lifetimes ran +121.7 to +143.9..165.1 s (20-40 s on the lane) with continuous re-pathing throughout. In the current session snapshot (`wire-1788942557949012000.jsonl`), **2557** total `1016` orders were logged across the match. Short operator recordings illustrate directed locomotion without hold-in-place, drift, or rubberbanding: fresh 30s `skye-basic-attacks.mp4` and 45s `skye-combat-verify.mp4`. The older `halcyon_gate5_wave.mp4` is a >2-minute recording with separate provenance and is not the fresh 30s reference.
+
+### Confirmed open defect: late-match minion buildup at lane center
+
+While individual minion locomotion is repaired, the actual long-match wave buildup remains confirmed and open. Minions clumping at the gold miner circle / lane center fail to reliably advance, eventually creating a large accumulation that degrades client performance. Cause of client input degradation in those conditions is unknown; minion accumulation alone does not establish the mechanism.
+
+The `wave.py` targeting-guard change (removing the `structures is None` precondition on the fallback foe acquisition) was **reverted** by its own worker because it could select a distant enemy wave instead of advancing on a nearby vulnerable turret. A new 17-line regression in `server/test/test_wave_sandbox.py` protects this behavior (76 focused wave/structure tests pass in 1.906s; `wave.py` is at clean HEAD). The earlier wave-only 110→87 comparison omitted production nav and turret steps and is not a production buildup fix. A preliminary full-SnapshotStream 20-min comparison (old guard 89 live vs. removed guard 91 live, central |x|≤5: 21 vs 12) was confounded by baseline/copy/brush predicate differences; no definitive improvement or fidelity claim follows from it. Continuous `1016` repair is already in HEAD. Gate 5 remains **OPEN/PARTIAL** pending reference-backed repeatable acceptance.

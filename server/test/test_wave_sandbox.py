@@ -99,6 +99,23 @@ class TestWaveCombatAndPush(unittest.TestCase):
         self.assertGreater(left.x, 10)
         self.assertLess(target.hp, target.max_hp)
 
+    def test_survivors_prioritize_vulnerable_structure_over_distant_spawned_wave(self):
+        director, right, left = self.pair()
+        director.pump(0)
+        right.alive = False
+        director._spawn_pair(0, 1)
+        distant_right, distant_left = director.minions[-2], director.minions[-1]
+        distant_left.alive = False
+        distant_right.x, distant_right.y = 65.0, 11.0
+        buildings = structures.StructureManager()
+        target = buildings.structures[3539]
+        for tick in range(1, 180):
+            director.pump(tick * 0.05, structures=buildings)
+            if target.hp < target.max_hp:
+                break
+        self.assertGreater(left.x, 10)
+        self.assertLess(target.hp, target.max_hp)
+
     def test_wave_selects_next_vulnerable_structure_after_kill(self):
         director, right, left = self.pair()
         right.alive, left.has_engaged = False, True

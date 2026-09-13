@@ -5,6 +5,13 @@
 
 🌐 **Languages**: [English](README.md) | [Tiếng Việt](README.vi.md)
 
+**Status reviewed September 13, 2026:** an experimental server with recorded
+single-client gameplay and automated simulation coverage. Overall gameplay
+acceptance remains **OPEN**. Start with the
+[current status and limitations](Docs/Plan/current-status.md); the
+[scenario evidence](Docs/Plan/solo-sandbox-scenarios.md) distinguishes live
+observations, test fixtures, and remaining validation work.
+
 ---
 
 ## 1. Mission & Engineering Philosophy
@@ -52,7 +59,7 @@ The server adopts a decoupled 3-tier architecture:
 - **Transport**: HTTP/1.1 over TLS 1.2/1.3 on port 8443, WebSocket notification stream on 8080/notify.
 - **Key Mechanisms**:
   - Issues deterministic player JWTs mapped to Hardware IDs (or unique Device Listener Tags to support multiple cloned emulator instances).
-  - Unlocks the entire roster of **50+ heroes** (`canUseAllHeroes: true`) and all **290 skins** (`getSkinManifest`).
+  - Exposes hero and skin selection through `canUseAllHeroes` and `getSkinManifest`. Catalog availability does not establish implemented hero kits: ten heroes have explicit kit factories, with incomplete mechanics documented per kit.
   - Implements lobby session state machine: `menus` $\rightarrow$ `joinLobby` $\rightarrow$ provision match IP/Port $\rightarrow$ `playing` $\rightarrow$ `exitLobby`.
 
 ### T2: Gateway & Match Transport (Routing & Cryptography)
@@ -62,7 +69,7 @@ The server adopts a decoupled 3-tier architecture:
 
 ### T3: Authoritative Simulation (Deterministic Game Engine)
 - **Locomotion**: Dual-contract movement model combining client-side local pathfinding (`c2s 1012`) with server-side validation and periodic correction (`s2c 1070`), backed by FSM-driven animation state sync (`1067 MOVING 0x0F` / `IDLE 0x00`).
-- **Combat & Structures**: Faithful damage resolution $D = \frac{W}{1 + A/100}$, turret multi-target aggro rules with defensive ramps, and Vain Crystal core destruction logic.
+- **Combat & Structures**: Damage mitigation $D = \frac{W}{1 + A/100}$, turret targeting with defensive ramps, and Vain Crystal destruction logic. Native gameplay fidelity remains subject to independent comparison.
 - **Wave Director**: Fixed 25-second minion wave intervals with waypoint tracking, target acquisition, and siege prioritization.
 - **Economy**: Passive gold trickle, last-hit bounty distributions, hero kill rewards, and interactive in-game shop transactions (`1081`/`1082`).
 
@@ -70,71 +77,105 @@ The server adopts a decoupled 3-tier architecture:
 
 ## 3. Development Roadmap & Milestones
 
-Progress is evaluated across a 3-tier vertical slice model:
+Progress is tracked by implemented behavior and measured acceptance, without
+an overall completion percentage. The gameplay tiers below are separate from
+the architecture's T1/T2/T3 layers.
 
 ### Tier 1: Solo Sandbox / Practice Mode
 > *Objective: Single player enters the match and experiences a complete, fully functional game loop.*
 
-**Acceptance reopened:** the operator's Skye test exposes unavailable skill
-upgrades, missing visible projectiles and defective minion movement. The
-758-test baseline and replay results do not establish completed gameplay.
-Current defects and historical evidence are in the
-[acceptance record](Docs/Plan/solo-sandbox.md).
+**Acceptance remains OPEN.** Earlier bounded client observations cover movement,
+basic attacks, selected ability shapes, shopping, jungle objectives, Recall,
+death/respawn and reaching Victory. Some use declared QA preparation; they do
+not establish a fully accepted ordinary match. See the
+[seven-gate acceptance record](Docs/Plan/solo-sandbox-acceptance-status.md).
 
-- [x] Navmesh routing, wall collision, dynamic speed and crowd-control stops.
-- [ ] Attack windup/release/recovery, ranged projectiles and stutter-stepping — visible projectile defect reopened.
-- [ ] Four ability shapes, energy/HUD updates and channel interruption — selectable Skye has no ability kit.
-- [x] Shop restrictions, required active items and combat passives.
-- [ ] Melee/ranged/siege waves, protective turret targeting, damage ramp and Victory — normal minion movement requires repair.
-- [x] Jungle buffs, Gold Miner team payout and captured Kraken siege.
-- [x] Four-second Recall, base healing and dynamic death/respawn lifecycle.
+The latest recorded progress through September 12 is:
 
-### Tier 2: PvE / Bot Match (~40%)
+| Area | Evidence and remaining boundary |
+|---|---|
+| Skye basic attacks | Projectile visuals were reviewed live following the September 8 defect report; other hero profiles retain fidelity gaps. |
+| Skye A/B/C | The declared-fixture driver recorded two accepted attempts per ability: A twice in one match, B and C each across two fresh matches. The compare-pair contract was not run and those presentations remain unreviewed. |
+| Skye C corrections | Owned-record inspection supports activation before damage and a strict two-unit cluster-selection threshold. Focused tests and the production headless scenario pass; fresh rendered acceptance of these corrections remains pending. |
+| Minions and turrets | Live approach and opposing combat are observed. Three bounded windows did not establish survivor resumption or structure damage. The headless push fixture deliberately eliminates one wave after contact; its PASS does not establish natural live pushing. |
+| Scenario tooling | Six production-integrated headless scenarios passed exact event/state comparison across two seeded processes on a recorded source pin. This is internal repeatability, not independently measured official gameplay fidelity. |
+
+### Tier 2: PvE / Bot Match
 > *Objective: Playable against autonomous, competent AI bots.*
 
-- [x] Bot draft roster selection and slot filling.
-- [x] Autonomous lane pathfinding, enemy targeting, and auto-attacking.
-- [ ] Tactical AI behaviors: ability combos (A/B/Ult), skillshot dodging, low-health retreats, and jungle ganking.
+- Implemented foundations: bot draft selection, slot filling, lane navigation, target selection and basic attacks.
+- Open: competent tactical play, ability combinations, dodging, retreats and coordinated jungle behavior. A complete bot match is not accepted.
 
-### Tier 3: PvP Online / Multiplayer (~70%)
+### Tier 3: PvP Online / Multiplayer
 > *Objective: Smooth local LAN or online matches with friends.*
 
-- [x] Multi-client routing into a unified game instance.
-- [x] Synchronized real-time draft picks and skin selections across participants.
-- [x] Resilient session handling and mid-game reconnection support.
-- [ ] **Fog of War & Brush Concealment**: Coordinate culling when players enter stealth or unrevealed brush.
+- Implemented and exercised by automated tests: shared match routing, draft synchronization and reconnect/session handling.
+- Open acceptance milestone: a reproducible combat session with **two actual game clients**, with consistent attacks and health changes on both screens.
+- Open: complete fog of war/brush concealment, kit and reconnect fidelity, and sustained service reliability. A roughly 30-minute idle client crash remains under investigation.
 
 ---
 
-## 4. Quick Start
+## 4. Local Setup and Verification
 
 ### Prerequisites
-- **Operating System**: Windows 10/11 or Linux.
-- **Python**: 3.11+ (standard library only; clean pure-Python implementation).
-- **Client**: Vainglory CE 4.13.4 (Build 147219) on PC or Android Emulator (LDPlayer 9).
+
+- **Recorded live workflow**: Windows, LDPlayer 9 with root access, ADB, and the owned Android CE 4.13.4 client (build 147219). The `live_up` helper uses Windows process tools; this is not a verified Linux or PC-client quick start.
+- **Python**: 3.11+ and PyCryptodome for the wire/certificate tooling; Pillow for the rendered-client driver and its tests. The optional native-contract inspector also needs Capstone.
+- **External owned data**: the A001 navigation record, jungle/Skye spawn corpora and a production-valid `world_tape.bin`. Captured payloads and client assets are intentionally absent from Git. A fresh clone alone cannot reproduce the complete test/live environment.
+- **Local platform setup**: certificate/key, answers configuration, emulator routing and CA trust. The [mobile setup record](Docs/Teardown/vainglory-mobile-local-stack.md) describes the routing and trust procedure; its September 5 menu-only result is historical.
+
+Run commands from the repository root. Select your own external paths in
+PowerShell before running the tests or starting the server:
+
+```powershell
+$env:HALCYON_NAVMESH = '<absolute path to owned A001 navigation record>'
+$env:HALCYON_SPAWN_CORPUS = '<absolute directory containing owned spawn records, including Kraken>'
+$env:HALCYON_SKYE_VOLLEY_CORPUS = '<absolute directory containing owned Skye volley chunks 32 and 36>'
+```
+
+The live stack reads configuration, certificates and the world tape from
+`$env:TEMP/halcyon_stack`. Keep them outside the checkout. The
+[scenario record](Docs/Plan/solo-sandbox-scenarios.md) documents the required
+corpora and [world-tape builder](Tools/build_world_tape.py); missing corpus
+data is a setup failure, not evidence that a gameplay rule regressed.
 
 ### 1. Run the Test Suite
+
 Ensure all regression checks and integration tests pass:
 ```powershell
 python -B -W error::ResourceWarning -m unittest discover -s server/test -t .
 ```
-*(All 220+ unit and integration tests must exit cleanly with code 0).*
+Historical test counts apply only to their recorded source and environment;
+see the [current status](Docs/Plan/current-status.md). Require a clean exit on
+the source being reviewed. Run the bounded repeatability scenarios separately:
+
+```powershell
+python Tools/run_scenarios.py --mode headless --scenario all
+```
+
+Outputs go outside Git. Without an independent reference fixture the reference
+verdict is `UNAVAILABLE`, even when local repeatability passes.
 
 ### 2. Launch the Host Server
-Execute a single command to terminate orphaned listeners, bind the HTTPS platform RPC, boot the Gateway and Heartbeat Relay, and configure host redirects:
+
+With the external setup complete and the emulator available, start the local
+platform, gateway and relay, and apply guest routing. This helper stops prior
+local stack processes and restarts the stack:
 ```powershell
 python -m server.platform.live_up
 ```
 
-To expose the match gateway across your local LAN for physical mobile devices:
+To advertise a LAN address, with each device's routing and certificate trust
+configured separately:
 ```powershell
 python -m server.platform.live_up --match-host <YOUR_LAN_IP>
 ```
 
 ### 3. Connect via Client
+
 1. Launch Vainglory on an emulator or physical device configured with DNS/hosts pointing to the server.
-2. In the main menu, navigate to: **PLAY $\rightarrow$ SOLO BOTS $\rightarrow$ 3V3 $\rightarrow$ EASY** (or create a Custom Lobby).
-3. Lock in your hero, select a skin, and step onto the Halcyon Fold!
+2. Follow the recorded solo route: **PLAY → SOLO BOTS → 3V3 → VERY EASY**.
+3. Select a hero with an implemented kit, such as Skye, lock in, and choose **Manual Build**. Selectability alone does not imply kit support.
 
 ---
 
@@ -158,7 +199,7 @@ project-halcyon/
 │   ├── jungle.py              # T3: Neutral creep camps, leash boundaries, buff states
 │   ├── bot_ai.py              # T3: Headless bot decision making and combat behavior
 │   └── test/                  # Automated unit, regression, and end-to-end test suite
-├── Tools/                     # Read-only RE inspection and measurement scripts
+├── Tools/                     # RE inspectors, scenario drivers and reproduction tools
 ├── GOAL.md                    # Detailed milestone tracking per vertical slice
 ├── README.md                  # English primary documentation
 ├── README.vi.md               # Vietnamese documentation

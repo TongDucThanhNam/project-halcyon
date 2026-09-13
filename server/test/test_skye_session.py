@@ -139,6 +139,29 @@ class TestSkyeSession(unittest.TestCase):
         self.assertLess(self.enemy.hp, before)
         self.assertTrue(self.world.status_manager.has_effect(1517, StatusType.STUN, self.world.sim_time))
 
+    def test_c_field_activation_is_published_before_its_first_damage(self):
+        """Owned native C episodes publish 613/615 before owner damage pulses."""
+        progression = self.world.economy.get_or_create(1500)
+        progression.add_xp(500)
+        progression.apply_to_hero(self.hero)
+        self.learn(2)
+        self.establish_lock()
+        self.cast(4, (4, 35))
+        volley_eid = next(iter(self.world.skye_volleys.active))
+        self.ticks(26)
+        created = next(i for i, (op, p) in enumerate(self.frames)
+                       if op == 1010 and len(p) == 126
+                       and struct.unpack_from('>I', p, 8)[0] == volley_eid)
+        activation = next(i for i, (op, p) in enumerate(self.frames)
+                          if op == 1086 and buff_wire.parse_buff_add(p).target_eid == volley_eid
+                          and buff_wire.parse_buff_add(p).kind == 613)
+        damage = next(i for i, (op, p) in enumerate(self.frames)
+                      if op == 1054 and struct.unpack_from('>II', p) == (1517, 1500))
+        self.assertLess(created, activation)
+        self.assertLess(activation, damage)
+        self.assertEqual(sum(op == 1086 and buff_wire.parse_buff_add(p).target_eid == volley_eid
+                             and buff_wire.parse_buff_add(p).kind == 613 for op, p in self.frames), 1)
+
     def test_live_target_provider_routes_barrage_through_structure_damage_rules(self):
         turret = next(s for s in self.world.structures.structures.values() if s.team == 2 and not s.is_crystal)
         turret.is_alive = True

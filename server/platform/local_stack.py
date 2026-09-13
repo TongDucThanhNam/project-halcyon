@@ -596,6 +596,34 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch("HEAD")
 
 
+def build_tls_context(cert_path, key_path):
+    """Server TLS context for every local-stack HTTPS listener.
+
+    Measured compatibility requirement (main-review probe 2026-09-11,
+    %TEMP%/halcyon-client-review-20260911/tls-security-level2-probe.json, and
+    live CE boot): the 4.13 CE client completes TLS1.2 with
+    ECDHE-RSA-AES128-SHA. Python's OWN default context cipher list excludes
+    that suite (the guest handshake dies with NO_SHARED_CIPHER and the menu
+    boot loops on "Unable to connect"); OpenSSL's DEFAULT list at the NORMAL
+    security level 2 includes it, and at that level the suite negotiates
+    while modern peers still get TLS1.3 AEAD from the same context. No
+    security-level lowering is applied. Scope: the local stack's listeners
+    bind 0.0.0.0 (guest adb-reverse loopback plus the documented LAN
+    deployment), serving this private friend-group deployment only; this
+    changes no gameplay answer. Returns None when the certificate pair is
+    absent (the stack then serves plain HTTP).
+    """
+    import ssl as _ssl
+    if not (os.path.isfile(cert_path) and os.path.isfile(key_path)):
+        return None
+    ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert_path, key_path)
+    # explicit OpenSSL DEFAULT list at the normal level: restores the legacy
+    # CBC suites Python's own context list drops, changes nothing else
+    ctx.set_ciphers("DEFAULT@SECLEVEL=2")
+    return ctx
+
+
 class TLSServer(ThreadingHTTPServer):
     """ThreadingHTTPServer whose TLS handshakes cannot kill the serve loop."""
 
@@ -688,10 +716,7 @@ def main(argv=None) -> None:
     cert = os.path.join(STACK_DIR, "platform_cert.pem")
     key = os.path.join(STACK_DIR, "platform_key.pem")
     use_tls = bool(_answers().get("_tls443", True))
-    ctx = None
-    if os.path.isfile(cert) and os.path.isfile(key) and use_tls:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(cert, key)
+    ctx = build_tls_context(cert, key) if use_tls else None
 
     try:
         if ctx is not None:

@@ -315,6 +315,21 @@ class TestSkyeMissileField(SkyeFixture):
         self.cast(C, point=(10, 0))
         self.assertEqual(calls[0][0], (self.hero, (10, 0), (0, -1), 10))
 
+    def test_cluster_selection_excludes_the_exact_two_unit_boundary(self):
+        # Native ELF 0xce33bc/0xce33c0 uses FCMP/CSET MI: strictly less.
+        for distance, is_line in ((1.999, False), (2.0, True), (2.001, True)):
+            with self.subTest(distance=distance):
+                self.setUp()
+                calls = []
+                self.kit.volley_presentation = lambda *args, **kwargs: calls.append(args) or []
+                self.lock()
+                target_pos = (self.enemy.x, self.enemy.y)
+                aim = (self.enemy.x + distance, self.enemy.y)
+                self.assertTrue(self.cast(C, point=aim))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][1], aim if is_line else target_pos)
+                self.assertEqual(calls[0][2], (0, -1) if is_line else None)
+
     def test_cluster_waits_then_stuns_slows_and_stops_after_rank_lifetime(self):
         self.lock()
         frames = self.cast(C, point=(5, 0))

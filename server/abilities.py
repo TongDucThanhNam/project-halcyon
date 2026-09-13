@@ -1018,7 +1018,8 @@ class SkyeKit(HeroKit):
             point = self.pending[-1].target_pos
             target = self.locked_target
             direction = None
-            if math.dist(point, (target.x, target.y)) > self.C_CLUSTER_THRESHOLD:
+            # Native cluster selection is strictly inside the threshold.
+            if math.dist(point, (target.x, target.y)) >= self.C_CLUSTER_THRESHOLD:
                 ux, uy = hitboxes.direction((target.x, target.y), point)
                 direction = (uy, -ux)
             else:

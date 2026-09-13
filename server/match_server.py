@@ -1239,6 +1239,8 @@ class SnapshotStream(threading.Thread):
             source, target = entities.get(impact.source_eid), entities.get(impact.target_eid)
             if source is not None and target is not None:
                 self._emit_frames(self._deal_damage(source, target, impact.damage, impact.damage_type, now, basic=True))
+        # Publish C field phase changes before the kit can emit their damage.
+        self._emit_frames(self.skye_volleys.step(now))
         for eid, sim in sorted(self.hero_sims.items()):
             sim.match_elapsed = now
             kit = self.hero_kits.get(eid)
@@ -1283,7 +1285,6 @@ class SnapshotStream(threading.Thread):
                     damage_queue=self.damage_queue, all_heroes=self.hero_sims,
                     all_minions=self._ability_targets(),
                     damage_callback=self._deal_damage))
-        self._emit_frames(self.skye_volleys.step(now))
         self._emit_frames(self.items.step(now, self.hero_sims, entities,
             damage_callback=lambda a, b, amount, kind, t: self._deal_damage(a, b, amount, kind, t, proc=True)))
         self.jungle.seq_1010[0] = self.seq_1010

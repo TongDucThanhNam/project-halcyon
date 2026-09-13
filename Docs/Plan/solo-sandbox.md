@@ -1,15 +1,65 @@
 # Solo sandbox acceptance record
 
-Updated 2026-09-08. This tracks the operator's seven-subsystem **Tier 1 solo
+## Current reading order — 2026-09-13
+
+Start with [current status](current-status.md) for the latest implementation,
+dependency and acceptance summary. The September 8 missing-Skye-kit and
+projectile findings below are historical defects: repairs and bounded live
+observations followed. The [scenario record](solo-sandbox-scenarios.md) carries
+the stricter September 12 fixture-gated A/B/C results and the finite negative
+minion-to-structure observations. Those results do not close all seven gates,
+establish two-client game acceptance, or prove independent gameplay fidelity.
+The 758-test baseline below belongs to its recorded September 8 source; it is
+not a test result for later revisions.
+
+## September 9 implementation and observation record
+
+Updated 2026-09-09. This tracks the operator's seven-subsystem **Tier 1 solo
 sandbox** definition. It is distinct from the architecture's T1 platform RPC
 tier. The target is one controllable hero in Halcyon Fold, with the complete
 specified gameplay loop, all seven client acceptance scenarios, and at least
-250 passing tests. **Acceptance is reopened after the operator's Skye test.**
-Skye is selectable but has no implemented ability kit, so actual upgrade
-requests receive no acknowledgement. The operator also reports missing basic
-projectile visuals and broken minion movement. These remain unresolved client
-defects. The previous completion claim was too broad: the 758-test baseline
-and deterministic replay results do not prove these user-visible behaviors.
+250 passing tests. **Historical defect repair & live verification status:**
+The operator's 2026-09-08 Skye test disproved an overly broad completion claim:
+Skye initially had no registered ability kit (ten 1078 requests received zero acks),
+ordinary basic attack projectiles lacked visual bullets (emitted only 1045
+without native 1037 projectile releases), and lane minions moved only once
+upon spawn without subsequent 1016 path updates.
+On 2026-09-09, defect repair and live verification proceeded on our unchanged
+owned Android CE client against the local authoritative server:
+Basic attack projectile visuals are repaired and verified live: native 1037
+targeted projectile creation emits alternating LeftGun/RightGun sockets and kind
+108, with visible bullets and impact flashes documented via resampled illustrations
+(frames 49, 50, 57, 79 from original 11.7fps 30s `skye-basic-attacks.mp4`); perfect
+native fidelity for all hero profiles is not claimed. Gate 2 is closed.
+For Skye's kit (Gate 3), original upgrade allocation is repaired: client 1078
+requests for A, B, and C receive 1082 acks in trace `wire-1788942557949012000.jsonl`
+(A at `1788942770.4508677` / `1082.452012`, B at `1788942803.1498234` / `1082.151304`,
+C at `1788943185.216853` / `1082.226975`). In the subsequent trace
+`wire-1788947055923739400.jsonl` (connection `2607844752976`): A Forward Barrage
+`c2s 1042` action 0 at `1788948535.097593`, outgoing `1054` victim `1517` /
+attacker `1500` −25.82 at ~22 min; B Suri Strike `c2s 1042` action 2 at
+`1788947918.1802444`, `1054` −232.686 and −46.537; C Death from Above `c2s 1042`
+action 4 at `1788947922.5289133`, repeated `1054` −21.153. All casts via real ADB UI;
+QA prepared positions only. Bounded A/B/C operations and authoritative damage are
+verified. Repeatable gameplay acceptance, native B trajectory/smoothness, C reconnect
+actor recreation, and independent official fidelity remain OPEN. Gate 3 OPEN/PARTIAL.
+For lane waves (Gate 5), continuous 1016 movement order re-issuance was verified
+(16-22 orders/actor across first 25s in `wire-1788894917131102000.jsonl`;
+2557 order snapshot in `wire-1788942557949012000.jsonl`). Short operator recordings
+illustrate directed locomotion: fresh 30s `skye-basic-attacks.mp4` and 45s
+`skye-combat-verify.mp4`; `halcyon_gate5_wave.mp4` is an older >2-minute recording.
+Late-match wave accumulation was observed in botless runs; whether it represents
+an abnormal defect versus expected backlog requires reference-backed evaluation.
+The `wave.py` targeting-guard modification was **reverted** by its own worker; a
+new 17-line regression in `server/test/test_wave_sandbox.py` protects the guard
+(76 focused wave/structure tests pass in 1.906s, `wave.py` is at clean HEAD). The
+earlier wave-only 110→87 comparison omitted production nav and turret steps and is
+not a production buildup fix. Gate 5 remains OPEN/PARTIAL.
+
+
+Broader kit fidelity (Skye C reconnect actor recreation, strafe policies),
+unsupported roster kits (10 implemented heroes), and full PvP/brush FoW remain
+explicit boundaries.
 The [seven-gate checklist](solo-sandbox-acceptance-status.md)
 links each manual observation; broader native timing and kit fidelity limits
 remain explicit in the subsystem leaves.
@@ -100,11 +150,21 @@ structure to correct several premises:
 ```powershell
 python -B -m unittest discover -s server/test
 python -B -m unittest server.test.test_sandbox_simulation
+python Tools/run_scenarios.py --mode headless --scenario all
 $env:HALCYON_NO_BOTS = '1'
 $env:HALCYON_TRACE_WIRE = '1'
 $env:HALCYON_EXPERIMENTAL_CAPTURE = '1'
 python -B -m server.platform.live_up
 ```
+
+`Tools/run_scenarios.py` is the repeatable verification pilot: the named Skye
+and minion/turret scenarios run through the production simulation in two
+seeded independent processes and are accepted by exact event/state byte
+comparison; `--mode client` drives the implemented rendered-client path
+(mock-tested, live execution pending). Commands, result schema, failure-stage
+interpretation and the demonstrated status are in
+[the scenarios leaf](solo-sandbox-scenarios.md). The sixteen-minute
+`Tools/verify_sandbox.py` coverage/deadline gate is unchanged and separate.
 
 Start LDPlayer before running `live_up`. The command starts the server in the
 background and restores guest loopback routing, TLS trust and ADB reverse
@@ -119,24 +179,19 @@ Traces and screenshots are written outside the repository under
 `$TEMP/halcyon_stack/`. `wire-*.jsonl` captures local gameplay packets for
 client failure diagnosis; session-token frames are excluded.
 
-The current suite passed **758 tests in 61.721 seconds** on 2026-09-08,
-with exit code 0. The complete output is external at
-`$TEMP/halcyon-sandbox-full-suite-20260908-postaudit.txt`. Its adjacent JSON
-records unchanged source and test manifests plus the output digest. This includes shared
-hero/jungle range-boundary repairs, Celeste's crystal basic attacks, delayed
-lane contacts, Fountain minion HP deltas and lethal-hit passive bookkeeping,
-alongside native actions, lifecycle, shop and visibility coverage. The final
-audit adds transient attack-CC cancellation and exact navigation-clipping
-regressions. Two older
-instant-contact test premises were corrected to require an attack start,
-no early damage, and the same expected contact at its actual deadline.
-The final two-process 960-second pair reproduces identical wire, canonical
-state and all 960 checkpoints. Both workers pass every 50 ms deadline, with
-maxima of **14.6694 and 15.5164 ms**, and complete all coverage requirements,
-including two Recalls per run. The source pin matches this full-suite run
-and the final worktree. The 2 ms aspiration is exceeded on many ticks.
-See the performance record for exact source pins, failed attempts, repairs,
-coverage and measurement limits.
+The recorded full suite passed **885 tests in 132.465 seconds (2 skipped, exit 0)**
+on 2026-09-11, after the wave-guard revert, its regression, the scenario pilot
+and the live client validation landed; the complete output is external at
+`%TEMP%/halcyon-scenario-pilot-20260911/full-suite-20260911.log`, and
+`git diff --check` exits 0 on the same worktree. This count is evidence, not a
+definition of faithful gameplay.
+The earlier two-process 960-second pair reproduces identical
+wire, canonical state and all 960 checkpoints. Both workers pass every 50 ms
+deadline, with maxima of **14.6694 and 15.5164 ms**, and complete all coverage
+requirements, including two Recalls per run. Historical 758-test / 960-second
+replay pins represent an earlier source baseline prior to operator Skye defect
+testing, not current-source verification. See the performance record for exact
+source pins, failed attempts, repairs, coverage and measurement limits.
 
 The first integrated Adagio device run crashed after build selection. A later
 trace exposed a server exception from attaching Arcane Fire state to a slotted

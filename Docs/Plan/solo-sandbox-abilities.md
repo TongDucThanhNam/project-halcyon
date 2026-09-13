@@ -4,6 +4,123 @@
 This is implementation progress toward the solo sandbox acceptance definition,
 not a claim that every Vainglory hero kit or client presentation is complete.
 
+## 2026-09-12 Skye C: native contract and two production corrections
+
+Direct offline inspection joined the owned match-6 decoded cache, the Android
+ARM64 library and the separately owned PC 4.13 Skye definition. No new client
+capture was needed. `Tools/Teardown/inspect_skye_c_contract.py` reproduces the
+record associations, source hashes and bounded native anchors. The results
+support two corrections, not complete Skye fidelity:
+
+- `SnapshotStream._step_heroes` now publishes C field activation before its
+  first damage pulse. Previously the production regression emitted damage at
+  record 46, followed by activation at 47. The corrected full-world scenario
+  creates field 2000005 at record 155, activates it at 201, and emits the first
+  owner-to-victim damage at 203. These are record indexes, not milliseconds.
+- `SkyeKit.cast_ability` now selects a line at exactly two units from the marked
+  target; cluster selection is strictly inside that threshold. The native
+  comparison is `<`, whereas Halcyon previously used `<=`. Tests cover just
+  inside, exactly on, and just outside the boundary on the simulation plane.
+
+### Owned-record contract
+
+The cache contains 114,825 decoded records and ten complete C field lifetimes:
+nine cluster archetypes 384 and one line archetype 385, all owned by hero 1517.
+Every observed lifetime has the following ordering; branch labels denote buff
+kinds, while node labels 1010/1072/1073/1035 are opcodes:
+
+```mermaid
+flowchart LR
+    A["1046 action 4, owner"] --> B["1010 field actor, owner + slot"]
+    B --> C["61 + 612 cluster / 614 line + 616"]
+    C --> D["617 pre-activation"]
+    D --> E["613 cluster / 615 line activation"]
+    E --> F["618 on victim; 1054 attributed to owner"]
+    F --> G["1072 field death + self-sourced 61"]
+    G --> H["1073 destroy then 1035 release"]
+```
+
+The 332 victim buff-618 records each bracket exactly one tag-394 damage record
+for the same owner and victim, before the next such marker or the field's death.
+All have one active candidate field. No damage record names a field actor as
+attacker. This is a reproducible identity/order association, **not a causal
+field ID carried in 1054**. Tests preserve ambiguity for overlapping fields,
+filter unrelated owners/victims/tags, and refuse to join across field death or
+identity reuse. Ten episodes from one recording are not ten independent matches.
+
+| Field or anchor | Measured value / interpretation |
+|---|---|
+| 1010, 126-byte body | Archetype at +0; class `0xF59CDB08` at +4; actor EID +8; owner +112; compact slot +116 |
+| 1086 on actor | Warning 612/614; activation 613/615; 617 duration is approximately active duration +0.2; active durations 2 or 3 in these episodes |
+| 1086 on victim | Kind 618, source 1517, f16 duration `0.0999755859375` |
+| 1054 | Victim +0, owner +4, signed f32 delta +8, u16 tag +12; these 332 records have tag 394 and bytes +14/+15 = 1/0 |
+| Native 1054 consumer | Ghidra `FUN_0092a0bc`, ELF `0x82a0bc`, preserves tag and both flag bytes through the event constructor; their downstream semantics remain open |
+| CFF action vector | Action 4 points to definition 4464; its variable vector at 4952 points index 2 to named record 5116, `Cluster Missile Range = 2` |
+| CFF named scalars | DELAY 1.3 at 5192; Duration `(2,+1)` at 5252; stun .5 at 5316; slow `(.55,+.05)` at 5384 |
+| Native selection | ELF `0xce3378..0xce33c0` looks up action 4 / variable 2, compares squared distance to squared variable, then `FCMP; CSET MI` returns strict less-than |
+| Native actor branch | Ghidra `FUN_00de3520` selects `Skye_MissileVolley` for true, `Skye_LineMissileVolley` for false |
+
+### What native geometry does and does not establish
+
+The decompiler's function names are rebased **+0x100000** relative to ELF
+virtual addresses. The inspector maps ELF load segments and requires the
+pinned library hash before decoding; the original unrebased disassembly in
+the evidence directory is superseded by `native-anchors-rebased.asm.txt`.
+
+Ghidra `FUN_00e3fdf0` / ELF `0xd3fdf0` constructs a configuration argument
+containing **2.5**, separately from the CFF selection threshold 2. But following
+the allocated object's actual vtable at ELF `0x26c1130`, slot `0x30`, reaches
+`0x8a43cc`: it only returns the subobject at `this + 0x10`, ignoring the argument.
+That constant therefore does **not** prove an operational 2.5 damage radius
+in this client. The inspector records this negative evidence explicitly.
+
+The line endpoint callback at ELF `0xd3ff78` computes center ± facing × **5**,
+a ten-unit segment. The line query path continues through Ghidra
+`FUN_00d9d354` → `FUN_00d4e838` and the segment-distance predicate
+`FUN_00d4e6ac`, with eligibility/extent flags still requiring interpretation.
+Halcyon's cluster radius 2, line length 12 and width policy therefore remain
+calibration policies. No footprint change follows from these incomplete paths.
+Client code is useful for precise branches and message consumers without being
+a complete executable server oracle.
+
+### Reproduction and remaining gaps
+
+Evidence directory (outside the repo):
+`%LOCALAPPDATA%/halcyon-evidence/halcyon-skye-c-contract-20260912-snyo5lk8`.
+`contract-final.json` includes all ten lifetimes, 332 associations, decoded
+tag-394 records, named constants and verified native anchors. Older exploratory
+reports are retained; the final report supersedes their scalar interpretation.
+
+| Owned input | SHA-256 |
+|---|---|
+| `%TEMP%/vg_max/match6.halcyon_spawn_audit.pkl` | `f1a62ba1b80751b704dfcc6e58f9a733ba7c205a465d8980055f40c6d409b1ad` |
+| `D:/Downloads/vg/lib/arm64-v8a/libGameKindred.so` | `cd1b8831f82c469274613fc30f1f1f6e78c788102cdad7db5db2c04b96580a47` |
+| PC Skye CFF `Data/0C/0CB20BA22E7D1BBCC89CBCF4895B8E6F` | `f61d03159bcb2d41d69172376d67f004769b7a26c39a7ea3bd77e4e6a8369237` |
+
+```powershell
+python -B Tools/Teardown/inspect_skye_c_contract.py `
+  --frame-cache "$env:TEMP/vg_max/match6.halcyon_spawn_audit.pkl" `
+  --library 'D:/Downloads/vg/lib/arm64-v8a/libGameKindred.so' `
+  --definition 'D:/Downloads/vg/pc/Vainglory 4.13/Vainglory/Data/0C/0CB20BA22E7D1BBCC89CBCF4895B8E6F'
+# Use the external corpus environment variables from solo-sandbox-scenarios.md.
+python -B -m unittest server.test.test_skye_session server.test.test_skye_kit server.test.test_skye_contract_inspector -q
+python -B Tools/run_scenarios.py --mode headless --scenario skye-c
+```
+
+Verification: **37 tests pass**; the production `skye-c` scenario passes with
+byte-identical events, initial/final state and checkpoints across seeds 11 and
+7919 (`production-skye-c-final/summary.json`). Both new regressions were first
+observed failing before their fixes. `production-order-check.json` records the
+activation-before-damage check on the full-world event stream. The inspector
+requires Capstone for bounded ARM64 decoding. All source payloads stay external.
+
+Still open: native damage tag/flag consumer semantics (Halcyon C currently emits
+generic tag 5 rather than observed tag 394), exact hit eligibility/footprints,
+active-field reconstruction on reconnect, vertical/f32 selection parity,
+new rendered-client acceptance, and independently measured gameplay fidelity.
+The headless runner still reports reference `UNAVAILABLE`; this cache supplies
+structural evidence, not a complete rank/input/time-normalized reference fixture.
+
 ## Implemented contracts
 
 - Finite line sweeps with first-contact or piercing behavior; ties resolve by
@@ -776,3 +893,97 @@ steps and stuns each entering victim once. Exact native footprint, travel,
 entry-stun behavior and weapon-critical interaction remain unverified. Native
 field rendering requires the subsequent live client check. These limits must
 not be relabeled as 100% Skye fidelity on the strength of passing tests.
+
+## 2026-09-09 live Skye kit: upgrades and A Forward Barrage (gate 3: OPEN/PARTIAL)
+
+Live operator-path sessions on the local server (Skye/265, EID `1500`). Wire
+action bytes come from `server/ability_wire.py` `HERO_ACTIONS[265] = (0, 2, 4, 5)`:
+the wire action byte is **not** the UI slot — A/Forward Barrage sends `0`,
+B/Suri Strike sends `2`, C/Death from Above sends `4`, recall sends `5`.
+
+Upgrade handshake. Real client taps on the "+" buttons emit `1078`
+`[u8 slot][4 zero bytes]` and the server acks each with `1082`, whose second
+u32 is a bitfield (`0`=A, `2`=B, `4`=C). Observed acks cover A, B and C
+across live matches. In trace `wire-1788942557949012000.jsonl`:
+- A `c2s 1078` at `1788942770.4508677` receives `s2c 1082` at `1788942770.452012` (`000005dc00000000...`, bitfield `0x0`).
+- B `c2s 1078` at `1788942803.1498234` receives `s2c 1082` at `1788942803.151304` (`000005dc00000002...`, bitfield `0x2`).
+- C `c2s 1078` at `1788943185.216853` receives `s2c 1082` at `1788943185.226975` (`000005dc00000004...`, bitfield `0x4`), unlocking Rank 1 at hero level 6.
+The reopened 2026-09-08 defect — ten `1078`s with zero acks — is definitively repaired.
+
+A/Forward Barrage (wire action `0`). Early casts demonstrated in trace
+`wire-1788942557949012000.jsonl` at `1788942908.8658264` and `1788943041.875964`.
+In the subsequent trace `wire-1788947055923739400.jsonl` (connection `2607844752976`,
+casts via real ADB UI, QA prepared positions only): A `c2s 1042` action 0 at
+`1788948535.097593`, `1046` at `.149051`, `1162` tag `43a890d8` at `.1494656`,
+outgoing `1054` victim `1517` / attacker `1500` −25.82 at `8535.1962216` and
+`.287958` (~22 min). Cooldown clock ("6", "1") and green aiming cone are visible
+in video `skye-combat-verify.mp4` (frames 10, 15).
+
+B/Suri Strike (wire action `2`). In the same later trace: `c2s 1042` action 2 at
+`1788947918.1802444`, `1046` at `.1824353`, `1162` tag `46a89591` at `.1828282`,
+`1054` victim `1517` / attacker `1500` −232.686 at `7918.8148913` and −46.537 at
+`.9327095`. Target Lock presentation (`1086` buff kinds 601/602/603) verified from
+basic attacks; native B dash visual trajectory and smoothness remain unverified.
+
+C/Death from Above (wire action `4`). In the same later trace: `c2s 1042` action 4
+at `1788947922.5289133`, `1046` at `.5424192`, `1162` tag `45a893fe` at `.5440266`,
+repeated outgoing `1054` victim `1517` / attacker `1500` −21.153 beginning
+`7923.7736433`. Native C geometry, exact footprint and C actor reconnect recreation
+remain unverified.
+
+Gate 3 remains **OPEN/PARTIAL**: bounded A/B/C operations and authoritative damage
+are verified; repeatable gameplay acceptance, native fidelity, and independent
+official reference evidence remain open.
+
+## 2026-09-09 late session: upgrade mechanics and the C-cast blocker
+
+Matches #6–#9 (traces `wire-1788904300602939600.jsonl`,
+`wire-1788904458135997800.jsonl`, `wire-1788906030049068500.jsonl`,
+`wire-1788907196948210300.jsonl`, `wire-1788907700692158900.jsonl`) pinned
+down the remaining C/Death-from-Above mechanics and client-side behavior.
+
+Ultimate rank-up handshake, live twice. Skye +E taps produced
+`1078 020000000000` → `1082` with bitfield `0x4` → `1162` whose cooldown
+field carries the ult timer: **30.0 s at rank 1** (`0x41f00000`, match #6
++1202.73) and **24.0 s at rank 2** (`0x41c00000`, match #9 +1089.03). The
+`1162` trailing learned-flag bytes change from `...010100` to
+`...0101010100` at rank 1, i.e. the C flag lights with the others. Rank
+gates are per-hero curves server-side: the base kit gates (1,2,4,6,8 /
+6,9,12) are not what the server enforces — Skye Q rank 3 was acked at hero
+level 3 and Q rank 5 at level 6 (server accepted, client displayed the +).
+
+Upgrade UI mechanics (verified by wire):
+
+- The "+" buttons sit at fixed HUD slots above each ability icon — A
+  (404,440), B (481,440), C (551,440) in the 960x540 layout — but the row
+  only renders while the hero is idle and hides during movement, which
+  caused earlier "missed + tap" churn.
+- Tapping the upper edge of an ability icon whose upgrade ring is showing
+  (e.g. (537,467) over the C icon) also emits `1078` for that slot; this
+  works while the "+" row is hidden and was used to rank C at level 6 while
+  dead at the fountain (match #9 +683.85) and again at level 8 for rank 2
+  (match #9 +1089.03).
+
+Client cast-path degradation in long matches. In extended matches where the
+unbounded minion wave buildup accumulates at the gold miner circle, client ability
+cast inputs (`1042`) ceased emitting while movement (`1012`) and upgrade (`1078`)
+inputs continued flowing. The cause of this degradation is unknown; minion
+accumulation is a correlation, not an established mechanism for client input starvation.
+
+### 2026-09-09 live Skye kit verification summary
+
+**Upgrades** — trace `wire-1788942557949012000.jsonl` (Skye EID `1500` / `0x05dc`):
+- A `c2s 1078` at `1788942770.4508677` -> `s2c 1082` at `1788942770.452012` (bitfield `0x0`).
+- B `c2s 1078` at `1788942803.1498234` -> `s2c 1082` at `1788942803.151304` (bitfield `0x2`).
+- C `c2s 1078` at `1788943185.216853` -> `s2c 1082` at `1788943185.226975` (bitfield `0x4`), Rank 1 at level 6.
+
+**Casts and authoritative damage** — subsequent trace `wire-1788947055923739400.jsonl`
+(connection `2607844752976`; casts via real ADB UI; QA prepared positions/resources/legal ranks only):
+- **A (Forward Barrage)**: Early casts in the upgrade trace. In the later trace: `c2s 1042` action 0 at `1788948535.097593`, `1046` at `.149051`, `1162` tag `43a890d8` at `.1494656`; outgoing `1054` victim `1517` / attacker `1500` −25.82 at `8535.1962216` and `.287958` (~22 min). Broader repeatable acceptance and official native fidelity remain **OPEN**.
+- **B (Suri Strike)**: `c2s 1042` action 2 at `1788947918.1802444`, `1046` at `.1824353`, `1162` tag `46a89591` at `.1828282`; `1054` −232.686 at `7918.8148913` and −46.537 at `.9327095`. Native B dash visual trajectory and smoothness remain unverified.
+- **C (Death from Above)**: `c2s 1042` action 4 at `1788947922.5289133`, `1046` at `.5424192`, `1162` tag `45a893fe` at `.5440266`; repeated `1054` −21.153 beginning `7923.7736433`. Native C geometry and C actor reconnect recreation remain unverified.
+
+**Explicit fidelity limits retained:**
+- Gate 3 remains **OPEN/PARTIAL**: bounded A/B/C operations and authoritative damage verified; repeatable pilot verification via the production runner (planned per AGENTS.md; not yet shipped), independent official reference fidelity, and wider native fidelity are distinct open tiers.
+- Active/retained Skye C actors are not recreated on reconnect.
+- 40+ other heroes in the catalog receive `UnsupportedKit` and require individual kit implementations.

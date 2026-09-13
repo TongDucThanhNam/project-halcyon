@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import stat
 import struct
+import time
 import tempfile
 
 from . import combat, economy, roster, wire
@@ -28,6 +29,8 @@ _NAME = re.compile(r"command-([A-Za-z0-9_-]{1,64})\.json\Z")
 _REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _SCHEMAS = {
     "snapshot": ({"command"}, set()),
+    "lane_minions": ({"command"}, {"team"}),
+    "diagnostics": ({"command"}, set()),
     "teleport": ({"command", "eid", "x", "y"}, set()),
     "resources": ({"command", "eid"}, {"hp", "energy", "gold"}),
     "damage": ({"command", "source", "target", "amount", "kind"}, set()),
@@ -140,6 +143,14 @@ def atomic_json(path, value):
 
 class SandboxQA:
     def __init__(self, directory):
+        # Startup provenance receipt: computed ONCE, inside the actual server
+        # process, over the loaded server/*.py files. Query-time recomputation
+        # exposes later on-disk changes.
+        self.startup_provenance = {
+            "pid": os.getpid(),
+            "at": time.time(),
+            "source_digest": self._source_digest(),
+        }
         requested = Path(directory)
         if not requested.is_absolute():
             raise ValueError("HALCYON_QA_DIR must be an absolute external path")
@@ -278,10 +289,100 @@ class SandboxQA:
             raise ValueError("fixture requires an existing living hero")
         return hero
 
+    @staticmethod
+    def _source_digest():
+        import hashlib
+        server_dir = Path(__file__).resolve().parent
+        digest = hashlib.sha256()
+        for path in sorted(server_dir.glob("*.py")):
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+        return digest.hexdigest()
+
+    def _diagnostics(self, world):
+        """Read-only loaded-state identity, computed ONCE per call.
+
+        ``tape_loaded`` digests the frames the server actually LOADED into
+        memory (world.tape_frames), not the current on-disk file: a replaced
+        or edited file after startup is a different identity and must never
+        be presented as what the running process loaded. When the loaded
+        frames are not observable the identity is explicitly UNKNOWN.
+        """
+        loaded_frames = getattr(world, "tape_frames", None)
+        if isinstance(loaded_frames, list) and loaded_frames:
+            digest = hashlib.sha256()
+            for t_ms, body in loaded_frames:
+                digest.update(struct.pack(">IH", t_ms, len(body)))
+                digest.update(body)
+            tape_loaded = {"records": len(loaded_frames),
+                           "sha256": digest.hexdigest()}
+        else:
+            tape_loaded = {"identity": "UNKNOWN",
+                           "reason": "loaded tape frames not observable"}
+        try:
+            from .match_server import WORLD_TAPE_PATH as tape_file_path
+            file_identity = {"path": str(tape_file_path)}
+            file_path = Path(tape_file_path)
+            if file_path.is_file():
+                file_identity.update({
+                    "file_sha256": hashlib.sha256(
+                        file_path.read_bytes()).hexdigest(),
+                    "bytes": file_path.stat().st_size})
+        except OSError as exc:
+            file_identity = {"error": repr(exc)}
+        return {
+            "pid": self.startup_provenance["pid"],
+            "startup_at": self.startup_provenance["at"],
+            "source_startup_digest": self.startup_provenance["source_digest"],
+            "source_current_digest": self._source_digest(),
+            "source_unchanged_since_startup": (
+                self.startup_provenance["source_digest"]
+                == self._source_digest()),
+            "tape_loaded": tape_loaded,
+            "tape_file_identity": file_identity,
+            "env": {name: os.environ.get(name)
+                    for name in ("HALCYON_NO_BOTS", "HALCYON_TRACE_WIRE",
+                                 "HALCYON_NO_TAPE", "HALCYON_NO_WAVE")},
+            "match_id": getattr(world, "match_id", None),
+            "phase": getattr(world, "phase", None),
+            "match_finished": getattr(
+                getattr(world, "structures", None), "match_finished", None),
+            "tick": getattr(world, "sim_tick", None),
+            "time": getattr(world, "sim_time", None),
+        }
+
     def _execute(self, world, command, request_id):
         name, now = command["command"], world.sim_time
         if name == "snapshot":
             return self.snapshot(world)
+        if name == "diagnostics":
+            return self._diagnostics(world)
+        if name == "lane_minions":
+            # Read-only census of every living lane minion (both teams),
+            # beyond the snapshot's nearest-64 window: observation tooling
+            # must distinguish discovery truncation from a gameplay halt.
+            # The reply carries the WORLD CLOCK it was served at, exactly as
+            # ``snapshot`` does (tick/time), so a census frame can be tied to
+            # the simulation instant it observed instead of to the client's
+            # own wall clock alone.
+            if world.phase != world.WORLD:
+                raise ValueError("lane_minions requires an active WORLD phase")
+            wanted_team = command.get("team")
+            rows = []
+            for minion in (world.wave_director.minions
+                           if world.wave_director else []):
+                if not minion.alive:
+                    continue
+                team = combat.team(minion)
+                if wanted_team and team != wanted_team:
+                    continue
+                rows.append({"eid": minion.eid, "team": team,
+                             "x": minion.x, "y": minion.y, "hp": minion.hp,
+                             "max_hp": minion.max_hp})
+            rows.sort(key=lambda row: (row["team"], row["eid"]))
+            return {"count": len(rows), "minions": rows,
+                    "tick": getattr(world, "sim_tick", None),
+                    "time": getattr(world, "sim_time", None)}
         if world.phase != world.WORLD or world.structures.match_finished:
             raise ValueError("fixture changes require an active WORLD phase")
         if name == "damage":
