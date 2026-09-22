@@ -108,9 +108,12 @@ class CelesteItemSessionTests(unittest.TestCase):
         self.assertEqual(target.hp, 10000)
         self.assertEqual(world.items._alternating_hits[source.eid], 1)
         self.assertAlmostEqual(world.items._aftershock_cooldown[source.eid], world.sim_time + 1)
-        self.assertFalse(any(op == wire.OP.COMBAT_DELTA
-                             and struct.unpack_from('>II', payload) == (target.eid, source.eid)
-                             for op, payload in frames))
+        # Native 1054 consumes barrier itself. Suppressing these would leave
+        # the client pool untouched even though server HP correctly stays full.
+        self.assertEqual([struct.unpack_from('>f', payload, 8)[0] for op, payload in frames
+                          if op == wire.OP.COMBAT_DELTA
+                          and struct.unpack_from('>II', payload) == (target.eid, source.eid)],
+                         [-100.625, -750.0])
         self.assertFalse(any(op == wire.OP.ENTITY_STAT
                              and struct.unpack_from('>I', payload)[0] == target.eid
                              and payload[8] == roster.STAT_HEALTH

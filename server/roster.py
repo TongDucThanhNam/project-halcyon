@@ -292,15 +292,22 @@ def build_hero_block(p: Player) -> bytes:
         # An unrecorded selection must receive its own numeric stats even while
         # the remaining presentation fields still use the bootstrap template.
         from .hero_balance import HERO_NAMES, STATS
-        stats = STATS.get(HERO_NAMES.get(p.hero_id))
+        from .hero_catalog import resolve_hero_id
+        base_id = resolve_hero_id(p.hero_id)
+        stats = STATS.get(HERO_NAMES.get(base_id))
         if stats is not None:
             values = {42: stats.health_base, 46: stats.health_base,
                       74: stats.move_speed, 122: stats.energy_base, 126: stats.energy_base,
                       190: stats.armor_base, 202: stats.shield_base, 214: stats.weapon_base}
             for offset, value in values.items():
                 struct.pack_into(">f", body, offset, value)
-    # A hero outside the measured corpus roster reuses the donor's measured
-    # stat run (see hero_init_for) — measured bytes, no invented values.
+    # Spawn belongs to the player slot, not the selected hero's captured/donor
+    # run. Native 1011 stores X, vertical height, map Z at +18/+22/+26.
+    # Otherwise e.g. Skye starts at Adagio's old position, and mirrored enemy
+    # heroes can even start on the wrong side before their first correction.
+    if p.eid in HERO_SPAWNS:
+        x, y = HERO_SPAWNS[p.eid]
+        struct.pack_into(">fff", body, 18, x, HERO_SPAWN_HEIGHTS[p.eid], y)
     for offset, value in ((294, 1.0), (314, 1.0), (318, 0.0), (322, 68.0)):
         struct.pack_into(">f", body, offset, value)
     body[741:745] = b"\xff\xff\xff\xff"
@@ -316,7 +323,9 @@ HERO_INIT_DONOR_ID = 244
 
 def hero_init_for(hero_id: int):
     """(init data or None, donated?) for a hero id."""
-    data = HERO_INIT_DATA.get(hero_id)
+    from .hero_catalog import resolve_hero_id
+    base_id = resolve_hero_id(hero_id)
+    data = HERO_INIT_DATA.get(base_id)
     if data is not None:
         return data, False
     return HERO_INIT_DATA.get(HERO_INIT_DONOR_ID), True
@@ -993,11 +1002,17 @@ SPAWN_Y = float(os.environ.get("HALCYON_HERO_SPAWN_Y", "0.8799999952316284"))   
 # Team 2 (Right): positive X
 HERO_SPAWNS = {
     1500: (SPAWN_X, SPAWN_Y),
-    1515: (-81.81, 1.267),
-    1516: (-77.03, 1.254),
-    1517: (79.66, 1.747),
-    1518: (78.60, 1.747),
-    1519: (83.22, 1.747),
+    1515: (-81.81, 1.97),
+    1516: (-77.03, -1.94),
+    1517: (79.66, -0.91),
+    1518: (78.60, -5.06),
+    1519: (83.22, 0.72),
+}
+# Canonical corpus slot heights; separate from the simulation's planar X/Y.
+HERO_SPAWN_HEIGHTS = {
+    1500: 1.2670695781707764, 1515: 1.2670695781707764,
+    1516: 1.253516674041748, 1517: 1.7470695972442627,
+    1518: 1.7470695972442627, 1519: 1.7470695972442627,
 }
 HERO_SPAWNS_TEAM1 = [HERO_SPAWNS[1500], HERO_SPAWNS[1515], HERO_SPAWNS[1516]]
 HERO_SPAWNS_TEAM2 = [HERO_SPAWNS[1517], HERO_SPAWNS[1518], HERO_SPAWNS[1519]]
@@ -1019,6 +1034,20 @@ def build_entity_pose_3d(eid: int, seq: int, x: float, height: float, z: float) 
     (layout measured on bot heroes 2026-09-07; z ≈ −1070.y for our spawn
     frame, height 1.05 from the hero 1019 sample; semantics [Open])."""
     return struct.pack(">IHHfffH", eid, 0, seq, x, height, z, 0)
+
+
+def build_move_intent_3d(slot: int, x: float, height: float, z: float, *, preserve_selection=True) -> bytes:
+    """1017: native927c40 -> d05d08, selection callback a124e0.
+
+    Unlike1016, its final true flag keeps the native selected target. All
+    coordinates are XYZ, not planar XY plus padding. Runtime qualification
+    remains separate from this serializer's code-derived layout.
+    """
+    if type(slot) is not int or not 0 <= slot <= 255 or type(preserve_selection) is not bool:
+        raise ValueError('invalid actor index or selection flag')
+    if not all(math.isfinite(v) for v in (x, height, z)):
+        raise ValueError('nonfinite movement destination')
+    return struct.pack('>BfffB', slot, x, height, z, preserve_selection)
 
 
 def parse_move(payload: bytes) -> tuple[float, float]:
@@ -1441,6 +1470,18 @@ def build_entity_attribute(eid: int, delta: float, attribute_id: int) -> bytes:
     return struct.pack(">IIfBB", eid, 0xffffffff, delta, attribute_id, 1) + bytes(6)
 
 
+def build_entity_base_attribute(eid: int, value: float, attribute_id: int) -> bytes:
+    """1052 absolute base-layer setter (829fac -> c042f0 -> c5f478).
+
+    This changes the maximum attribute and clamps current resources; it does
+    not itself fill an enlarged HP pool. Use only for authoritative baselines,
+    not additive equipment or multiplier layers.
+    """
+    if not math.isfinite(value) or not 0 <= attribute_id < 45:
+        raise ValueError('invalid native base attribute')
+    return struct.pack('>IIfBBB', eid, 0xffffffff, value, attribute_id, 0, 1) + bytes(7)
+
+
 def parse_ability_cast(payload: bytes) -> int:
     """Parse c2s 1078 ability slot index (0..2)."""
     if len(payload) < 1:
@@ -1488,4 +1529,3 @@ def parse_inventory_slot(payload: bytes) -> tuple[int, int]:
         raise ValueError("invalid 1082 payload")
     eid, slot = struct.unpack_from(">II", payload, 0)
     return eid, slot
-

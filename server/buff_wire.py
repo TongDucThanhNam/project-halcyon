@@ -40,9 +40,16 @@ class PresentedBuff:
     applied_at: float
     expires_at: float
     wire_expires_at: float | None = None
+    # Native hero-state buffs (e.g. Skye 607/609/610) arrive as 1087 with a
+    # state count plus four opaque words; simple buffs arrive as 1086.
+    state_count: int = 0
+    words: tuple[int, int, int, int] = ()
 
     def payload(self, now: float) -> bytes:
         duration = -1.0 if math.isinf(self.expires_at) else max(0.0, self.expires_at - now)
+        if self.state_count or any(self.words):
+            return build_buff_state(self.target_eid, self.source_eid, duration,
+                                    self.instance_id, self.kind, self.state_count, self.words)
         return build_buff_add(self.target_eid, self.source_eid, duration, self.instance_id, self.kind)
 
 
@@ -71,28 +78,47 @@ class BuffLifecycle:
 
     def apply(self, key: str, source_eid: int, target_eid: int, kind: int,
               now: float, duration: float) -> int:
+        return self._apply(key, source_eid, target_eid, kind, now, duration)
+
+    def apply_state(self, key: str, source_eid: int, target_eid: int, kind: int,
+                    now: float, duration: float, state_count: int,
+                    words: tuple[int, int, int, int]) -> int:
+        if len(words) != 4:
+            raise ValueError("1087 presentation requires exactly four state words")
+        return self._apply(key, source_eid, target_eid, kind, now, duration,
+                           state_count=state_count, words=words)
+
+    def _apply(self, key: str, source_eid: int, target_eid: int, kind: int,
+               now: float, duration: float, *, state_count: int = 0,
+               words: tuple[int, int, int, int] = ()) -> int:
         if not isinstance(key, str) or not key:
             raise ValueError("buff presentation key must be a nonempty string")
         if not math.isfinite(now):
             raise ValueError("buff application time must be finite")
         # Validate the wire fields before changing any active presentation.
-        build_buff_add(target_eid, source_eid, duration, 1, kind)
+        if state_count or any(words):
+            build_buff_state(target_eid, source_eid, duration, 1, kind, state_count, words)
+        else:
+            build_buff_add(target_eid, source_eid, duration, 1, kind)
         expires = math.inf if duration == -1 else now + duration
         previous = self.active.get((target_eid, key))
         if previous is not None and (previous.source_eid, previous.kind, previous.applied_at,
-                                     previous.expires_at) == (source_eid, kind, now, expires):
+                                     previous.expires_at, previous.state_count,
+                                     previous.words) == (source_eid, kind, now, expires,
+                                                         state_count, tuple(words)):
             return previous.instance_id
         instance = self._allocate()
         _u32(instance, "buff instance")
         if instance == 0 or instance in self._allocated:
             raise ValueError("buff allocator returned a zero or previously allocated identity")
-        value = PresentedBuff(key, target_eid, source_eid, kind, instance, now, expires)
+        value = PresentedBuff(key, target_eid, source_eid, kind, instance, now, expires,
+                              state_count=state_count, words=tuple(words))
         payload = value.payload(now)
         if previous is not None:
             self.remove(target_eid, key, now=now)
         self._allocated.add(instance)
         self.active[(target_eid, key)] = value
-        self._frames.append((BUFF_ADD, payload))
+        self._frames.append((BUFF_STATE if value.state_count or any(value.words) else BUFF_ADD, payload))
         return instance
 
     def remove(self, target_eid: int, key: str, *, now: float | None = None) -> None:

@@ -1,6 +1,6 @@
 """Fixed-point hero locomotion and lifecycle; attack resolution is world-owned.
 
-Sessions inject the external A001 NavMesh. The wire uses floats only at the
+Sessions inject the owned baked NavMesh. The wire uses floats only at the
 boundary; position integration and pathfinding use integer coordinates.
 """
 from __future__ import annotations
@@ -73,6 +73,7 @@ class HeroMovement:
         self.facing = roster.FACING_DEFAULT
         self.waypoints, self.move_target = [], None
         self.is_moving = self._start_emitted = self.just_respawned = False
+        self.arrived_this_step = False
         self.recall_started_at = self.recall_completes_at = None
         self.last_recall_completed_at = None
         self._next_fountain_laser_at = 0.0
@@ -318,6 +319,16 @@ class HeroMovement:
     def set_target(self, tx, ty):
         return self.set_path([(tx, ty)])
 
+    def _find_route(self, origin, destination):
+        if self.navigation is None:
+            return [destination]
+        if getattr(self.navigation,'surface_steering',False) is True:
+            height = (getattr(self.waypoints,'cursor_height_fixed',None)
+                      if origin == (self.x,self.y) else None)
+            return self.navigation.find_path_with_height(
+                origin,destination,None if height is None else height/SCALE)
+        return self.navigation.find_path(origin,destination)
+
     def set_path(self, waypoints):
         if not self.is_alive:
             return []
@@ -327,10 +338,15 @@ class HeroMovement:
         route, origin = [], (self.x, self.y)
         for target in waypoints:
             destination = fixed(target[0]) / SCALE, fixed(target[1]) / SCALE
-            segment = self.navigation.find_path(origin, destination) if self.navigation is not None else [destination]
+            segment = self._find_route(origin,destination)
             if not segment:
                 break
-            route.extend(segment)
+            if not route:
+                route = segment
+            elif type(route) is type(segment):
+                route.extend(segment)
+            else:
+                route = list(route)+list(segment)  # Explicit mixed-route planar fallback.
             origin = segment[-1]
         if not route:
             return self.stop(input_order=False)
@@ -349,20 +365,29 @@ class HeroMovement:
         while remaining > 0 and self.waypoints:
             tx, ty = map(fixed, self.waypoints[0])
             dx, dy = tx - self._x_fixed, ty - self._y_fixed
-            squared = dx * dx + dy * dy
+            heights = getattr(self.waypoints,'height_fixed',None)
+            dh = heights[0]-self.waypoints.cursor_height_fixed if heights is not None else 0
+            squared = dx * dx + dy * dy + dh * dh
             distance = math.isqrt(squared)
             if distance * distance < squared:
                 distance += 1
             if distance <= remaining:
                 self._x_fixed, self._y_fixed = tx, ty
+                if heights is not None:
+                    self.waypoints.cursor_height_fixed = heights[0]
                 remaining -= distance
                 self.waypoints.pop(0)
             else:
                 nx = self._x_fixed + (abs(dx) * remaining // distance) * (1 if dx >= 0 else -1)
                 ny = self._y_fixed + (abs(dy) * remaining // distance) * (1 if dy >= 0 else -1)
+                height_step = (abs(dh)*remaining//distance)*(1 if dh >= 0 else -1)
                 if self.navigation is not None:
-                    endpoint = self.navigation.clamp_segment((self.x, self.y), (nx / SCALE, ny / SCALE))
+                    planar_budget = math.isqrt(max(0,remaining*remaining-height_step*height_step))
+                    endpoint = self.navigation.clamp_walk_step(
+                        (self.x, self.y), (nx / SCALE, ny / SCALE), self.waypoints[0], planar_budget)
                     nx, ny = map(fixed, endpoint)
+                if heights is not None:
+                    self.waypoints.cursor_height_fixed += height_step
                 self._x_fixed, self._y_fixed = nx, ny
                 remaining = 0
             if self.waypoints:
@@ -370,10 +395,12 @@ class HeroMovement:
         frame = (wire.OP.POSITION, roster.build_position(self.eid, self.x, self.y))
         if not self.waypoints:
             self.is_moving, self.move_target = False, None
+            self.arrived_this_step = True
             return [frame, frame]
         return [frame]
 
-    def step(self, dt, now=None, target_pos=None, status_manager=None):
+    def step(self, dt, now=None, target_pos=None, status_manager=None, *, target_radius=0.0):
+        self.arrived_this_step = False
         if dt < 0 or not math.isfinite(dt):
             raise ValueError('invalid movement delta time')
         self.just_respawned = False
@@ -397,9 +424,13 @@ class HeroMovement:
         if self.target_eid is not None:
             if target_pos is None:
                 self.clear_target()
+                # A dead/missing target invalidates its route too. Continuing
+                # those waypoints becomes an unintended ordinary ground walk.
+                return self.stop(input_order=False)
             else:
                 dx, dy = target_pos[0] - self.x, target_pos[1] - self.y
-                if within_distance((self.x, self.y), target_pos, self.attack_range):
+                attack_reach = self.attack_range + target_radius
+                if within_distance((self.x, self.y), target_pos, attack_reach):
                     frames = self.stop(input_order=False)
                     self.facing = roster.facing_toward(self.x, self.y, *target_pos)
                     return frames
@@ -407,7 +438,7 @@ class HeroMovement:
                     moved = self._pursuit_destination is None or sum((target_pos[k] - self._pursuit_destination[k]) ** 2 for k in (0, 1)) >= 0.25 ** 2
                     if self.navigation is not None:
                         if moved or not self.waypoints:
-                            route = self.navigation.find_path((self.x, self.y), target_pos)
+                            route = self._find_route((self.x,self.y),target_pos)
                             self._pursuit_destination = target_pos
                         else:
                             route = self.waypoints
@@ -424,7 +455,16 @@ class HeroMovement:
                             # _advance rounds each axis toward the origin.
                             # Step two coordinate quanta inside the range so
                             # an oblique approach cannot stall just outside it.
-                            approach = max(0, distance - fixed(self.attack_range) + 2)
+                            approach = max(0, distance - fixed(attack_reach) + 2)
+                            heights = getattr(route,'height_fixed',None)
+                            if heights is not None and distance:
+                                dh = heights[0]-route.cursor_height_fixed
+                                squared3d = squared+dh*dh
+                                surface_distance = math.isqrt(squared3d)
+                                surface_distance += surface_distance*surface_distance < squared3d
+                                # Attack reach is planar; locomotion on this
+                                # qualified route consumes a3D distance budget.
+                                approach = (approach*surface_distance+distance-1)//distance
                             speed = min(speed, approach / SCALE / dt) if dt else 0.0
                     else:
                         return self.stop(input_order=False)

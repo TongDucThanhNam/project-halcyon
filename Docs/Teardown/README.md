@@ -54,6 +54,7 @@ names what was swept and how.
 | Map identity, zones, blueprint taxonomy, navmesh format, **30-anchor placement table**, pipeline synthesis, rebuild playbook, key numbers, stuck-map | `vainglory-3v3-map-structure.md` — the map reference book |
 | Container/chunk grammar, INST encryption wall, texture header codec | `vainglory-store-format.md` |
 | How the runtime evidence was obtained; repeating or extending it; tool inventory and traps | `vainglory-runtime-reconstruction.md` |
+| Choosing an instrumentation route (translated LDPlayer vs PC lab vs physical ARM); decrypt-boundary and post-conversion dump technique transferred from an external RE case | `vainglory-instrumentation-transfer.md` |
 | Why movement feels smooth: waypoint objects, pathfinding, locomotion clips | `vainglory-movement-anatomy.md` (§13) |
 | Backend topology, live traffic windows, transport strings, smoothness synthesis | `vainglory-netcode-backend.md` (§14) |
 | **Wire protocol** — the match connection itself: endpoint topology, frame grammar, obfuscation, traffic shape, capture playbook | `vainglory-protocol-wire.md` (§15) |

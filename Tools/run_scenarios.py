@@ -13,12 +13,15 @@ MODES
 
   client     Bounded real-client operation of one owned local session through
              Tools/scenario_client.py (QA snapshot verification, subprocess
-             ADB input, wire-trace correlation, video evidence). This runner
-             only forwards CLI arguments to it; live execution is a separate
-             parent-delegated phase.
+             ADB input, wire-trace correlation and anchored native scalar
+             evidence). No images/video. This runner forwards CLI arguments
+             to the existing client driver.
 
 SCENARIOS (--mode headless)
 ----------------------------
+  healing-flask           Owned default-item UI intent, 17 healing/energy
+                          pulses, barrier lifetime and duplicate-use rejection
+                          through the full production world.
   skye-a                  Forward Barrage: 1078 learn, 1042 ground cast,
                           energy paid, 1046 acknowledgment, attributed 1054
                           damage through the live world.
@@ -118,7 +121,11 @@ REPARSE_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 # runtime imports only snapshot files (script path and sys.path both resolve
 # inside the snapshot) and the worker asserts that before simulating.
 PINNED_TOOLS = ("Tools/run_scenarios.py", "Tools/scenario_client.py",
-                "Tools/verify_sandbox.py")
+                "Tools/verify_sandbox.py", "Tools/classic_client.py",
+                "Tools/sandbox_qa.py", "Tools/input_bridge.py", "Tools/android_input_health.py",
+                "Tools/build_input_bridge.py", "Tools/android/HalcyonInput.java",
+                "Tools/Teardown/observe_client_movement.py", "Tools/Teardown/client_movement_observer.js",
+                "Tools/Teardown/client_projection.py", "Tools/Teardown/detour_route_oracle.cpp")
 
 STAGES = (
     "SETUP",
@@ -177,6 +184,7 @@ def digest_file(path: Path) -> str:
 
 def source_manifest() -> dict[str, str]:
     paths = sorted((ROOT / "server").glob("*.py"))
+    paths.extend(sorted((ROOT/'server/platform').glob('*.py')))
     paths.extend(ROOT / name for name in PINNED_TOOLS if (ROOT / name).is_file())
     return {str(path.relative_to(ROOT)).replace("\\", "/"): digest_file(path)
             for path in paths}
@@ -188,7 +196,7 @@ def manifest_digest(manifest: dict[str, str]) -> str:
 
 
 def pin_sources(directory: Path) -> tuple[Path, dict[str, str]]:
-    """Copy authored Python source into an immutable snapshot, race-safely."""
+    """Copy authored runtime/observer source into an immutable snapshot, race-safely."""
     while True:
         before = source_manifest()
         try:
@@ -258,7 +266,7 @@ def resolve_output_dir(explicit: str | None, *, allow_existing_empty: bool = Tru
 
 def default_navmesh_path() -> Path:
     from server import navigation
-    return Path(os.environ.get("HALCYON_NAVMESH", "") or navigation.DEFAULT_A001_PATH)
+    return Path(os.environ.get("HALCYON_NAVMESH", "") or navigation.DEFAULT_CLASSIC_NAVMESH)
 
 
 def build_world(navmesh_path: Path, match_id: str = "scenario-pilot-match"):
@@ -475,7 +483,8 @@ def _base_result(scenario_id: str, seed: int, out_dir: Path, navmesh_path: Path,
             "hero_id": SKYE_HERO_ID,
             "enemy_hero_id": ENEMY_HERO_ID,
             "navmesh": {"path": str(navmesh_path), "sha256": digest_file(navmesh_path),
-                        "vertices": len(mesh.vertices), "triangles": len(mesh.triangles)},
+                        "vertices": len(mesh.vertices), "triangles": len(mesh.triangles),
+                        "metadata":getattr(mesh,'source_metadata',{})},
             "tick_seconds": TICK_SECONDS,
         },
         "source_manifest_sha256": manifest_digest(source_manifest()),
@@ -1364,6 +1373,73 @@ def scenario_minion_wave_regression(seed: int, out_dir: Path, navmesh_path: Path
     return result
 
 
+def scenario_healing_flask(seed: int, out_dir: Path, navmesh_path: Path) -> dict:
+    """Authenticated default HUD intent in the normal production world."""
+    from server import buff_wire, cooldown_wire, item_input
+    from server.status_effects import StatusType
+    run = ScenarioRun('healing-flask', seed, out_dir, navmesh_path, keep_frames=True)
+    result = run.result
+    try:
+        hero, enemy, _ = run.skye_actors()
+        for actor, requested in ((hero, (0, 35)), (enemy, (4, 35))):
+            point = run.mesh.nearest_point(requested)
+            run.world._emit_frames(actor.stop() + actor.teleport(*point))
+            run.controller.fixture('teleport', eid=actor.eid, requested=list(requested), placed=list(point))
+        player = run.world.economy.get_or_create(hero.eid)
+        player.add_xp(368)  # Native cumulative requirement for level five.
+        player.apply_to_hero(hero)
+        hero.hp, hero.energy = 500, 100
+        run.controller.fixture('resources-and-xp', eid=hero.eid, hp=500, energy=100,
+                               granted_xp=368, level=player.level, max_energy=hero.max_energy)
+        run.safety_check()
+        if player.level != 5 or hero.is_in_base():
+            raise StageFailure('SETUP', 'Flask requires independently level-five, outside-fountain setup')
+        _stage(result, 'SETUP', 'PASS', 'A001 safe placement; normal ecology and regeneration enabled')
+        for tick in (4, 20):
+            run.controller.intent(tick, 1096, item_input.build_item_use(2000),
+                                  'use owned Healing Flask' if tick == 4 else 'duplicate during cooldown')
+        run.freeze_initial()
+        run.ticks(112)
+        frames = run.frames_since(4)
+        echoes = [p for op, p in frames if op == 1096]
+        buffs = [buff_wire.parse_buff_add(p) for op, p in frames if op == 1086]
+        buffs = [b for b in buffs if b.target_eid == hero.eid and b.kind == 259]
+        heals = [d for victim, source, d in damage_records(frames)
+                 if victim == hero.eid and source == hero.eid and d > 0]
+        energy_amount = hero.max_energy * .3 * .3 / 5
+        energy_pulses = [struct.unpack_from('>f', p, 4)[0] for op, p in frames
+                         if op == 1053 and struct.unpack_from('>I', p)[0] == hero.eid
+                         and p[8] == 2 and abs(struct.unpack_from('>f', p, 4)[0] - energy_amount) < 1e-5]
+        timers = [cooldown_wire.parse_timer_tick(p) for op, p in frames if op == 1162]
+        timers = [t for t in timers if t.tag == cooldown_wire.ITEM_TAGS['healing_flask']]
+        if echoes != [item_input.build_item_use(2000)] * 2:
+            raise StageFailure('INPUT_UNACKNOWLEDGED', 'missing owned first/duplicate acknowledgments')
+        if len(buffs) != 1 or len(timers) != 1 or timers[0].remaining != 120:
+            raise StageFailure('ACCEPTED', 'expected one Flask buff/cooldown, not duplicate activation')
+        if (heals != [18] * 17 or len(energy_pulses) != 17
+                or run.world.status_manager.get_barrier(hero.eid, run.world.sim_time) != 0
+                or run.world.status_manager.has_effect(hero.eid, StatusType.PERIODIC_HEAL, run.world.sim_time)):
+            raise StageFailure('AUTHORITATIVE_EFFECT', 'Flask pulses or terminal lifecycle disagree with contract')
+        metrics = {'heal_count': len(heals), 'heal_total': sum(heals),
+                   'energy_pulses': len(energy_pulses), 'energy_per_pulse': energy_amount,
+                   'level': player.level, 'cooldown_until': player.default_items[2000].cooldown_until,
+                   'hp_after_with_regeneration': hero.hp, 'energy_after_with_regeneration': hero.energy}
+        _stage(result, 'INPUT_UNACKNOWLEDGED', 'PASS', 'two owner echoes observed')
+        _stage(result, 'ACCEPTED', 'PASS', 'one buff and cooldown; duplicate has no additional effect')
+        _stage(result, 'AUTHORITATIVE_EFFECT', 'PASS', '17 heals, 17 energy pulses, barrier expired')
+        _stage(result, 'PRESENTATION', 'UNVERIFIED', 'native resource observation is a separate client gate')
+        _pass(result, metrics, {'heal_total': 306, 'energy_pulses': 17, 'duplicate_effects': 0})
+        result['observed_metrics'] = metrics
+        run.finish()
+    except StageFailure as exc:
+        _fail(result, exc)
+        run.finish()
+    except Exception as exc:
+        result['status'], result['error'] = 'ERROR', repr(exc)
+        run.finish()
+    return result
+
+
 SCENARIO_TABLE: dict[str, Callable[..., dict]] = {
     "skye-a": scenario_skye_a,
     "skye-b": scenario_skye_b,
@@ -1371,6 +1447,7 @@ SCENARIO_TABLE: dict[str, Callable[..., dict]] = {
     "skye-lock-neg": scenario_skye_lock_neg,
     "minion-push": scenario_minion_push,
     "minion-wave-regression": scenario_minion_wave_regression,
+    "healing-flask": scenario_healing_flask,
 }
 
 
@@ -1699,8 +1776,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="explicit output directory (must be outside the repo, "
                              "never overwritten; default a unique temp directory)")
     parser.add_argument("--navmesh", default=None,
-                        help="external A001 navmesh file (default HALCYON_NAVMESH or "
-                             "the production DEFAULT_A001_PATH)")
+                        help="owned navmesh file (default HALCYON_NAVMESH or "
+                             "the production baked Classic mesh)")
     parser.add_argument("--reference", default=None,
                         help="[headless] external semantic reference fixture JSON")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)

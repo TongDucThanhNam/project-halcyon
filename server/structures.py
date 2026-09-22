@@ -58,6 +58,12 @@ class Structure:
     is_alive: bool = True
     heat_shots: int = 0
 
+    @property
+    def basic_attack_radius(self):
+        # Owned native definitions: c5b404/ca1284 scaled bounding radius.
+        # All ten Classic turrets read 2.15, both crystals 2.5; no scale bonus.
+        return 2.5 if self.is_crystal else 2.15
+
 
 # Canonical placement from 3v3 Halcyon Fold layout (vainglory-3v3-map-structure.md §11)
 STRUCTURE_TEMPLATES = [
@@ -113,6 +119,19 @@ class StructureManager:
             return not any(st.tier < 5 and st.is_alive for st in team_structs)
         return False
 
+    def incoming_damage_multiplier(self, tgt_eid: int, *, source_is_hero: bool = False,
+                                   minions=None) -> float:
+        """Structure protection is mitigation, before any temporary resource pool."""
+        s = self.structures.get(tgt_eid)
+        if s is None or not s.is_alive or self.match_finished or not self.is_vulnerable(tgt_eid):
+            return 0.0
+        if source_is_hero and not s.is_crystal and not any(
+                m.alive and m.side != s.team
+                and (m.x - s.x) ** 2 + (m.y - s.y) ** 2 <= 100.0
+                for m in (minions or [])):
+            return 0.25
+        return 1.0
+
     def apply_damage(self, tgt_eid: int, damage: float, src_eid: int | None = None,
                      *, source_is_hero: bool = False, minions=None) -> list[tuple[int, bytes]]:
         """Apply damage to structure; returns wire frames (1054 + death chain if killed)."""
@@ -124,11 +143,7 @@ class StructureManager:
             return []
 
         out: list[tuple[int, bytes]] = []
-        if source_is_hero and not s.is_crystal and not any(
-                m.alive and m.side != s.team
-                and (m.x - s.x) ** 2 + (m.y - s.y) ** 2 <= 100.0
-                for m in (minions or [])):
-            damage *= 0.25
+        damage *= self.incoming_damage_multiplier(tgt_eid, source_is_hero=source_is_hero, minions=minions)
         actual_damage = min(s.hp, damage)
         s.hp = max(0.0, s.hp - actual_damage)
         source = src_eid if src_eid is not None else tgt_eid

@@ -199,6 +199,15 @@ deterministically replay.
 
 ## 15.6 The decoded stream is on disk — `.vgr` auto-recordings (Observed, 2026-09-03)
 
+**Completeness correction, 2026-09-22:** native replay is not a byte-complete
+post-decryption wire log. A paired external CE run retained 15,041 replay
+frames with **zero `1070`**, versus **45 owner `1070` corrections on wire**.
+All 14 ordinary owner `1016` payloads/order match, but replay also contains an
+additional shorter owner movement record. Also, the observed manifest filename
+is session-named; its contents contain the session/match pair. The historical
+naming and whole-stream claims below must not be used as completeness or
+fresh-match guarantees. See [paired evidence](../Plan/solo-sandbox-navigation.md#external-ce-movement-reference--2026-09-22).
+
 The playbook's step 2 paid out immediately. `libGameKindred.so` strings
 name `DispatchQueue_PacketRecorder`, `Game_Replay` and
 `replayManifest.txt` — and the client **auto-records every match** to its
@@ -857,6 +866,18 @@ per wave in five mirrored right/left pairs:
   +96..98 (`00 00 01` right / `00 01 00` left) and +119..121
   (`01 01 02` right / `01 00 01` left).
 - **1016 ActionMoveTo (decoded 14 B)**: `[u8 actor_index][f32 x][f32 y][5×0]`.
+  September22native follow-up:927bcc→d056f4 calls movement with a zero
+  preserve-selection flag. Callbacka124e0 clears the owned selected-target
+  weak handle; live pursuit publication reproduced that side effect.
+  **1017** is `[u8 actor_index][f32 X][f32 height][f32 Z][u8 flag]`:
+  927c40→d05d08 passes its final flag into that same callback. All2441017
+  records in owned match6carry1. A live1017trial with1preserves target1517
+  and activates navigation; its remaining speed mismatch is separate.
+  **1018**'s second u32 is a target EID, not a sequence:927db8→d05960 stops
+  navigation throughd6074c, applies the supplied correction point, and sets
+  navigation facing toward that entity. The old unused`build_entity_pose_3d`
+  name/sequence argument are historical, not a verified pose-update contract.
+  Addresses here are Ghidra addresses (ELF+0x100000). See run checkpoint21.
   The index identifies the actor's navigation slot, not a per-entity
   counter; the target is the walker's first lane point. Hero indices
   are mapped below; nonhero allocation still needs its own mapping.

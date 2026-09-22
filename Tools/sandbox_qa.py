@@ -37,15 +37,30 @@ def submit(command, *, timeout=5.0, request_id=None):
         raise ValueError("request identity already used")
     atomic_json(request, command)
     deadline = time.monotonic() + timeout
+    read_errors = []
     while True:
-        if result.is_file():
+        try:
             with result.open("rb") as stream:
                 raw = stream.read(1024 * 1024 + 1)
+        except FileNotFoundError:
+            pass
+        except PermissionError as exc:
+            # Windows readers can transiently lose a race with atomic receipt
+            # publication/another file holder. The command is already queued:
+            # retry this read only, with the same deadline/identity, never
+            # publish another command or infer that it was not executed.
+            read_errors.append({'at': time.time(), 'error': str(exc)})
+            read_errors = read_errors[-20:]
+        else:
             if len(raw) > 1024 * 1024:
                 raise ValueError("QA result exceeds 1 MiB")
-            return json.loads(raw)
+            parsed = json.loads(raw)
+            if read_errors:
+                parsed['_client_receipt_read_errors'] = read_errors
+            return parsed
         if time.monotonic() >= deadline:
             return {"id": identity, "pending": True, "result_path": str(result),
+                    "receipt_read_errors": read_errors,
                     "message": "No acknowledgement yet; inspect this result path before submitting another command."}
         time.sleep(min(.05, max(0, deadline - time.monotonic())))
 

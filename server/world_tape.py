@@ -53,6 +53,40 @@ def complete_corpus_bootstrap(frames):
     ]
 
 
+def authoritative_corpus_bootstrap(frames):
+    """Do not import archived combat modifiers absent from our simulation.
+
+    Native inventory/stat observation identified a permanent +10% client-only
+    weapon multiplier from three 1052 records at 8.517s. Halcyon's authoritative
+    simulation does not implement that archived match modifier. Preserve the
+    source tape and all allocations/cancellations; omit only these exact records
+    from the fingerprint-qualified bootstrap published to fresh clients.
+
+    The same tape grants each of ten turrets six 100-point barriers. Native
+    reads plus complete wire accounting proved those client-only pools absorb
+    600 damage before HP, leaving a dead authoritative turret at native HP600.
+    Omit these exact archived grants too, not live barrier mechanics.
+
+    This is not an interpretation of official bot-handicap rules. Unknown tapes
+    and ordinary live 1052 publication are unchanged.
+    """
+    cancels = [(STARTUP_CANCEL_MS, struct.pack(">HII", 1093, eid, instance) + bytes(6))
+               for eid, instance in STARTUP_CANCEL_INSTANCES]
+    prefix = frames[:-len(cancels)] if frames[-len(cancels):] == cancels else frames
+    digest = hashlib.sha256()
+    for t_ms, body in prefix:
+        digest.update(RECORD_HEAD.pack(t_ms, len(body)))
+        digest.update(body)
+    if digest.hexdigest() != _TRUNCATED_BOOTSTRAP_SHA256:
+        return frames
+    archived = {(8517, struct.pack(">HIIfBB", 1052, eid, 0xffffffff, .1, 4, 2) + bytes(8))
+                for eid in (1500, 1515, 1516)}
+    archived.update((at, struct.pack(">HIfB", 1053, eid, 100.0, 4) + b"\x00\x01\x00\x00\x00")
+                    for at in (9934, 10443, 10955, 11468, 11970, 12478)
+                    for eid in (3539, 3540, 3541, 3542, 3543, 3545, 3546, 3547, 3548, 3549))
+    return [frame for frame in frames if frame not in archived]
+
+
 def load_tape(path: str, skip_until_op: int | None = None):
     """Return [(t_ms, body)] or None when the file is absent.
 

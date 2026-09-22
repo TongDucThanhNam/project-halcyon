@@ -11,7 +11,7 @@ from enum import Enum, IntEnum
 import math
 from typing import Any, Callable, Optional
 
-from . import ability_wire, cooldown_wire, hitboxes, roster, wire
+from . import ability_wire, cooldown_wire, hitboxes, projectile_wire, roster, skye_wire, wire
 from .hero_movement import HeroMovement
 from .status_effects import DamageContext, DamageModifierQueue, DamageType, StatusEffect, StatusManager, StatusType
 
@@ -799,6 +799,9 @@ class SkyeBarrage:
     next_at: float
     expires_at: float
     interrupt_serial: int
+    pulses: int = 0
+    resume_target_eid: Optional[int] = None
+    resume_order_version: int = 0
 
 
 @dataclass
@@ -814,6 +817,8 @@ class SkyeDash:
     crystal_power: float
     fired: int = 0
     hit_targets: set[int] = field(default_factory=set)
+    resume_target_eid: Optional[int] = None
+    resume_order_version: int = 0
 
 
 @dataclass
@@ -859,8 +864,16 @@ class SkyeKit(HeroKit):
     BACKWARD_BONUS = 0.2  # Calibration policy for the documented reduced bonus.
     BARRAGE_SECONDS = 3.0
     BARRAGE_INTERVAL = 0.1
+    # Native chunk36 publishes eleven 1039 barrage projectiles per 3 s cast:
+    # one projectile every third Halcyon damage pulse (0.3 s presentation).
+    BARRAGE_PROJECTILE_PULSES = 3
     DASH_SPEED = 18.0
     MISSILE_TRAVEL_SECONDS = 0.7
+    # Captured 1087 lifetimes (chunk36:2118/2120, single-sample constants):
+    # 610 firing window 0.6099 s, 609 dash-state 1.1406 s, cast state 2.1992 s.
+    FIRING_STATE_SECONDS = 0.61
+    DASH_STATE_SECONDS = 1.14
+    CAST_STATE_SECONDS = 2.2
     C_CLUSTER_THRESHOLD = 2.0
     C_CLUSTER_RADIUS = 2.0  # Footprint policy, distinct from selection threshold.
     C_LINE_LENGTH = 12.0  # Footprint policy pending volley-actor calibration.
@@ -880,8 +893,22 @@ class SkyeKit(HeroKit):
         self._field_aims: dict[int, SkyeFieldAim] = {}
         self.volley_presentation: Optional[Callable[..., Frames]] = None
         self.additional_targets: Optional[Callable[[], Any]] = None
+        self.allocate_instance: Optional[Callable[[], int]] = None
+        self.get_actor_slot: Optional[Callable[[int], int]] = None
+        self._local_instance: int = 2_000_000
         hero.basic_attack_disabled = False
         hero.revealed_targets = {}
+
+    def _alloc_instance(self) -> int:
+        if self.allocate_instance is not None:
+            return self.allocate_instance()
+        self._local_instance += 1
+        return self._local_instance
+
+    def _actor_slot(self) -> int:
+        if self.get_actor_slot is not None:
+            return self.get_actor_slot(self.hero.eid)
+        return getattr(self.hero, "slot", 0) or 0
 
     @property
     def is_channeling(self):
@@ -983,19 +1010,40 @@ class SkyeKit(HeroKit):
             return None
         return point
 
-    def _cancel_barrage(self):
+    def _cancel_barrage(self, now: float | None = None):
+        barrage = self._barrage
         self._barrage = None
         self.hero.basic_attack_disabled = self._suri is not None
+        # Native9153f0 retains selection through A and does not resend1060
+        # when the player taps that same actor again. Suspend pursuit during
+        # mobile Barrage, then restore the prior attack intent only if no new
+        # order superseded it. This is not a new input/order-version increment.
+        if (barrage is not None and self.hero.is_alive and self.hero.recall_started_at is None
+                and self.hero.target_eid is None
+                and self.hero.order_version == barrage.resume_order_version):
+            self.hero.target_eid = barrage.resume_target_eid
+        if self._lock_status_manager is not None:
+            self._lock_status_manager.remove_presentation(self.hero.eid, f"skye_barrage_{self.hero.eid}", now=now)
 
-    def _cancel_suri(self):
+    def _cancel_suri(self, now: float | None = None):
+        dash = self._suri
         self._suri = None
         self.hero.channeling = False
         self.hero.basic_attack_disabled = self._barrage is not None
+        # Live native selection survives B too. Do not require a second1060
+        # that the native same-target picker deliberately deduplicates.
+        if (dash is not None and self.hero.is_alive and self.hero.recall_started_at is None
+                and self.hero.target_eid is None
+                and self.hero.order_version == dash.resume_order_version):
+            self.hero.target_eid = dash.resume_target_eid
+        if self._lock_status_manager is not None:
+            self._lock_status_manager.remove_presentation(self.hero.eid, f"skye_suri_dash_{self.hero.eid}", now=now)
+            self._lock_status_manager.remove_presentation(self.hero.eid, f"skye_suri_fire_{self.hero.eid}", now=now)
 
     def interrupt_channel(self, now):
         interrupted = super().interrupt_channel(now)
         if self._suri is not None:
-            self._cancel_suri()
+            self._cancel_suri(now=now)
             self.last_interruption_at = now
             interrupted = True
         return interrupted
@@ -1005,7 +1053,9 @@ class SkyeKit(HeroKit):
             return None
         if not math.isfinite(now) or self._barrage is None:
             return []
-        self._cancel_barrage()
+        if status_manager is not None:
+            self._lock_status_manager = status_manager
+        self._cancel_barrage(now=now)
         return [(wire.OP.TARGET_ACQUIRE, ability_wire.build_target_cast(self.hero.eid, None, 1))]
 
     def cast_ability(self, slot, now, *args, **kwargs):
@@ -1014,7 +1064,7 @@ class SkyeKit(HeroKit):
         before = self._sequence
         frames = super().cast_ability(slot, now, *args, **kwargs)
         if self._sequence != before and slot == AbilitySlot.ULT:
-            self._cancel_barrage()
+            self._cancel_barrage(now=now)
             point = self.pending[-1].target_pos
             target = self.locked_target
             direction = None
@@ -1037,42 +1087,88 @@ class SkyeKit(HeroKit):
 
     def _execute(self, pending, now, status_manager, damage_queue, all_heroes, all_minions, damage_callback):
         ability = pending.ability
+        if status_manager is not None:
+            self._lock_status_manager = status_manager
         if ability.slot == AbilitySlot.A:
             self.hero.cancel_recall()
+            resume_target = self.hero.target_eid
             self.hero.clear_target()
-            self._barrage = SkyeBarrage(ability, hitboxes.direction(pending.origin, pending.target_pos),
+            direction = hitboxes.direction(pending.origin, pending.target_pos)
+            self._barrage = SkyeBarrage(ability, direction,
                                         now + self.BARRAGE_INTERVAL, now + self.BARRAGE_SECONDS,
-                                        status_manager.get_interrupt_serial(self.hero.eid) if status_manager else 0)
+                                        status_manager.get_interrupt_serial(self.hero.eid) if status_manager else 0,
+                                        resume_target_eid=resume_target,
+                                        resume_order_version=self.hero.order_version)
             self.hero.basic_attack_disabled = True
+            if status_manager is not None:
+                # Native chunk36:1339-1341 — cast-state 61, then the 1087
+                # Barrage 607 (count 1, word0 = f32 aim angle), drained inline
+                # so the published order matches the capture.
+                status_manager.apply_presentation(f"skye_cast_state_{self.hero.eid}", self.hero.eid,
+                                                  self.hero.eid, 61, now, self.CAST_STATE_SECONDS)
+                status_manager.apply_state_presentation(
+                    f"skye_barrage_{self.hero.eid}", self.hero.eid, self.hero.eid, 607,
+                    now, self.BARRAGE_SECONDS, 1,
+                    (skye_wire.pack_angle_bits(direction), 0, 0, 0))
+                return list(status_manager.drain_frames())
         elif ability.slot == AbilitySlot.B:
-            self._cancel_barrage()
+            self._cancel_barrage(now=now)
+            resume_target = self.hero.target_eid
             self.hero.clear_target()
             origin = self.hero.x, self.hero.y
             destination = (self.hero.navigation.dash_endpoint(origin, pending.target_pos)
                            if self.hero.navigation is not None else pending.target_pos)
+            dash_duration = math.dist(origin, destination) / self.DASH_SPEED
+            self.hero.stop()
             self._suri = SkyeDash(ability, origin, destination,
                                   (self.locked_target.x, self.locked_target.y), now,
-                                  now + math.dist(origin, destination) / self.DASH_SPEED,
+                                  now + dash_duration,
                                   status_manager.get_interrupt_serial(self.hero.eid) if status_manager else 0,
-                                  self.ranks[AbilitySlot.B], self.hero.crystal_power)
-            self.hero.stop()
+                                  self.ranks[AbilitySlot.B], self.hero.crystal_power,
+                                  resume_target_eid=resume_target,
+                                  resume_order_version=self.hero.order_version)
             self.hero.channeling = self.hero.basic_attack_disabled = True
             # The named reset curve is a fraction of the remaining A cooldown.
             reset = .4 + .15 * (self.ranks[AbilitySlot.B] - 1)
             self.cooldowns[AbilitySlot.A] = now + max(0.0, self.cooldowns[AbilitySlot.A] - now) * (1 - reset)
-            self._launch_suri_missiles(now)
+            exec_frames: Frames = []
+            if status_manager is not None:
+                # Native chunk36:2114-2121 order — cast-state 61, the 1087
+                # Firing B Missiles 610 (word0 = f32 dash angle, word1 = f32
+                # dash distance), the first 1038 missile, the 1087 Executing
+                # B Dash 609 (word2 = missiles still to fire), then 1027.
+                dash_angle = hitboxes.direction(origin, destination)
+                dash_distance = math.dist(origin, destination)
+                status_manager.apply_presentation(f"skye_cast_state_{self.hero.eid}", self.hero.eid,
+                                                  self.hero.eid, 61, now, self.CAST_STATE_SECONDS)
+                status_manager.apply_state_presentation(
+                    f"skye_suri_fire_{self.hero.eid}", self.hero.eid, self.hero.eid, 610,
+                    now, self.FIRING_STATE_SECONDS, 1,
+                    (skye_wire.pack_angle_bits(dash_angle),
+                     skye_wire.pack_scalar_bits(dash_distance), 0, 0))
+                exec_frames.extend(status_manager.drain_frames())
+            self._launch_suri_missiles(now, exec_frames)
+            if status_manager is not None:
+                remaining = max(0, 4 - (self._suri.fired if self._suri is not None else 0))
+                status_manager.apply_state_presentation(
+                    f"skye_suri_dash_{self.hero.eid}", self.hero.eid, self.hero.eid, 609,
+                    now, self.DASH_STATE_SECONDS, 1, (0, 0, remaining, 0))
+                exec_frames.extend(status_manager.drain_frames())
+            exec_frames.append((projectile_wire.OP_DASH_TRANSLATION,
+                                projectile_wire.build_dash_translation(self.hero.eid, self.DASH_SPEED, destination)))
             a = self.abilities[AbilitySlot.A]
             if a.tag_inst is not None and self.ranks[AbilitySlot.A]:
-                return [(wire.OP.TIMER_TICK, cooldown_wire.build_ability_timer(
+                exec_frames.append((wire.OP.TIMER_TICK, cooldown_wire.build_ability_timer(
                     self.hero.eid, a.tag_inst, max(0.0, self.cooldowns[AbilitySlot.A] - now),
-                    a.cooldown / (1 + max(0.0, self.hero.cooldown_reduction))))]
+                    a.cooldown / (1 + max(0.0, self.hero.cooldown_reduction)))))
+            return exec_frames
         else:
             aim = self._field_aims.pop(pending.sequence)
             self._missile_fields.append(SkyeMissileField(ability, pending.target_pos, aim.line_direction,
                                                         now, now + aim.duration, aim.crystal_power))
         return []
 
-    def _launch_suri_missiles(self, now):
+    def _launch_suri_missiles(self, now, frames=None):
         dash = self._suri
         while dash is not None and dash.fired < 4:
             fraction = dash.fired / 3
@@ -1083,6 +1179,14 @@ class SkyeKit(HeroKit):
                           for k in (0, 1))
             self._suri_missiles.append(SkyeMissile(launch_at + self.MISSILE_TRAVEL_SECONDS, point,
                 dash.ability, dash.rank, dash.crystal_power, dash.hit_targets))
+            if frames is not None:
+                inst = self._alloc_instance()
+                socket_hash = 0x4578DE4F if (dash.fired % 2 == 0) else 0x3B78CE91
+                curve = 1.0 if (dash.fired % 2 == 0) else -1.0
+                slot = self._actor_slot()
+                frames.append((projectile_wire.OP_CURVED_PROJECTILE,
+                               projectile_wire.build_curved_projectile(
+                                   inst, socket_hash, point, curve, slot, owner_slot=slot)))
             dash.fired += 1
 
     @staticmethod
@@ -1096,31 +1200,40 @@ class SkyeKit(HeroKit):
         recalling = self.hero.recall_started_at is not None
         if not self._valid_lock(now) or recalling:
             self._clear_lock(now)
+        if status_manager is not None:
+            self._lock_status_manager = status_manager
         serial = status_manager.get_interrupt_serial(self.hero.eid) if status_manager else 0
         if self._barrage is not None and (not self.hero.is_alive or recalling
                 or serial != self._barrage.interrupt_serial):
-            self._cancel_barrage()
+            self._cancel_barrage(now=now)
         frames = super().step(now, status_manager, damage_queue, all_heroes, all_minions, damage_callback)
         targets = self._targets(all_heroes, all_minions)
         if self._suri is not None:
             dash = self._suri
             if (not self.hero.is_alive or recalling or serial != dash.interrupt_serial
                     or status_manager is not None and not status_manager.can_move(self.hero.eid, now)):
-                self._cancel_suri()
+                self._cancel_suri(now=now)
             else:
-                self._launch_suri_missiles(now)
+                self._launch_suri_missiles(now, frames)
                 duration = dash.ends_at - dash.started_at
                 fraction = min(1.0, (now - dash.started_at) / duration) if duration > 0 else 1.0
                 frames.extend(self.hero.teleport(*(dash.origin[k] + (dash.destination[k] - dash.origin[k]) * fraction
                                                    for k in (0, 1))))
                 if now + 1e-9 >= dash.ends_at:
-                    self._cancel_suri()
+                    self._cancel_suri(now=now)
         barrage = self._barrage
         if barrage is not None:
             while barrage.next_at <= min(now, barrage.expires_at) + 1e-9:
                 at = barrage.next_at
                 origin = self.hero.x, self.hero.y
                 aim = tuple(origin[k] + barrage.direction[k] for k in (0, 1))
+                if barrage.pulses % self.BARRAGE_PROJECTILE_PULSES == 0:
+                    inst = self._alloc_instance()
+                    slot = self._actor_slot()
+                    frames.append((projectile_wire.OP_BARRAGE_PROJECTILE,
+                                   projectile_wire.build_barrage_projectile(
+                                       inst, origin, barrage.direction, slot, owner_slot=slot)))
+                barrage.pulses += 1
                 disks = [hitboxes.TargetDisk(eid, target.x, target.y, getattr(target, "collision_radius", 0))
                          for eid, target in targets.items() if _alive(target)]
                 ids = hitboxes.line_hits(origin, aim, barrage.ability.range, barrage.ability.radius, disks)
@@ -1141,7 +1254,7 @@ class SkyeKit(HeroKit):
                                 slow, "skye_barrage_slow", native_buff_kind=608)
                 barrage.next_at += self.BARRAGE_INTERVAL
             if now + 1e-9 >= barrage.expires_at:
-                self._cancel_barrage()
+                self._cancel_barrage(now=now)
             else:
                 self.hero.facing = barrage.direction
         from .wave import Minion
@@ -1357,8 +1470,10 @@ def create_hero_kit(hero: HeroMovement, hero_id: int = 924, *, hero_name: Option
     # Catalog order does not encode selection IDs. Old 924=Ringo/245=Catherine
     # aliases were false: 924 is Viola and 245 is Koshka (header stat fingerprints).
     from .hero_balance import HERO_NAMES
+    from .hero_catalog import resolve_hero_name
     source_name = hero_name or HERO_NAMES.get(hero_id)
-    name = {"Sayoc": "Taka", "Hero009": "Krul", "Hero010": "Skaarf", "Hero016": "Rona"}.get(source_name, source_name)
+    canonical = resolve_hero_name(source_name or hero_id)
+    name = {"Sayoc": "Taka", "Hero009": "Krul", "Hero010": "Skaarf", "Hero016": "Rona"}.get(canonical, canonical)
     factories = {"Ringo": create_ringo_kit, "Catherine": create_catherine_kit,
                  "Gwen": create_gwen_kit, "Celeste": create_celeste_kit,
                  "Lance": create_lance_kit, "Taka": create_taka_kit,

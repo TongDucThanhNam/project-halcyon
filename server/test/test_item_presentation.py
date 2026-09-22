@@ -1,4 +1,5 @@
 """Native item presentation follows the authoritative status lifetime."""
+import struct
 import unittest
 
 from server import buff_wire, cooldown_wire, economy, hero_movement, items
@@ -75,7 +76,11 @@ class TestItemPresentation(unittest.TestCase):
                 self.setUp()
                 self.equip(item_key)
                 self.items.activate(1500, 0, 0.0, self.heroes)
-                buffs = self.adds()
+                frames = self.status.drain_frames()
+                self.assertEqual([op for op, _ in frames], [1086] * len(targets) + [1053] * len(targets))
+                buffs = [buff_wire.parse_buff_add(p) for op, p in frames if op == 1086]
+                self.assertEqual([struct.unpack_from('>IfB', p) for op, p in frames if op == 1053],
+                                 [(eid, 250.0, 4) for eid in targets])
                 self.assertEqual([buff.target_eid for buff in buffs], targets)
                 self.assertTrue(all(buff.kind == 268 for buff in buffs))
                 self.assertTrue(all(abs(buff.duration - duration) < 0.001 for buff in buffs))

@@ -1,4 +1,4 @@
-"""Deterministic navigation over the externally owned A001 triangle mesh.
+"""Deterministic navigation over the externally owned Classic baked surface.
 
 Geometry is quantized once to millionths of a world unit. Collision clipping
 uses rational arithmetic; graph costs and A* tie breaks use integers. No game
@@ -20,6 +20,7 @@ from .paths import pc_data_dir
 SCALE = 1_000_000
 CELL = 8 * SCALE
 DEFAULT_A001_PATH = pc_data_dir() / "4B/4BD271EAAC785AEB0C2BCED99515D401"
+DEFAULT_CLASSIC_NAVMESH = pc_data_dir() / "4D/4D562D63B9D0796F7FCC5EC61ADB111B"
 
 
 def fixed(value: float) -> int:
@@ -58,14 +59,60 @@ def _round_ratio(numerator, denominator):
     return quotient + (doubled > denominator or (doubled == denominator and quotient % 2))
 
 
+def _pull_string(origin, goal, portals):
+    """Tighten a triangle corridor using exact integer left/right portals.
+
+    Returns corners excluding origin. The apex advances to a portal endpoint
+    when a side crosses the opposite side; no center/midpoint detour remains.
+    """
+    portals = [(origin, origin), *portals, (goal, goal)]
+    apex = left = right = origin
+    left_index = right_index = 0
+    route, index = [], 1
+    while index < len(portals):
+        new_left, new_right = portals[index]
+        if _cross(apex, right, new_right) >= 0:
+            if apex == right or _cross(apex, left, new_right) < 0:
+                right, right_index = new_right, index
+            else:
+                if left != apex:
+                    route.append(left)
+                apex = left
+                index = left_index + 1
+                left = right = apex
+                right_index = left_index
+                continue
+        if _cross(apex, left, new_left) <= 0:
+            if apex == left or _cross(apex, right, new_left) > 0:
+                left, left_index = new_left, index
+            else:
+                if right != apex:
+                    route.append(right)
+                apex = right
+                index = right_index + 1
+                left = right = apex
+                left_index = right_index
+                continue
+        index += 1
+    if (route[-1] if route else origin) != goal:
+        route.append(goal)
+    return route
+
+
 class NavMesh:
-    def __init__(self, vertices, triangles):
+    def __init__(self, vertices, triangles, *, heights=None):
         self.vertices = tuple(_point(v) for v in vertices)
+        vertex_heights = (tuple(fixed(h) for h in heights) if heights is not None
+                          else (0,) * len(self.vertices))
+        if len(vertex_heights) != len(self.vertices):
+            raise ValueError('navmesh height count differs from vertex count')
         self.triangles = []
+        self._triangle_heights = []
         self.centers = []
         self._bounds = []
         self._halfplanes = []
         self.adjacency = defaultdict(dict)
+        self._portals = {}
         self._cells = defaultdict(set)
         edges = defaultdict(list)
         for indices in triangles:
@@ -78,6 +125,8 @@ class NavMesh:
             tri = (a, b, c) if area > 0 else (a, c, b)
             index = len(self.triangles)
             self.triangles.append(tri)
+            ordered = indices if area > 0 else (indices[0], indices[2], indices[1])
+            self._triangle_heights.append(tuple(vertex_heights[i] for i in ordered))
             self.centers.append(tuple(sum(p[k] for p in tri) // 3 for k in (0, 1)))
             self._bounds.append((min(p[0] for p in tri), min(p[1] for p in tri),
                                  max(p[0] for p in tri), max(p[1] for p in tri)))
@@ -102,10 +151,24 @@ class NavMesh:
                 portal = ((u[0] + v[0]) // 2, (u[1] + v[1]) // 2)
                 self.adjacency[left][right] = portal
                 self.adjacency[right][left] = portal
+                # Triangles are CCW. Exiting across directed edge a->b,
+                # endpoint b is on the traveller's left. This avoids using
+                # rounded centers to guess a portal's orientation.
+                tri = self.triangles[left]
+                a, b = next((a, b) for a, b in zip(tri, tri[1:] + tri[:1])
+                            if {a, b} == {u, v})
+                self._portals[left, right] = b, a
+                self._portals[right, left] = a, b
 
     @classmethod
     def from_file(cls, path):
         data = Path(path).read_bytes()
+        if data[40:44] == b'VAND':
+            from .navigation_store import read_detour_store
+            points, triangles, heights, metadata = read_detour_store(data)
+            mesh = cls(points, triangles, heights=heights)
+            mesh.source_metadata = metadata
+            return mesh
         if data[:4] == b"RSC0":
             try:
                 data = data[data.index(0, 38) + 1:]
@@ -121,12 +184,27 @@ class NavMesh:
             raise ValueError("invalid navmesh header")
         if 134 + size + count * width != len(data):
             raise ValueError("navmesh byte accounting mismatch")
-        points = []
+        points, heights = [], []
         for offset in range(134, 134 + size, 24):
-            x, _, z = struct.unpack_from("<3f", data, offset)
+            x, height, z = struct.unpack_from("<3f", data, offset)
             points.append((x, z))
+            heights.append(height)
         indices = struct.unpack_from("<" + ("B" if width == 1 else "H") * count, data, 134 + size)
-        return cls(points, [indices[i:i + 3] for i in range(0, count, 3)])
+        return cls(points, [indices[i:i + 3] for i in range(0, count, 3)], heights=heights)
+
+    def height_at(self, point):
+        """Owned mesh surface height for explicit relocation, not 2D path cost.
+
+        Barycentric weights use the same quantized triangle geometry. This
+        does not invent a model/feet offset or change authoritative movement.
+        """
+        p = _point(point)
+        index = self._locate(p)
+        if index is None:
+            raise ValueError('height query must be on the navigation mesh')
+        a, b, c = self.triangles[index]
+        ha, hb, hc = self._triangle_heights[index]
+        return (_cross(b, c, p) * ha + _cross(c, a, p) * hb + _cross(a, b, p) * hc) / (_cross(a, b, c) * SCALE)
 
     def _candidates(self, a, b=None):
         b = a if b is None else b
@@ -244,7 +322,7 @@ class NavMesh:
         return bool(intervals and intervals[0][0] == 0 and intervals[0][2] == intervals[0][3])
 
     def find_path(self, start, end):
-        """A* triangle corridor plus visibility smoothing, excluding start.
+        """A* triangle corridor plus integer funnel, excluding start.
 
         Off-mesh clicks are projected to a walkable boundary. A disconnected
         destination returns no route; an invalid starting position never permits
@@ -285,26 +363,41 @@ class NavMesh:
         while corridor[-1] != first:
             corridor.append(previous[corridor[-1]])
         corridor.reverse()
-        points = [origin, self.centers[first]]
-        for left, right in zip(corridor, corridor[1:]):
-            # A center-to-center edge can cut across a concave shared boundary.
-            # Passing through the exact shared portal preserves both triangles.
-            points.extend((self.adjacency[left][right], self.centers[right]))
-        points.append(goal)
-        route, current = [], 0
-        while current < len(points) - 1:
-            # Extend visible corridor prefixes once. Searching backward from the
-            # destination at every corner is quadratic on a long jungle route.
-            following = current + 1
-            while following + 1 < len(points) and self.segment_walkable(_world(points[current]), _world(points[following + 1])):
-                following += 1
-            if not self.segment_walkable(_world(points[current]), _world(points[following])):
-                # Fractional portal rounding must never admit an unsafe segment.
-                return []
-            if points[current] != points[following]:
-                route.append(_world(points[following]))
-            current = following
-        return route
+        corners = _pull_string(origin, goal,
+                               [self._portals[a, b] for a, b in zip(corridor, corridor[1:])])
+        # Keep the existing independent collision guard: a route must not cut
+        # rock even if unexpected/degenerate corridor geometry is encountered.
+        if any(not self.segment_walkable(_world(a), _world(b))
+               for a, b in zip([origin] + corners, corners)):
+            return []
+        return [_world(point) for point in corners]
+
+    def clamp_walk_step(self, start, proposed, target, budget_fixed):
+        """Repair coordinate rounding at a visible diagonal wall, not a wall hit.
+
+        Component-wise integer truncation may fall outside a walkable edge.
+        Search only the two-microunit neighbourhood, within the same distance
+        budget, and require both new segments to remain walkable. Forced
+        displacements continue to use clamp_segment with no such adjustment.
+        """
+        if self.segment_walkable(start, proposed) and self.segment_walkable(proposed, target):
+            return proposed
+        if self.segment_walkable(start, target):
+            a, p, goal = _point(start), _point(proposed), _point(target)
+            candidates = []
+            old_distance = sum((goal[k] - a[k]) ** 2 for k in (0, 1))
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    q = p[0] + dx, p[1] + dy
+                    travelled = sum((q[k] - a[k]) ** 2 for k in (0, 1))
+                    remaining = sum((goal[k] - q[k]) ** 2 for k in (0, 1))
+                    if 0 < travelled <= budget_fixed ** 2 and remaining < old_distance:
+                        candidates.append((dx * dx + dy * dy, remaining, q))
+            for _, _, q in sorted(candidates):
+                point = _world(q)
+                if self.segment_walkable(start, point) and self.segment_walkable(point, target):
+                    return point
+        return self.clamp_segment(start, proposed)
 
     def clamp_segment(self, start, end):
         """Stop a forced displacement at the first wall; never project past it."""
@@ -357,7 +450,13 @@ class NavMesh:
 
 def load_halcyon_navmesh(path=None):
     """Load external geometry or fail explicitly; never silently disable walls."""
-    selected = Path(path or os.environ.get("HALCYON_NAVMESH", DEFAULT_A001_PATH))
+    selected = Path(path or os.environ.get("HALCYON_NAVMESH", DEFAULT_CLASSIC_NAVMESH))
     if not selected.is_file():
-        raise FileNotFoundError(f"A001 navmesh unavailable; set HALCYON_NAVMESH to the external store record: {selected}")
-    return NavMesh.from_file(selected)
+        raise FileNotFoundError(f"Classic navmesh unavailable; set HALCYON_NAVMESH to the external store record: {selected}")
+    mesh = NavMesh.from_file(selected)
+    library = os.environ.get('HALCYON_NATIVE_STEERING_LIBRARY')
+    if library:
+        from .detour_query import DetourRouteQuery
+        from .native_steering import NativeSteeringMesh
+        return NativeSteeringMesh(mesh,DetourRouteQuery(library,selected))
+    return mesh

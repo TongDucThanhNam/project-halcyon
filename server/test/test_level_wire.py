@@ -90,6 +90,7 @@ class TestEconomyLevelPresentation(unittest.TestCase):
     def test_multi_level_award_emits_each_requirement_and_growth_once(self):
         base_hp = self.hero.max_hp
         self.hero.hp -= 100.0
+        native_fraction = self.hero.hp / base_hp
         frames = self.manager.reward_hero_bounty(1500, 1515, self.heroes, xp=500.0)
         self.assertEqual([opcode for opcode, _ in frames], [1053, 1053] + [1076, 1052] * 5)
         self.assertEqual([level_wire.parse_xp_requirement(payload)[1] for opcode, payload in frames
@@ -97,7 +98,7 @@ class TestEconomyLevelPresentation(unittest.TestCase):
         self.assertEqual((self.player.level, self.player.ability_points, self.hero.level), (6, 6, 6))
         self.assertEqual(self.xp_deltas(frames), [500])
         self.assertAlmostEqual(self.hero.max_hp - base_hp, 5 * getattr(self.hero, "hp_per_level", economy.HP_PER_LEVEL))
-        self.assertAlmostEqual(self.hero.max_hp - self.hero.hp, 100.0)
+        self.assertAlmostEqual(self.hero.hp / self.hero.max_hp, native_fraction)
         before = self.hero.hp
         self.player.apply_to_hero(self.hero)
         self.assertEqual(self.hero.hp, before)
@@ -112,6 +113,31 @@ class TestEconomyLevelPresentation(unittest.TestCase):
         self.assertFalse(self.hero.is_alive)
         self.assertEqual(sum(opcode == 1076 for opcode, _ in frames), 1)
         self.assertFalse(any(opcode == 1053 and payload[8] == 0 for opcode, payload in frames))
+
+    def test_wounded_skye_level_preserves_native_hp_and_energy_fractions(self):
+        # Live level 5 -> 6 discrepancy: native +84.00535 HP, server +126.55.
+        # ELF c03f24 -> c56aa4 scales each growth by current/max resource.
+        self.hero.base_max_hp = 708.0
+        self.hero.hp_per_level = 126.55
+        self.hero.base_max_energy = 380.0
+        self.hero.energy_per_level = 32.0
+        self.player.add_xp(368)
+        self.player.apply_to_hero(self.hero)
+        self.hero.hp, self.hero.energy = 806.0, 200.0
+        frames = self.manager.reward_minion_bounty(1500, self.heroes, gold=0, xp=132)
+        self.assertAlmostEqual(self.hero.hp, 806 * 1340.75 / 1214.2)
+        self.assertAlmostEqual(self.hero.energy, 200 * 540 / 508)
+        self.assertFalse(any(op == 1053 and p[8] in (0, 2) for op, p in frames))
+
+    def test_level_resource_fraction_includes_existing_item_maximum(self):
+        self.player.inventory[0] = economy.ITEMS[467]  # Oakheart: +150 HP
+        self.player.apply_to_hero(self.hero)
+        maximum = self.hero.max_hp
+        self.hero.hp = maximum * .4
+        self.hero.energy = 0
+        self.manager.reward_minion_bounty(1500, self.heroes, gold=0, xp=152)
+        self.assertAlmostEqual(self.hero.hp / self.hero.max_hp, .4)
+        self.assertEqual(self.hero.energy, 0)
 
 
 if __name__ == "__main__":

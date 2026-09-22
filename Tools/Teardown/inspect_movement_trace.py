@@ -1,14 +1,17 @@
-"""Read-only movement geometry checks for an existing local JSONL wire trace.
+"""Read-only movement checks for existing wire and optional native client data.
 
 Loads the operator's external A001 mesh and emits numeric structure only.
-The report checks sampled server positions, not rendered client motion or
-every fixed tick between samples. No packets, QA requests or files are sent.
+Wire positions are not client positions or every fixed tick between samples.
+--client-run joins logical native state, never a model/render transform.
+No packets, QA requests or files are sent.
 """
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import json
 import math
+import statistics
 from pathlib import Path
 import struct
 import sys
@@ -173,6 +176,175 @@ def inspect(rows, mesh, eid, request_line, seconds=10.0):
                        "A stale pre-request position makes the calculated route diagnostic rather than exact."]}
 
 
+def timing_report(rows, eid, slot, seconds=10.0):
+    """Keep capture-side provenance; never infer client consumption or ticks."""
+    sources = {r.get('time_source', 'server_trace') for r in rows}
+    if len(sources) > 1:
+        raise ValueError('mixed wire timestamp sources')
+    source = next(iter(sources), 'server_trace')
+    timing_limits = {
+        'server_trace': 'Wire timestamps measure server observations, not network RTT, simulation ticks, or client positions.',
+        'client-interface capture + measured host offset':
+            'Wire timestamps measure client-interface request/response observations, not server receipt, pure network RTT, or client consumption.',
+    }
+    if source not in timing_limits:
+        raise ValueError('unknown wire timestamp source')
+    results = []
+    interruptions = {1012, 1041, 1042, 1060, 1096, 1098, 1102}
+    for index, request in enumerate(rows):
+        if request['direction'] != 'c2s' or request['opcode'] != 1012:
+            continue
+        requested = movement(request['decoded'])
+        ack, samples, end = None, [], 'trace_end'
+        end_time = min(request['time'] + seconds, rows[-1]['time'])
+        for row in rows[index + 1:]:
+            elapsed = row['time'] - request['time']
+            if elapsed > seconds:
+                end = 'time_window'
+                break
+            if row['direction'] == 'c2s' and row['opcode'] in interruptions:
+                end = 'next_client_intent'
+                end_time = row['time']
+                break
+            if row['direction'] != 's2c':
+                continue
+            payload = row['decoded']
+            if row['opcode'] == 1016 and len(payload) == 14 and payload[0] == slot:
+                target = struct.unpack_from('>ff', payload, 1)
+                if not all(math.isfinite(x) for x in target):
+                    raise ValueError('nonfinite accepted destination')
+                if ack is None:
+                    ack = {'delay_s': elapsed, 'target': target, 'line': row['line']}
+            elif row['opcode'] == 1070:
+                actor, point = position(payload)
+                if actor == eid:
+                    samples.append({'elapsed_s': elapsed, 'position': point,
+                                    'time': row['time'], 'line': row['line']})
+        gaps = [b['elapsed_s'] - a['elapsed_s'] for a, b in zip(samples, samples[1:])]
+        arrival = next((s['elapsed_s'] for s in samples
+                        if ack and s['elapsed_s'] >= ack['delay_s']
+                        and math.dist(s['position'], ack['target']) <= 0.0001), None)
+        results.append({'request_line': request['line'], 'request_time': request['time'],
+                        'end_time': end_time, 'requested_target': requested,
+                        'ack': ack, 'sample_count': len(samples),
+                        'position_gaps_s': gaps, 'arrival_after_input_s': arrival,
+                        'requested_to_accepted_distance': math.dist(requested, ack['target']) if ack else None,
+                        'end_reason': end, 'samples': samples})
+    return {'eid': eid, 'slot': slot, 'requests': results, 'time_source': source,
+            'limits': ['Slot/EID identity is supplied by the caller, not inferred.',
+                       timing_limits[source],
+                       'Sparse corrections and duplicate stop samples are intentional; gaps alone do not establish stalls.',
+                       'No acknowledgement means unobserved, not proven rejection.']}
+
+
+def distribution(values):
+    values = sorted(values)
+    if not values:
+        return {'count': 0}
+    return {'count': len(values), 'min': values[0], 'median': statistics.median(values),
+            'p95': values[math.ceil(.95 * len(values)) - 1], 'max': values[-1]}
+
+
+def correlate_ticks(report, path, match_id=None):
+    """Join server publication to adjacent authoritative samples, never client state.
+
+    Tick wall_time is sampled AFTER advance_simulation, whereas wire positions
+    are traced before sendall DURING the tick or an input handler. Thus either
+    adjacent state can legitimately match a position; no interpolation is used.
+    """
+    if report.get('time_source', 'server_trace') != 'server_trace':
+        raise ValueError('server tick correlation requires server-side wire observations')
+    requests = report['requests']
+    if not requests:
+        raise ValueError('no movement requests to correlate')
+    start, end = requests[0]['request_time'], requests[-1]['end_time']
+    ticks, incomplete = [], False
+    # Windows launchers may emit locale-encoded prose around the ASCII JSON
+    # telemetry. Decode only the selected record; never replace bad JSON bytes.
+    marker = b'[movement-tick] '
+    with path.open('rb') as source:
+        for number, line in enumerate(source, 1):
+            if marker not in line:
+                continue
+            if not line.endswith(b'\n'):
+                incomplete = True
+                continue
+            try:
+                tick = json.loads(line.split(marker, 1)[1])
+                if not math.isfinite(tick['wall_time']):
+                    raise ValueError('nonfinite tick timestamp')
+                if start - 1 <= tick['wall_time'] <= end + 1:
+                    if match_id is None or tick['match_id'] == match_id:
+                        ticks.append(tick)
+            except (ValueError, KeyError, TypeError) as error:
+                raise ValueError(f'invalid movement tick at log line {number}: {error}') from error
+    matches = {t['match_id'] for t in ticks}
+    if len(matches) != 1:
+        raise ValueError(f'expected one match in wire time window, found {sorted(matches)}; select --match-id')
+    # Do not silently combine restarts with a reused match UUID or sort away
+    # a wall-clock discontinuity. Either would make temporal joins unreliable.
+    for a, b in zip(ticks, ticks[1:]):
+        if (b['tick'] <= a['tick'] or b['wall_time'] <= a['wall_time']
+                or b['started_monotonic'] <= a['started_monotonic']):
+            raise ValueError('tick reset/overlap or clock reversal in selected window; use a single session log')
+    states = []
+    for tick in ticks:
+        heroes = [h for h in tick['heroes'] if h['eid'] == report['eid']]
+        if len(heroes) != 1:
+            raise ValueError(f"tick {tick['tick']} does not uniquely identify EID {report['eid']}")
+        states.append(heroes[0])
+    times = [t['wall_time'] for t in ticks]
+    publication_matches, publication_unmatched, publication_unbracketed = [], [], []
+    for request in requests:
+        for sample in request['samples']:
+            after = bisect_left(times, sample['time'])
+            if after == 0 or after == len(ticks):
+                publication_unbracketed.append(sample['line'])
+                continue
+            if ticks[after]['tick'] != ticks[after - 1]['tick'] + 1:
+                publication_unbracketed.append(sample['line'])
+                continue
+            encoded = struct.pack('>ff', *sample['position'])
+            matching = [ticks[i]['tick'] for i in (after - 1, after)
+                        if struct.pack('>ff', *(v / 1_000_000 for v in states[i]['position_fixed'])) == encoded]
+            if matching:
+                publication_matches.append({'line': sample['line'], 'ticks': matching})
+            else:
+                publication_unmatched.append(sample['line'])
+    windows = []
+    for request in requests:
+        begin = request['request_time'] + (request['ack']['delay_s'] if request['ack'] else 0)
+        indices = [i for i, t in enumerate(ticks) if begin <= t['wall_time'] < request['end_time']]
+        pairs = [(a, b) for a, b in zip(indices, indices[1:])
+                 if ticks[b]['tick'] == ticks[a]['tick'] + 1]
+        moving_pairs = [(a, b) for a, b in pairs if states[a]['moving']
+                        and states[a]['order_version'] == states[b]['order_version']]
+        steps = [math.dist(states[a]['position_fixed'], states[b]['position_fixed']) / 1_000_000
+                 for a, b in moving_pairs]
+        windows.append({
+            'request_line': request['request_line'], 'tick_count': len(indices),
+            'late_ms': distribution(ticks[i]['late_ms'] for i in indices),
+            'work_ms': distribution(ticks[i]['work_ms'] for i in indices),
+            'tick_start_gap_ms': distribution((ticks[b]['started_monotonic'] - ticks[a]['started_monotonic']) * 1000
+                                               for a, b in pairs),
+            'moving_step_units': distribution(steps),
+            'zero_steps_while_moving': sum(step == 0 for step in steps),
+            'order_versions': sorted({states[i]['order_version'] for i in indices}),
+        })
+    offsets = [t['wall_time'] - t['work_ms'] / 1000 - t['started_monotonic'] for t in ticks]
+    return {'match_id': next(iter(matches)), 'incomplete_trailing_tick': incomplete,
+            'missing_tick_count': sum(b['tick'] - a['tick'] - 1 for a, b in zip(ticks, ticks[1:])),
+            'clock_offset_spread_ms': (max(offsets) - min(offsets)) * 1000,
+            'requests': windows,
+            'publication': {'matched': publication_matches, 'unmatched_lines': publication_unmatched,
+                            'unbracketed_lines': publication_unbracketed},
+            'limits': ['Tick wall_time is post-work; work_ms excludes telemetry serialization/log I/O.',
+                       'Lateness and start gaps include earlier logging/OS costs; probes are not free.',
+                       'Exact float32 matches relate two SERVER observations, not client receipt/consumption or position.',
+                       'Unmatched positions require investigation; other within-tick effects can change state.',
+                       'No interpolation across missing ticks, retargets, resets, or clock reversals.']}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--navmesh", type=Path)
@@ -185,6 +357,14 @@ def main(argv=None):
     trace.add_argument("--connection", type=int)
     trace.add_argument("--eid", type=int, default=1500)
     trace.add_argument("--request-line", type=int)
+    trace.add_argument("--timing", action="store_true", help="data-only ack/position timing; no mesh required")
+    trace.add_argument('--client-run', type=Path, help='join an existing successful nonvisual movement run (offline)')
+    trace.add_argument('--client-position', choices=('logical', 'model'), default='logical',
+                       help='select qualified logical entity or root model matrix translation')
+    trace.add_argument('--straight-walk', action='append', default=[], help='explicit straight-leg label for backward-motion measurement; repeatable')
+    trace.add_argument("--tick-log", type=Path, help="correlate --timing with movement-tick server log")
+    trace.add_argument("--match-id", help="match identity in --tick-log (required if ambiguous)")
+    trace.add_argument("--slot", type=int, default=0, help="verified owner movement slot for timing")
     trace.add_argument("--seconds", type=float, default=10.0)
     trace.add_argument("--limit", type=int, default=20, help="last N request summaries when no line is selected")
     args = parser.parse_args(argv)
@@ -194,9 +374,25 @@ def main(argv=None):
         else:
             if not math.isfinite(args.seconds) or not 0 < args.seconds <= 120 or args.limit < 1:
                 raise ValueError("seconds must be within (0,120] and limit positive")
+            if (args.tick_log and not args.timing) or (args.match_id and not args.tick_log):
+                raise ValueError('--tick-log requires --timing; --match-id requires --tick-log')
+            if (args.client_run and not args.timing) or (args.straight_walk and not args.client_run):
+                raise ValueError('--client-run requires --timing; --straight-walk requires --client-run')
+            if args.client_position != 'logical' and not args.client_run:
+                raise ValueError('--client-position model requires --client-run')
             rows, connection, incomplete = read_rows(args.path, args.connection)
             report = {"connection": connection, "incomplete_trailing_line": incomplete}
-            if args.request_line is None:
+            if args.timing:
+                if not 0 <= args.slot <= 255:
+                    raise ValueError('slot must fit one byte')
+                report.update(timing_report(rows, args.eid, args.slot, args.seconds))
+                if args.client_run:
+                    from Tools.Teardown.movement_client_report import client_report
+                    report['client'] = client_report(rows, args.client_run, connection, args.eid, args.slot,
+                                                    args.straight_walk, position_source=args.client_position)
+                if args.tick_log:
+                    report['ticks'] = correlate_ticks(report, args.tick_log, args.match_id)
+            elif args.request_line is None:
                 report["requests"] = list_requests(rows, args.eid)[-args.limit:]
             else:
                 report.update(inspect(rows, load_halcyon_navmesh(args.navmesh), args.eid,

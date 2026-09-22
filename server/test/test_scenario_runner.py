@@ -297,6 +297,10 @@ class TestSourcePinning(unittest.TestCase):
         self.assertIn("Tools/scenario_client.py", manifest)
         self.assertIn("Tools/verify_sandbox.py", manifest)
         self.assertIn("server/match_server.py", manifest)
+        self.assertIn("server/platform/local_stack.py",manifest)
+        self.assertIn("Tools/Teardown/detour_route_oracle.cpp",manifest)
+        self.assertIn("Tools/Teardown/client_movement_observer.js",manifest)
+        self.assertIn("Tools/classic_client.py",manifest)
 
     def test_pin_snapshot_is_complete_and_stable(self):
         base = Path(tempfile.mkdtemp(prefix="halcyon-test-pin-"))
@@ -317,7 +321,7 @@ class TestRegistryBasics(unittest.TestCase):
     def test_all_scenarios_registered(self):
         self.assertEqual(set(SCENARIO_TABLE),
                          {"skye-a", "skye-b", "skye-c", "skye-lock-neg",
-                          "minion-push", "minion-wave-regression"})
+                          "minion-push", "minion-wave-regression", "healing-flask"})
 
     def test_worker_flag_dispatches_to_worker_not_orchestration(self):
         """Regression: --worker must reach run_worker; the draft re-entered

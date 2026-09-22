@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
+import math
 from pathlib import Path
 import struct
 import sys
@@ -16,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from server import item_input, vgdecode, wire
+from server import cooldown_wire, item_input, vgdecode, wire
 
 
 @dataclass(frozen=True)
@@ -85,7 +87,7 @@ def read_capture(path: Path, match_uuid: str, port: int) -> dict[str, list[Captu
 def inspect_uses(frames: dict[str, list[CapturedFrame]], eid: int) -> list[dict]:
     uses = []
     used_echoes = set()
-    for request in frames["c2s"]:
+    for request_index, request in enumerate(frames["c2s"]):
         if request.opcode not in (item_input.ITEM_USE, item_input.GROUND_ITEM_USE):
             continue
         intent = item_input.parse_item_input(request.opcode, request.payload)
@@ -103,6 +105,8 @@ def inspect_uses(frames: dict[str, list[CapturedFrame]], eid: int) -> list[dict]
                  and struct.unpack_from(">I", row.payload)[0] == eid
                  and struct.unpack_from(">H", row.payload, 14)[0] in (259, 268, 270, 278, 279, 280, 281)]
         uses.append({"time": round(request.time, 6), "opcode": request.opcode,
+                     "c2s_index": request_index,
+                     "echo_s2c_index": echoes[0][0] if echoes else None,
                      "instance": intent.instance_id, "item": native_item,
                      "position": intent.target_position,
                      "echo_time": round(echo.time, 6) if echo else None,
@@ -111,14 +115,112 @@ def inspect_uses(frames: dict[str, list[CapturedFrame]], eid: int) -> list[dict]
     return uses
 
 
+def inspect_contract(frames: dict[str, list[CapturedFrame]], eid: int,
+                     item_id: int = 457, window: float = 6.0) -> dict:
+    """Numeric observations, not a causal rule oracle or a visual verdict.
+
+    Keep TCP frame order even when capture timestamps are equal or reordered.
+    Include the one-second baseline and all target buffs/damage as confounders.
+    Acknowledgements alone never qualify an operation as mechanically accepted.
+    """
+    if not math.isfinite(window) or window <= 0:
+        raise ValueError("contract window must be finite and positive")
+    attempts = []
+    for use in inspect_uses(frames, eid):
+        if use["item"] != item_id:
+            continue
+        start = frames["c2s"][use["c2s_index"]].time
+        events = []
+        for index, row in enumerate(frames["s2c"]):
+            if not start - 1 <= row.time <= start + window:
+                continue
+            p = row.payload
+            if len(p) < 4 or struct.unpack_from(">I", p)[0] != eid:
+                continue
+            event = {"s2c_index": index, "time": round(row.time, 6),
+                     "relative_time": round(row.time - start, 6), "opcode": row.opcode}
+            if row.opcode == 1053 and len(p) == 14:
+                event.update(kind="resource_delta", resource_type=p[8],
+                             amount=struct.unpack_from(">f", p, 4)[0])
+            elif row.opcode == 1054 and len(p) >= 12:
+                event.update(kind="combat_delta", source_eid=struct.unpack_from(">I", p, 4)[0],
+                             amount=struct.unpack_from(">f", p, 8)[0])
+            elif row.opcode in (1086, 1087) and len(p) == (22 if row.opcode == 1086 else 38):
+                _, source, duration, instance, kind = struct.unpack_from(">IIeIH", p)
+                event.update(kind="buff_add" if row.opcode == 1086 else "buff_state",
+                             source_eid=source, duration=duration, instance=instance, buff_kind=kind)
+            elif row.opcode == 1093 and len(p) == 14:
+                event.update(kind="buff_cancel", instance=struct.unpack_from(">I", p, 4)[0])
+            elif row.opcode == 1162 and len(p) == 22:
+                timer = cooldown_wire.parse_timer_tick(p)
+                event.update(kind="timer", tag=timer.tag, remaining=timer.remaining,
+                             duration=timer.duration)
+            else:
+                continue
+            events.append(event)
+        after = [event for event in events if event["relative_time"] >= 0]
+        heals = [event for event in after if event["kind"] == "combat_delta"
+                 and event["source_eid"] == eid and event["amount"] > 0]
+        resources = {}
+        for event in after:
+            if event["kind"] == "resource_delta":
+                resources.setdefault(str(event["resource_type"]), []).append(event["amount"])
+        attempts.append({**use, "input_stage": "OBSERVED",
+                         "acknowledgement_stage": "OBSERVED" if use["echo_time"] is not None
+                         else "UNACKNOWLEDGED_REASON_UNKNOWN",
+                         "mechanical_acceptance": "NOT_ESTABLISHED_BY_CORRELATION",
+                         "events": events,
+                         "observed_summary": {
+                             "positive_self_combat_count": len(heals),
+                             "positive_self_combat_sum": sum(event["amount"] for event in heals),
+                             "positive_self_combat_values": sorted(set(event["amount"] for event in heals)),
+                             "positive_self_combat_intervals": [round(b["time"] - a["time"], 6)
+                                                                for a, b in zip(heals, heals[1:])],
+                             "resource_delta_values": resources}})
+    return {"schema": "halcyon.item-contract.v1", "eid": eid, "item_id": item_id,
+            "window_seconds": {"before": 1.0, "after": window},
+            "attempts": attempts, "visual_acceptance": "UNVERIFIED",
+            "simulation_fidelity": "UNVERIFIED",
+            "limitations": [
+                "Times are packet-capture arrival times, not authoritative simulation ticks.",
+                "Largest TCP flow per direction is selected; decoder resynchronizes on unrecognized frames.",
+                "Nearby buffs and deltas are observations, not exclusive causal attribution to this input.",
+                "Initial HP, energy, level, build version, caps and other active rules are not reconstructed.",
+                "No replay is emitted: these selected events omit spawn and other renderer dependencies.",
+                "Resource type 4 is retained numerically; shield behavior needs independent validation."]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pcap", type=Path)
     parser.add_argument("--match", required=True, help="captured match UUID")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--eid", type=int, default=1500)
+    parser.add_argument("--contract", action="store_true", help="report ordered mechanic observations")
+    parser.add_argument("--item", type=int, default=457, help="native item ID for contract mode")
+    parser.add_argument("--window", type=float, default=6.0, help="seconds after input in contract mode")
+    parser.add_argument("--output", type=Path, help="new JSON evidence file outside the checkout")
     args = parser.parse_args()
-    print(json.dumps(inspect_uses(read_capture(args.pcap, args.match, args.port), args.eid), indent=2))
+    if args.output and args.output.resolve().is_relative_to(ROOT):
+        parser.error("new QA evidence must be outside the checkout")
+    frames = read_capture(args.pcap, args.match, args.port)
+    report = (inspect_contract(frames, args.eid, args.item, args.window) if args.contract
+              else inspect_uses(frames, args.eid))
+    if args.contract:
+        report["provenance"] = {
+            "capture_path": str(args.pcap.resolve()),
+            "capture_sha256": hashlib.sha256(args.pcap.read_bytes()).hexdigest(),
+            "inspector_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "match_uuid": args.match, "port": args.port,
+            "client_version": "UNKNOWN_FROM_THIS_CAPTURE",
+            "frame_counts": {direction: len(rows) for direction, rows in frames.items()}}
+    rendered = json.dumps(report, indent=2, allow_nan=False)
+    if args.output:
+        with args.output.open("x", encoding="utf-8") as output:
+            output.write(rendered + "\n")
+        print(args.output.resolve())
+    else:
+        print(rendered)
     return 0
 
 

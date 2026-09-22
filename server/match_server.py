@@ -77,6 +77,7 @@ if __package__ in (None, ""):
     import recall_wire
     import level_wire
     import vision
+    import scoreboard
     from sandbox_qa import SandboxQA
     from actor_slots import ActorSlots
     from paths import stack_dir
@@ -95,6 +96,7 @@ else:
     from . import bot_ai
     from . import combat, items, navigation, hero_balance, match_end, attack_wire, projectile_wire, skye_wire, cooldown_wire
     from . import item_input, lifecycle_wire, entity_spawn, ability_wire, shop_wire, recall_wire, level_wire, vision
+    from . import scoreboard
     from .sandbox_qa import SandboxQA
     from .actor_slots import ActorSlots
     from .paths import stack_dir
@@ -111,6 +113,16 @@ build_snapshot = roster.build_snapshot
 SNAPSHOT_INTERVAL = 0.4           # pick phase (~2.5 Hz, corpus)
 LOCK_TICK = 0.1                   # lock countdown ticks at ~10 Hz (corpus)
 LOCK_BURST = 8                    # identical 1113 frames at countdown start
+# Retain the existing short owner burst for attack pursuit; that path was
+# not part of the September 22 client walking experiment.
+LOCAL_POSITION_BURST_SAMPLES = 5
+# Client-state A/B: five periodic samples caused backward endpoint motion
+# on six short walks; withholding them removed it on six paired walks.
+# Normal accepted-walk anchors also invoke the native additive half-second
+# correction, which can outlive walking and overshoot the goal. The candidate
+# policy withholds those from the owner only; explicit stops, forced movement,
+# pursuit, reconnect and other subscribers retain their corrections.
+LOCAL_WALK_POSITION_BURST_SAMPLES = 0
 PICK_COUNTDOWN_START = 300.0
 LOCK_COUNTDOWN = 7.0
 COMMIT_FALLBACK = 1.0             # s without c2s 1119 before locking anyway
@@ -172,8 +184,20 @@ class SnapshotStream(threading.Thread):
         self.conn = conn
         self.players = players
         self.match_id = match_id
+        # Freeze the opt-in modifier for this match, not each simulation tick.
+        self.sandbox_same_hero = os.environ.get("HALCYON_SAME_HERO") == "1"
         self._send = send
         self.log = log
+        self.trace_movement_ticks = os.environ.get("HALCYON_TRACE_MOVEMENT") == "1"
+        # Diagnostic baseline only, for measured owner correction A/B trials.
+        self.owner_walk_anchors = os.environ.get("HALCYON_OWNER_WALK_ANCHORS") == "1"
+        # Default-off until native pursuit transitions have been qualified.
+        #1070 only smooths a correction; it does not start native navigation.
+        self.publish_pursuit_intent = os.environ.get("HALCYON_PUBLISH_PURSUIT_INTENT") == "1"
+        self.native_skye_control = os.environ.get("HALCYON_NATIVE_SKYE_CONTROL") == "1"
+        self.publish_skye_speed = os.environ.get("HALCYON_PUBLISH_SKYE_SPEED") == "1"
+        self._last_skye_speed_bonus = {}
+        self._last_pursuit_intent = {}
         self._stop_event = threading.Event()
         self._state_lock = threading.RLock()
         self.events = queue.Queue()
@@ -197,6 +221,7 @@ class SnapshotStream(threading.Thread):
         self._resource_catchup = {}
         self._last_death_frames = {}
         self.hero_sims = {}
+        self.scoreboard = scoreboard.Scoreboard(p.eid for p in players)
         self.navigation = _map_navigation() if navigation_mesh is None else navigation_mesh
         self.actor_slots = ActorSlots()
         for player in players:
@@ -229,6 +254,12 @@ class SnapshotStream(threading.Thread):
         # burst per order and then goes quiet, mirroring the capture.
         self.sparse_1070 = bool(os.environ.get("HALCYON_SPARSE_1070"))
         self.sparse_budget: dict[int, int] = {}
+        # Remaining corpus-style position-burst samples per hero eid. Armed
+        # on each accepted move/attack order; consumed by the periodic 5 Hz
+        # locomotion stream. When exhausted and the hero's owner is live,
+        # periodic 1070s stop going to that owner (other clients keep the
+        # full stream); order-anchored frames are never withheld.
+        self.position_burst: dict[int, int] = {}
         # Test harness: brief suppression of periodic 1070 position updates for local hero
         # to isolate correction-induced choppiness from client navigation/animation.
         # Preserves 1016 ActionMoveTo, initial anchor 1070, tape bootstrap, and heartbeats.
@@ -409,11 +440,17 @@ class SnapshotStream(threading.Thread):
     # -- frame broadcasting & targeted sending -------------------------------
 
     def _new_hero_kit(self, sim, hero_id, *, hero_name=None):
-        kit = abilities.create_hero_kit(sim, hero_id, hero_name=hero_name)
+        base_id = hero_catalog.resolve_hero_id(hero_id)
+        base_name = hero_catalog.resolve_hero_name(hero_name or hero_id)
+        kit = abilities.create_hero_kit(sim, base_id, hero_name=base_name)
         if hasattr(kit, "volley_presentation"):
             kit.volley_presentation = self.skye_volleys.start
         if hasattr(kit, "additional_targets"):
             kit.additional_targets = lambda: self.structures.structures.values()
+        if hasattr(kit, "allocate_instance"):
+            kit.allocate_instance = self._allocate_buff_instance
+        if hasattr(kit, "get_actor_slot"):
+            kit.get_actor_slot = lambda eid: self.actor_slots.by_eid.get(eid, 0)
         return kit
 
     def _allocate_buff_instance(self):
@@ -490,6 +527,51 @@ class SnapshotStream(threading.Thread):
                 pass
             self.frames_sent += 1
 
+    def _owner_connection(self, eid: int):
+        """The live client connection that owns hero `eid`, if any."""
+        with self._clients_lock:
+            for conn, (player, _send_fn) in self.clients.items():
+                if player.eid == eid:
+                    return conn
+        return None
+
+    def _publish_hero_position(self, eid: int, payload: bytes) -> bool:
+        """Publish periodic locomotion without re-correcting a predicted walk.
+
+        Walking arms no owner-periodic budget; attack pursuit retains its
+        prior burst. Every other subscriber keeps the full 5 Hz stream.
+        Normal walk anchors use the same owner-only gate unless the explicit
+        diagnostic baseline is enabled. Stops and forced displacement bypass
+        it through their lifecycle path.
+        Returns True when the caller must broadcast the frame itself.
+        """
+        remaining = self.position_burst.get(eid, 0)
+        if remaining > 0:
+            self.position_burst[eid] = remaining - 1
+            return True
+        owner = self._owner_connection(eid)
+        if owner is None:
+            return True
+        dead = []
+        with self._clients_lock:
+            targets = [info for conn, info in self.clients.items()
+                       if conn is not owner]
+        for _player, send_fn in targets:
+            try:
+                send_fn(wire.OP.POSITION, payload)
+            except OSError:
+                dead.append(send_fn)
+        if dead:
+            with self._clients_lock:
+                for conn, info in list(self.clients.items()):
+                    if info[1] in dead:
+                        self.clients.pop(conn, None)
+                        self.ready_clients.discard(conn)
+                        self.dumped_conns.discard(conn)
+                        self._completed_bootstrap_conns.discard(conn)
+                        self._resource_catchup.pop(conn, None)
+        return False
+
     def _broadcast_snapshot(self, countdown):
         self._last_snapshot_at = time.monotonic()
         self._broadcast(wire.OP.SNAPSHOT_JOIN,
@@ -527,12 +609,23 @@ class SnapshotStream(threading.Thread):
         if opcode == wire.OP.JOIN_1112 or opcode == wire.OP.JOIN_1131:
             self._send_to(conn, opcode, roster.build_zero_ack())
         elif opcode == wire.OP.JOIN_1118:
-            if player.pick_flags == roster.PICK_FLAG_LOCKED:
-                return                       # corpus: no re-pick after lock
             try:
                 hero_id, selection_hash = roster.parse_hero_selection(payload)
             except ValueError as exc:
                 self.log(f"[match] rejected hero selection: {exc}")
+                return
+            if player.pick_flags == roster.PICK_FLAG_LOCKED:
+                base_selected = hero_catalog.resolve_hero_id(hero_id)
+                base_locked = hero_catalog.resolve_hero_id(player.hero_id)
+                if base_selected != base_locked and player.hero_id != roster.UNPICKED_HERO_ID:
+                    self.log(f"[match] rejected hero change after lock: {hero_id} != {player.hero_id}")
+                    return
+                player.selection_hash = selection_hash
+                if hero_id != player.hero_id and base_selected == base_locked:
+                    player.hero_id = hero_id
+                self._send_to(conn, wire.OP.JOIN_1118, roster.build_hero_selection(player))
+                self.log(f"[match] skin updated by slot {player.slot} (eid {player.eid}): id={hero_id} hash={selection_hash:08x}")
+                self._broadcast_snapshot(self._pick_countdown())
                 return
             player.hero_id, player.selection_hash = hero_id, selection_hash
             player.pick_flags = roster.PICK_FLAG_SELECTED
@@ -624,14 +717,23 @@ class SnapshotStream(threading.Thread):
                 # 1016 ActionMoveTo activates the client's navigation. Its
                 # first byte is a compact actor id, NOT an eid: the six hero
                 # indices in this roster match the measured slots 0..5.
-                self._broadcast(wire.OP.MOVE_TO,
-                                roster.build_move_intent(player.slot, tx, ty))
+                # Publish the destination the authoritative navmesh accepted,
+                # not the raw click. Off-mesh clicks may project to an edge;
+                # disconnected routes may reject the move altogether.
+                if sim.is_moving and sim.move_target is not None:
+                    self.position_burst[player.eid] = LOCAL_WALK_POSITION_BURST_SAMPLES
+                    self._broadcast(wire.OP.MOVE_TO,
+                                    roster.build_move_intent(player.slot, *sim.move_target))
                 if not start_frames:
                     # Retargets also carry a correction at the current
                     # position, never the previous order's start position.
                     start_frames = [(wire.OP.POSITION,
                                      roster.build_position(player.eid, sim.x, sim.y))]
                 for op, p in start_frames:
+                    if (op == wire.OP.POSITION and sim.is_moving
+                            and not self.owner_walk_anchors
+                            and not self._publish_hero_position(player.eid, p)):
+                        continue
                     self._broadcast(op, p)
                 if player.slot == 0:
                     self.hero_x = sim.x
@@ -647,6 +749,9 @@ class SnapshotStream(threading.Thread):
             self.log(f"[match] target entity {target_eid} for eid {player.eid}")
             if sim is not None:
                 sim.set_target_eid(target_eid)
+                # Attack pursuit retains its existing burst, independently
+                # of walk orders. Only periodic movement consumes the budget.
+                self.position_burst[player.eid] = LOCAL_POSITION_BURST_SAMPLES
         elif opcode == wire.OP.LEVELUP_A:
             if len(payload) != 6 or payload[0] not in (0, 1, 2) or payload[1:] != bytes(5):
                 return
@@ -781,17 +886,23 @@ class SnapshotStream(threading.Thread):
             try:
                 request = item_input.parse_item_input(opcode, payload)
                 econ = self.economy.players.get(player.eid)
-                slot = None if econ is None else item_input.resolve_inventory_slot(
-                    econ.inventory_instances, request.instance_id)
+                owned = None if econ is None else item_input.resolve_owned_item(econ, request.instance_id)
             except ValueError as exc:
                 self.log(f"[match] rejected item use: {exc}")
                 return
-            if slot is None:
+            if owned is None:
                 return
             # The corpus echoes cooldown-time duplicate clicks too. This
             # acknowledges an owned request; ItemManager decides its outcome.
             self._send_to(conn, wire.OP.ITEM_USE, payload)
-            self.activate_item(player.eid, slot)
+            if owned.equipment_slot is None:
+                result = self.items.activate_default(player.eid, owned.instance_id,
+                                                     self.sim_time, self.hero_sims)
+                self._emit_frames(result.frames(player.eid))
+                self._drain_effect_frames()
+                self._emit_frames(result.resource_frames)
+            else:
+                self.activate_item(player.eid, owned.equipment_slot)
 
     def _pick_countdown(self):
         remaining = max(0.0, self._pick_deadline - time.monotonic())
@@ -811,6 +922,7 @@ class SnapshotStream(threading.Thread):
         if send_commit_ack:
             self._broadcast(wire.OP.LOCK_COMMIT, roster.build_commit_ack(self.commit_hash))
         roster.commit_lock(self.players, self.commit_hash)
+        self._mirror_host_hero()
         self.phase = self.LOCKED
         self.lock_deadline = time.monotonic() + LOCK_COUNTDOWN
         self.log(f"[match] roster locked (committed hash {self.commit_hash:08x}); "
@@ -818,11 +930,36 @@ class SnapshotStream(threading.Thread):
         for _ in range(LOCK_BURST):
             self._broadcast_snapshot((LOCK_COUNTDOWN, LOCK_COUNTDOWN))
 
+    def _mirror_host_hero(self):
+        """Sandbox-only roster override; entity identity and all sim state stay separate."""
+        if not self.sandbox_same_hero or not self.players:
+            return
+        host = self.players[0]
+        if host.hero_id == roster.UNPICKED_HERO_ID:
+            return
+        changed = set()
+        for player in self.players[1:]:
+            if (player.hero_id, player.selection_hash) != (host.hero_id, host.selection_hash):
+                player.hero_id, player.selection_hash = host.hero_id, host.selection_hash
+                changed.add(player.eid)
+        with self._clients_lock:
+            recipients = list(self.clients.items())
+        for conn, (player, _) in recipients:
+            if player.eid in changed:
+                self._send_to(conn, wire.OP.JOIN_1118, roster.build_hero_selection(player))
+        if changed:
+            self.log(f"[match] sandbox same-hero: host hero {host.hero_id}, "
+                     f"mirrored {len(changed)} slots")
+
     @_state_locked
     def _finalize(self):
+        # Include a host skin change made during the lock countdown.
+        self._mirror_host_hero()
         for player in self.players:
             sim = self.hero_sims[player.eid]
-            hero_balance.configure_hero(sim, player.hero_id)
+            base_id = hero_catalog.resolve_hero_id(player.hero_id)
+            hero_balance.configure_hero(sim, base_id)
+            sim.hero_id = player.hero_id
             self.hero_kits[player.eid] = self._new_hero_kit(
                 sim, player.hero_id, hero_name=sim.hero_name)
             self.hero_kits[player.eid].on_cast = self.items.on_ability_cast
@@ -855,7 +992,10 @@ class SnapshotStream(threading.Thread):
                 if len(repaired) > len(frames):
                     self.log(f"[match] completed truncated corpus bootstrap: "
                              f"{len(repaired) - len(frames)} startup 1093 cancellations at +16.672s (in memory)")
-                frames = repaired
+                frames = world_tape.authoritative_corpus_bootstrap(repaired)
+                if len(frames) < len(repaired):
+                    self.log(f"[match] omitted {len(repaired) - len(frames)} archived "
+                             "client-only weapon modifiers from live bootstrap (source unchanged)")
         except ValueError as exc:
             self.log(f"[match] corrupt world tape ({exc!r}) — ignoring")
             frames = None
@@ -1034,7 +1174,12 @@ class SnapshotStream(threading.Thread):
                         self._broadcast(wire.OP.SLOT_FLAGS_PING,
                                         roster.build_slot_flags(self.players))
 
-                while now >= next_move_tick and not self._stop_event.is_set():
+                # Sustained overload must not hold already-received human
+                # input behind an ever-growing catch-up batch. Keep every
+                # fixed step, but service the queue between bounded batches.
+                catch_up_ticks = 0
+                while (now >= next_move_tick and not self._stop_event.is_set()
+                       and catch_up_ticks < 4):
                     # Loading clients must receive their ready echo before live
                     # resources, actors or combat can reference the loaded world.
                     if self.tape_done and (self.ready_clients or not self.clients):
@@ -1044,10 +1189,38 @@ class SnapshotStream(threading.Thread):
                                                                           actor_slots=self.actor_slots))
                             self.seq_1010 = seq[0]
                             self._jungle_published = True
+                        tick_started = time.monotonic() if self.trace_movement_ticks else None
                         self.advance_simulation()
+                        if tick_started is not None:
+                            self._trace_movement_tick(next_move_tick, tick_started)
                     next_move_tick += SIM_TICK
+                    catch_up_ticks += 1
 
-            self._pump(timeout=WORLD_PUMP_TICK)
+            # Tick work already consumed part of the interval. Sleeping a
+            # fresh 50 ms here accumulates lateness and forces catch-up bursts.
+            self._pump(timeout=max(0.0, min(WORLD_PUMP_TICK,
+                                           next_move_tick - time.monotonic())))
+
+    def _trace_movement_tick(self, scheduled: float, started: float):
+        """Opt-in diagnostics only; wall-clock data never feeds simulation."""
+        finished = time.monotonic()
+        self.log("[movement-tick] " + json.dumps({
+            "match_id": self.match_id, "tick": self.sim_tick,
+            "sim_time": self.sim_time, "wall_time": time.time(),
+            "started_monotonic": started,
+            "late_ms": (started - scheduled) * 1000,
+            "work_ms": (finished - started) * 1000,
+            "phases_ms": getattr(self, "_movement_phase_ms", {}),
+            "heroes": [{"eid": p.eid, "position_fixed": self.hero_sims[p.eid].position_fixed,
+                        "moving": self.hero_sims[p.eid].is_moving,
+                        "target": self.hero_sims[p.eid].move_target,
+                        "target_eid":self.hero_sims[p.eid].target_eid,
+                        "path_height_fixed":getattr(self.hero_sims[p.eid].waypoints,'cursor_height_fixed',None),
+                        "order_version": self.hero_sims[p.eid].order_version,
+                        "burst_remaining": self.position_burst.get(p.eid)}
+                       for p in self.players if not p.is_bot and p.eid in self.hero_sims],
+            "steering_counts":dict(getattr(self.navigation,'query_counts',{})),
+        }, separators=(",", ":")))
 
     def _step_hero(self, dt: float, now: float):
         self._step_heroes(dt, now)
@@ -1092,15 +1265,32 @@ class SnapshotStream(threading.Thread):
             shield_pierce=getattr(source, "shield_pierce", 0),
             damage_reduction=getattr(target, "damage_reduction", 0))
         damage = self.damage_queue.resolve(ctx).final_damage
-        landed_damage = damage
         source_is_hero = source.eid in self.hero_sims
+        minions = self.wave_director.minions if self.wave_director else []
+        if target.eid in self.structures.structures:
+            damage *= self.structures.incoming_damage_multiplier(target.eid,
+                source_is_hero=source_is_hero, minions=minions)
+            if damage <= 0:
+                return frames
+        landed_damage = damage
         if target.eid in self.hero_sims:
             self.items.before_damage(target, damage, now)
-        damage, _ = self.status_manager.absorb_damage_with_barrier(target.eid, damage, now)
+        # Native 1054 consumes barrier/fortified pools before HP. Publish grants
+        # and expired remainders BEFORE that action, then send pre-pool damage;
+        # never pair HP-only 1054 with a still-visible barrier.
+        self.status_manager.expire_resource_pools(target.eid, now)
+        frames.extend(self.status_manager.drain_frames())
+        reaction_count = len(frames)
+        damage, absorbed = self.status_manager.absorb_damage_with_barrier(
+            target.eid, damage, now, current_hp=target.hp)
         if damage <= 0:
             # A barrier absorbs damage, not the contact. Consume/apply on-hit
             # effects once even when this component removes no actual HP.
             if landed_damage > 0:
+                if absorbed > 0:
+                    frames.append((wire.OP.COMBAT_DELTA, roster.build_combat_delta(
+                        source.eid, victim_eid, -landed_damage,
+                        tail=roster.COMBAT_DELTA_HERO_TAIL if basic else roster.COMBAT_DELTA_TAIL)))
                 if target.eid in self.hero_sims:
                     target.cancel_recall()
                     if source_is_hero:
@@ -1108,10 +1298,12 @@ class SnapshotStream(threading.Thread):
                 frames.extend(self._on_hit_effects(source, target, dtype, now,
                                                    basic=basic, proc=proc))
             return frames
-        minions = self.wave_director.minions if self.wave_director else []
         if target.eid in self.structures.structures:
-            frames.extend(self.structures.apply_damage(target.eid, damage, source.eid,
-                                                  source_is_hero=source_is_hero, minions=minions))
+            # Protection was already applied before barrier absorption.
+            structure_frames = self.structures.apply_damage(target.eid, damage, source.eid)
+            frames.extend((op, roster.build_combat_delta(source.eid, target.eid, -landed_damage))
+                          if absorbed > 0 and op == wire.OP.COMBAT_DELTA else (op, payload)
+                          for op, payload in structure_frames)
             if self.structures.match_finished and self._match_result_at_tick is None:
                 self._match_result_at_tick = self.sim_tick + round(6.0 / SIM_TICK)
             return frames
@@ -1125,11 +1317,15 @@ class SnapshotStream(threading.Thread):
             damage = before - target.hp
             if source_is_hero and damage > 0:
                 frames.extend(self.structures.on_hero_damaged(source, target))
-            if source_is_hero and not target.is_alive:
-                frames.extend(self.economy.reward_hero_bounty(source.eid, target.eid, self.hero_sims))
+            if not target.is_alive:
+                frames.extend(self.scoreboard.hero_death(target.eid, source.eid))
+                if source_is_hero:
+                    frames.extend(self.economy.reward_hero_bounty(source.eid, target.eid, self.hero_sims))
         elif target.eid in self.jungle.monsters and source_is_hero:
             frames.extend(self.jungle.apply_damage_to_monster(
                 target.eid, damage, source, now, self.economy, self.hero_sims))
+            if not target.is_alive:
+                frames.extend(self.scoreboard.last_hit(source.eid))
         else:
             target.hp = max(0, target.hp - damage)
             if source_is_hero and self.wave_director:
@@ -1146,9 +1342,11 @@ class SnapshotStream(threading.Thread):
                     self.actor_slots.release(target.eid)
                 if source_is_hero:
                     frames.extend(self.economy.reward_minion_bounty(source.eid, self.hero_sims))
+                    if isinstance(target, wave.Minion):
+                        frames.extend(self.scoreboard.last_hit(source.eid))
         # The damage event precedes the HP/death/kill reward result, once per hit.
         frames.insert(reaction_count, (wire.OP.COMBAT_DELTA, roster.build_combat_delta(
-            source.eid, victim_eid, -damage,
+            source.eid, victim_eid, -(landed_damage if absorbed > 0 else damage),
             tail=roster.COMBAT_DELTA_HERO_TAIL if basic else roster.COMBAT_DELTA_TAIL)))
         frames.extend(self._on_hit_effects(source, target, dtype, now, basic=basic, proc=proc))
         return frames
@@ -1230,6 +1428,59 @@ class SnapshotStream(threading.Thread):
         result = profile() if profile is not None else None
         return result if result is not None else (source.attack_damage, "weapon")
 
+    @staticmethod
+    def _skye_speed_bonus(sim, now):
+        bonus, _, expires = sim._speed_modifiers.get('skye_target_lock', (0.0, 0.0, -1.0))
+        return bonus if sim.is_alive and expires > now else 0.0
+
+    def _publish_skye_movement_speed(self, sim, now):
+        if not self.publish_skye_speed:
+            return
+        bonus = self._skye_speed_bonus(sim, now)
+        previous = self._last_skye_speed_bonus.get(sim.eid, 0.0)
+        if bonus != previous:
+            # Native c9ee8c consumes attribute18.604 presentation alone did
+            # not create any native speed-modifier component in qualified
+            # trials. Add only our temporary bonus, preserving equipment.
+            self._broadcast(1052, roster.build_entity_attribute(sim.eid, bonus - previous, 18))
+            self._last_skye_speed_bonus[sim.eid] = bonus
+
+    def _publish_pursuit_route(self, sim, *, target_lost=False):
+        """Experimental human pursuit intent; never a new simulation order.
+
+        A native retained target is not itself a navigation command after an
+        ability/attack. Publish the accepted route only when it changes, and
+        an explicit current-point destination when pursuit stops at range.
+        Ordinary input/ability/death transitions retain their existing events.
+        """
+        if not self.publish_pursuit_intent:
+            return
+        player = next((p for p in self.players if p.eid == sim.eid and not p.is_bot), None)
+        if player is None:
+            return
+        previous = self._last_pursuit_intent.get(sim.eid)
+        def publish(point):
+            height = sim.navigation.height_at(point) if sim.navigation is not None else 0.0
+            self._broadcast(wire.OP.MOVE_TO_3D,
+                            roster.build_move_intent_3d(player.slot, point[0], height, point[1]))
+        if sim.target_eid is None or not sim.is_alive:
+            if previous is not None and target_lost and sim.is_alive:
+                publish((sim.x, sim.y))
+            self._last_pursuit_intent.pop(sim.eid, None)
+            return
+        if sim.is_moving and sim.move_target is not None:
+            signature = (sim.order_version, sim.target_eid, sim.move_target)
+            if previous != signature:
+                publish(sim.move_target)
+                self._last_pursuit_intent[sim.eid] = signature
+            # The client now walks this route; additive owner corrections
+            # are not a substitute for that intent. Other subscribers keep
+            # their periodic anchors through _publish_hero_position.
+            self.position_burst[sim.eid] = 0
+        elif previous is not None:
+            publish((sim.x, sim.y))
+            self._last_pursuit_intent.pop(sim.eid, None)
+
     def _step_heroes(self, dt: float, now: float):
         """One deterministic gameplay slice; `now` is elapsed match time."""
         if self.structures.match_finished:
@@ -1245,15 +1496,31 @@ class SnapshotStream(threading.Thread):
         for eid, sim in sorted(self.hero_sims.items()):
             sim.match_elapsed = now
             kit = self.hero_kits.get(eid)
+            if (self.native_skye_control and isinstance(kit, abilities.SkyeKit)
+                    and sim.is_alive and (eid, 'skye_perk_control') not in self.status_manager.presentation.active):
+                # Owned match6 row80: persistent600, count1, four zero words.
+                # Experimental initialization; its native mechanical effect
+                # must be measured, not inferred from the buff's name.
+                self.status_manager.apply_state_presentation(
+                    'skye_perk_control', eid, eid, 600, now, -1, 1, (0, 0, 0, 0))
             prepare_movement = getattr(kit, "prepare_movement", None)
             if prepare_movement is not None:
                 prepare_movement(now, status_manager=self.status_manager)
+            self._publish_skye_movement_speed(sim, now)
             target = entities.get(sim.target_eid)
             if target is not None and (not combat.alive(target) or combat.team(target) == sim.team):
                 target = None
             target_pos = (target.x, target.y) if target is not None else None
-            for opcode, payload in sim.step(dt, now=now, target_pos=target_pos,
-                                             status_manager=self.status_manager):
+            pursuit_lost = sim.target_eid is not None and target is None
+            movement_frames = sim.step(dt, now=now, target_pos=target_pos,
+                                      status_manager=self.status_manager,
+                                      target_radius=getattr(target, "basic_attack_radius", 0.0))
+            self._publish_pursuit_route(sim, target_lost=pursuit_lost)
+            for opcode, payload in movement_frames:
+                if (opcode == wire.OP.POSITION and sim.arrived_this_step
+                        and sim.target_eid is None and not self.owner_walk_anchors
+                        and not self._publish_hero_position(eid, payload)):
+                    continue
                 if opcode == wire.OP.POSITION and sim.is_moving:
                     if eid == self.players[0].eid and self.suppress_active:
                         if now < self.suppress_until:
@@ -1263,6 +1530,8 @@ class SnapshotStream(threading.Thread):
                     if now - self._last_position_at.get(eid, -1.0) < roster.MOVE_TICK - 1e-9:
                         continue
                     self._last_position_at[eid] = now
+                    if not self._publish_hero_position(eid, payload):
+                        continue
                 self._broadcast(opcode, payload)
             for impact in self.attacks.step_attacker(sim, target, now, self.status_manager,
                                                     on_windup=self._begin_basic_attack,
@@ -1280,6 +1549,13 @@ class SnapshotStream(threading.Thread):
                                         relocation_height=heights[1]) if heights else {})
                     self._emit_frames(self.recall_presentation.complete(sim.eid, now, **coordinates))
                 self._emit_frames(lifecycle_frames)
+                # Enemy fountain damage originates in the lifecycle, outside
+                # _deal_damage. Its single death action still owns a death
+                # counter (and no fabricated hero kill for environmental EID 0).
+                for opcode, payload in lifecycle_frames:
+                    if opcode == wire.OP.ENTITY_DEATH:
+                        victim, killer = struct.unpack_from(">II", payload)
+                        self._emit_frames(self.scoreboard.hero_death(victim, killer))
             kit = self.hero_kits.get(eid)
             if kit is not None:
                 self._emit_frames(kit.step(now, status_manager=self.status_manager,
@@ -1319,8 +1595,22 @@ class SnapshotStream(threading.Thread):
     @_state_locked
     def advance_simulation(self):
         """Run one 50 ms tick; OS scheduling changes when, never how much."""
+        # Non-overlapping opt-in work attribution. In particular, QA mailbox
+        # I/O must not be mislabeled as simulation cost. No timings feed rules.
+        phase_ms = {} if self.trace_movement_ticks else None
+        phase_started = time.monotonic() if phase_ms is not None else None
+        self._movement_phase_ms = phase_ms or {}
+        def mark_phase(name):
+            nonlocal phase_started
+            if phase_ms is not None:
+                finished = time.monotonic()
+                phase_ms[name] = (finished - phase_started) * 1000
+                phase_started = finished
+                self._movement_phase_ms = phase_ms
+
         if self.qa is not None:
             self.qa.pump(self)
+        mark_phase("qa")
         if self.structures.match_finished:
             if self._match_result_at_tick is None:
                 self._match_result_at_tick = self.sim_tick + round(6.0 / SIM_TICK)
@@ -1330,6 +1620,7 @@ class SnapshotStream(threading.Thread):
                 self._broadcast(wire.OP.MATCH_RESULT,
                     match_end.build_match_result(self.structures.winner_team))
                 self.result_sent = True
+            mark_phase("match_result")
             return
         self.sim_tick += 1
         self.sim_time = self.sim_tick * SIM_TICK
@@ -1341,6 +1632,7 @@ class SnapshotStream(threading.Thread):
                 on_projectile_release=self._release_minion_projectile,
                 all_heroes=self.hero_sims))
             self.seq_1010 = self.wave_director.seq_1010[0]
+        mark_phase("wave")
         if self.enable_bots:
             for bot_eid, bot in sorted(self.bot_controllers.items()):
                 hero = self.hero_sims.get(bot_eid)
@@ -1352,8 +1644,10 @@ class SnapshotStream(threading.Thread):
                         structures=self.structures.structures,
                         hero_kit=self.hero_kits.get(bot_eid), econ=self.economy.get_or_create(bot_eid)):
                     self._apply_event(opcode, payload, bot_eid=bot_eid)
+        mark_phase("bots")
         self._step_heroes(SIM_TICK, self.sim_time)
         self._drain_effect_frames()
+        mark_phase("heroes_effects")
         for opcode, payload in self.economy.step(SIM_TICK, self.sim_time, self.hero_sims,
                                                 emit_trickle=self.emit_trickle):
             # Reconnect included resources accumulated since the last coarse
@@ -1361,6 +1655,7 @@ class SnapshotStream(threading.Thread):
             # never from subsequent purchases, bounties, or combat deltas.
             self._broadcast(opcode, payload, resource_credit=(opcode == wire.OP.ENTITY_STAT
                 and payload[8] in (roster.STAT_GOLD, roster.STAT_EXPERIENCE)))
+        mark_phase("economy")
 
     def _reconnect_bootstrap(self, send):
         """Recreate measured bootstrap allocations without replaying old combat.
@@ -1392,6 +1687,8 @@ class SnapshotStream(threading.Thread):
         for p in self.players:
             eid, sim = p.eid, self.hero_sims[p.eid]
             baseline = roster.build_hero_block(p)
+            for opcode, payload in self.scoreboard.reconnect_frames(eid):
+                send(opcode, payload)
             # HP/maxHP and energy/maxEnergy were absolute in this client's
             # single1011. The remaining decoded attributes are additive1052.
             attrs = ((4, sim.attack_damage - struct.unpack_from(">f", baseline, 214)[0]),
@@ -1400,6 +1697,8 @@ class SnapshotStream(threading.Thread):
                      (5, sim.crystal_power),
                      (3, sim.energy_regen - getattr(sim, "base_energy_regen", sim.energy_regen)),
                      (15, getattr(sim, "bonus_attack_speed", 0.0) / 100.0),
+                     (18, sim.item_move_speed + (self._skye_speed_bonus(sim, self.sim_time)
+                                                if self.publish_skye_speed else 0.0)),
                      (25, getattr(sim, "cooldown_reduction", 0.0)))
             for attribute, amount in attrs:
                 if abs(amount) > 1e-6:

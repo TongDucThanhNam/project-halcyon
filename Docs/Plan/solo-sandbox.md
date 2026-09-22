@@ -1,5 +1,49 @@
 # Solo sandbox acceptance record
 
+## Optional same-hero sandbox modifier — 2026-09-20
+
+Launch the ordinary local stack with `--same-hero` (or set
+`HALCYON_SAME_HERO=1` before starting it). At roster lock, all six slots mirror
+slot 0's selected hero and skin hash. A host skin change during the countdown
+is included again before finalization. Other human clients receive their
+overridden selection; roster snapshots and world initialization use the same
+hero. Pick any supported hero as host; choosing Skye makes six Skyes.
+
+Teams, EIDs, player identities, health, inventory and kit instances remain
+independent. This modifier does not implement missing hero kits, make bots
+cast unsupported abilities, or close multiplayer/client acceptance. Normal
+mode is unchanged when the flag/environment switch is absent. To turn it off,
+restart without `--same-hero` and unset `HALCYON_SAME_HERO` if explicitly set.
+It applies to fresh matches, not an already initialized world.
+
+Validation: `python -B -m unittest server.test.test_same_hero
+server.test.test_roster server.test.test_skin_selection` passed **54 tests**.
+Production lock/finalize checks cover all six Skye kits, separate identity/HP,
+guest selection notification, countdown skin propagation and normal rosters.
+The owned local stack was restarted with the flag; startup succeeded without
+stderr errors. Logs are outside Git at
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/same-hero-2bec9bbc912a4bd6946b3649bcff4c89/`.
+Fresh rendered-client smoke test subsequently passed on the owned LDPlayer
+`emulator-5554`, CE 4.13.4/build 147219, 960x540. Ordinary UI sequence:
+PLAY -> SOLO BOTS -> 3V3 -> VERY EASY -> Skye -> LOCK IN. The fresh connection
+at local 23:07:08 recorded host `1118` hero 265/hash `f59cdb08`, then five
+mirrored slots at 23:08:52 and roster finalization at 23:08:59. The loading
+screen visibly showed six Skye cards; the live match showed six Skye HUD
+portraits and three separate allied Skye models. Native movement inputs and
+local-player movement targets continued; operator movement during the
+observation is not attributed to assistant input.
+
+Evidence is in the above directory's `live/`: `12-world.png` is the six-card
+loading screen (filename does not establish WORLD), `13-after-loading.png`
+shows the live allied models, `lock-to-world.mp4` covers pick/lock/loading,
+and `gameplay.mp4` captures a subsequent 15-second gameplay window.
+`live-result.json` records source/artifact hashes and limits;
+`fresh-match-gateway.log` preserves the fresh connection's logs. This verifies
+one human plus five bots entering a duplicate-hero match, **not** six-human
+PvP, all abilities, or independent enemy world-model presentation. The live
+match was left running for the operator. No gameplay implementation changed
+during this smoke test.
+
 ## Current reading order — 2026-09-13
 
 Start with [current status](current-status.md) for the latest implementation,
@@ -41,7 +85,14 @@ attacker `1500` −25.82 at ~22 min; B Suri Strike `c2s 1042` action 2 at
 `1788947918.1802444`, `1054` −232.686 and −46.537; C Death from Above `c2s 1042`
 action 4 at `1788947922.5289133`, repeated `1054` −21.153. All casts via real ADB UI;
 QA prepared positions only. Bounded A/B/C operations and authoritative damage are
-verified. Repeatable gameplay acceptance, native B trajectory/smoothness, C reconnect
+verified. On 2026-09-13, Skye A and B native presentation wire was implemented and
+verified: Forward Barrage (A) emits Opcode 1039 (46 B, socket `0x259FD523`, kind 110)
+on 0.1s pulses with Buff 607/608; Suri Strike (B) emits Opcode 1027 (22 B, speed 18.0),
+Buff 609/610, Opcode 1038 curved missiles (30 B, kind 111, alternating pods
+`0x4578DE4F` / `0x3B78CE91`, curves ±1.0) and Buff 611 on impact. Skye C volley actors
+(1010) and buffs 612..618 are preserved. Skin selection across all 290 skins / 192
+themes was restored via platform manifest, catalog base-hero resolution and lock-phase
+cosmetic selection. Repeatable gameplay acceptance, visual client review, C reconnect
 actor recreation, and independent official fidelity remain OPEN. Gate 3 OPEN/PARTIAL.
 For lane waves (Gate 5), continuous 1016 movement order re-issuance was verified
 (16-22 orders/actor across first 25s in `wire-1788894917131102000.jsonl`;

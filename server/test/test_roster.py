@@ -181,7 +181,13 @@ class TestJoinHandshakes(unittest.TestCase):
         block = roster.build_hero_block(p)
         off, hexbytes = next(iter(donor["runs"].items()))
         raw = bytes.fromhex(hexbytes)
-        self.assertEqual(block[off:off + len(raw)], raw)   # donor run patched
+        # Slot spawn replaces only the donor's captured XYZ; retain the
+        # remaining measured run. Copying its position was the wrong premise.
+        expected = bytearray(raw)
+        struct.pack_into(">fff", expected, 18 - off, *(
+            roster.HERO_SPAWNS[p.eid][0], roster.HERO_SPAWN_HEIGHTS[p.eid],
+            roster.HERO_SPAWNS[p.eid][1]))
+        self.assertEqual(block[off:off + len(raw)], expected)
 
     def test_corpus_sweep_entries_shape(self):
         # 2026-09-07: the capture corpus re-walk (vg3/vgc2s/vg5_final) added

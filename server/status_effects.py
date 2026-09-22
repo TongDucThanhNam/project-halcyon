@@ -23,6 +23,7 @@ import math
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .buff_wire import BuffLifecycle
+from . import roster, wire
 
 
 class StatusType(Enum):
@@ -68,6 +69,17 @@ class StatusManager:
         self._interrupt_serial: Dict[int, int] = {}
         self._attack_interrupt_serial: Dict[int, int] = {}
         self.presentation = BuffLifecycle(instance_allocator)
+        self._resource_frames: List[Tuple[int, bytes]] = []
+
+    @staticmethod
+    def _pool_type(effect: StatusEffect) -> Optional[int]:
+        return {StatusType.BARRIER: 4, StatusType.FORTIFIED_HEALTH: 5}.get(effect.effect_type)
+
+    def _publish_pool(self, effect: StatusEffect, amount: float):
+        resource = self._pool_type(effect)
+        if resource is not None and amount:
+            self._resource_frames.append((wire.OP.ENTITY_STAT,
+                roster.build_hero_stat(effect.target_eid, amount, stat_type=resource)))
 
     def apply_effect(self, effect: StatusEffect) -> bool:
         """Add or refresh a status, rejecting debuffs during CC immunity.
@@ -97,7 +109,9 @@ class StatusManager:
         ]
         self.effects[effect.target_eid].append(effect)
         for old in previous:
+            self._publish_pool(old, -old.magnitude)
             self._remove_unlinked_presentation(old, now=effect.applied_at)
+        self._publish_pool(effect, effect.magnitude)
         if effect.effect_type in (StatusType.STUN, StatusType.SILENCE, StatusType.KNOCKBACK):
             eid = effect.target_eid
             self._interrupt_serial[eid] = self._interrupt_serial.get(eid, 0) + 1
@@ -121,6 +135,7 @@ class StatusManager:
                 e for e in self.effects[target_eid] if e.effect_id != effect_id
             ]
             for effect in removed:
+                self._publish_pool(effect, -effect.magnitude)
                 self._remove_unlinked_presentation(effect, now=now)
 
     def _remove_unlinked_presentation(self, effect: StatusEffect, *, now: Optional[float] = None):
@@ -135,6 +150,13 @@ class StatusManager:
                            now: float, duration: float) -> int:
         return self.presentation.apply(key, source_eid, target_eid, kind, now, duration)
 
+    def apply_state_presentation(self, key: str, source_eid: int, target_eid: int, kind: int,
+                                 now: float, duration: float, state_count: int,
+                                 words: tuple[int, int, int, int]) -> int:
+        """Publish a native 1087 hero-state buff (count + four opaque words)."""
+        return self.presentation.apply_state(key, source_eid, target_eid, kind, now, duration,
+                                             state_count, words)
+
     def remove_presentation(self, target_eid: int, key: str, *, now: Optional[float] = None):
         self.presentation.remove(target_eid, key, now=now)
 
@@ -143,18 +165,36 @@ class StatusManager:
 
     def clear_target(self, target_eid: int, *, now: Optional[float] = None):
         """Death/despawn clears target statuses and cancels their native buffs."""
+        for effect in self.effects.get(target_eid, []):
+            self._publish_pool(effect, -effect.magnitude)
         self.effects.pop(target_eid, None)
         self.presentation.clear_target(target_eid, now=now)
 
     def drain_frames(self) -> List[Tuple[int, bytes]]:
-        return self.presentation.drain_frames()
+        frames = self.presentation.drain_frames() + self._resource_frames
+        self._resource_frames = []
+        return frames
 
     def snapshot_frames(self, now: float) -> List[Tuple[int, bytes]]:
-        return self.presentation.snapshot_frames(now)
+        frames = self.presentation.snapshot_frames(now)
+        for eid in sorted(self.effects):
+            for kind, resource in ((StatusType.BARRIER, 4), (StatusType.FORTIFIED_HEALTH, 5)):
+                amount = sum(self._magnitudes(eid, kind, now))
+                if amount:
+                    frames.append((wire.OP.ENTITY_STAT,
+                        roster.build_hero_stat(eid, amount, stat_type=resource)))
+        return frames
+
+    def expire_resource_pools(self, target_eid: int, now: float):
+        """Remove stale pools before a combat action, without pruning periodic heals."""
+        for effect in list(self.effects.get(target_eid, [])):
+            if self._pool_type(effect) is not None and effect.expires_at <= now:
+                self.remove_effect(target_eid, effect.effect_id, now=now)
 
     def clean_expired(self, now: float):
         """Prune expired status effects."""
         for eid in list(self.effects.keys()):
+            self.expire_resource_pools(eid, now)
             self.effects[eid] = [e for e in self.effects[eid] if e.expires_at > now]
             if not self.effects[eid]:
                 del self.effects[eid]
@@ -239,7 +279,8 @@ class StatusManager:
         active = self.effects.get(target_eid, [])
         return sum(self._magnitudes(target_eid, StatusType.BARRIER, now))
 
-    def absorb_damage_with_barrier(self, target_eid: int, damage: float, now: float) -> Tuple[float, float]:
+    def absorb_damage_with_barrier(self, target_eid: int, damage: float, now: float,
+                                   *, current_hp: Optional[float] = None) -> Tuple[float, float]:
         """Absorb damage through active barrier pools.
         Returns (remaining_damage_to_hp, absorbed_amount)."""
         if damage <= 0.0:
@@ -264,7 +305,8 @@ class StatusManager:
         fortified = sorted((e for e in active if e.applied_at <= now < e.expires_at
                             and e.effect_type == StatusType.FORTIFIED_HEALTH),
                            key=lambda e: (e.expires_at, e.effect_id))
-        fortified_budget = remaining_damage * 0.5
+        fortified_budget = min(remaining_damage * 0.5,
+                               max(0.0, current_hp) if current_hp is not None else math.inf)
         for pool in fortified:
             absorbed = min(max(0.0, pool.magnitude), fortified_budget)
             pool.magnitude -= absorbed

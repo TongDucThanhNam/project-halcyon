@@ -987,3 +987,33 @@ accumulation is a correlation, not an established mechanism for client input sta
 - Gate 3 remains **OPEN/PARTIAL**: bounded A/B/C operations and authoritative damage verified; repeatable pilot verification via the production runner (planned per AGENTS.md; not yet shipped), independent official reference fidelity, and wider native fidelity are distinct open tiers.
 - Active/retained Skye C actors are not recreated on reconnect.
 - 40+ other heroes in the catalog receive `UnsupportedKit` and require individual kit implementations.
+
+## 2026-09-13 Skye A & B presentation frame implementation and skin selection
+
+Direct offline extraction from native runtime captures (e.g. `ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e889.36.vgr`) identified the native presentation opcodes, sockets, kinds, and buffs for Skye's A and B abilities:
+
+### Forward Barrage (A) Presentation Wire
+- **Opcode 1039 (46 bytes)**: Directional projectile stream emitted on each barrage pulse (0.1s interval).
+  - Format: `[u32 inst][u32 socket 0x259FD523 Barrage_Projectile][f32 pos_x, pos_z, pos_y][f32 dir_x, dir_y, dir_x, dir_y][5 zero bytes][u8 kind=110][u8 src_slot, own_slot][u16 0]`.
+  - Direction vector is normalized 2D direction repeated in both pairs.
+- **Native Buffs**:
+  - Buff 607 (`Buff_Skye_Barrage`): Applied to Skye for the duration of the barrage channel (3.0s) upon cast, removed on cancellation (`1093`) or expiry.
+  - Buff 608 (`Buff_Skye_BarrageSlow`): Applied to victims hit during the pulse.
+
+### Suri Strike (B) Presentation Wire
+- **Opcode 1027 (22 bytes)**: Directional translation emitted on cast execution.
+  - Format: `[u32 eid][f32 speed=18.0][f32 dest_x, dest_z, dest_y][u16 0]`.
+- **Opcode 1038 (30 bytes)**: Curved projectile emitted as 4 separate missiles during the dash.
+  - Format: `[u32 inst][u32 socket][f32 target_x, target_z, target_y][f32 curve][u8 0][u8 kind=111][u8 src_slot, own_slot][u16 0]`.
+  - Alternates left and right pods: RocketPod_L (`0x4578DE4F`, `curve=1.0`) and RocketPod_R (`0x3B78CE91`, `curve=-1.0`).
+- **Native Buffs**:
+  - Buff 609 (`Buff_Skye_Executing_B_Dash`): Applied to Skye for the dash duration.
+  - Buff 610 (`Buff_Skye_Firing_B_Missiles`): Applied to Skye for missile launch duration (~0.61s).
+  - Buff 611 (`Buff_Skye_HitBy_B_Missiles`): Applied to victims on missile impact.
+
+### Skin Selection and Hero Resolution
+- `Local/runtime/halcyon_stack/answers.json`: Serves full 290 skins, 192 themes, 276 unlocks, and `canUseAllHeroes: true`.
+- `server/hero_catalog.py`: `is_skin_name`, `get_base_hero_name`, `resolve_hero_name`, and `resolve_hero_id` map all 275 catalog items to base hero IDs and names with alias support (`Krul` -> `Hero009`, `Rona` -> `Hero016`, `Skaarf` -> `Hero010`, `Taka` -> `Sayoc`).
+- `server/match_server.py`: Allows cosmetic skin updates during the lock countdown phase when the base hero matches the locked hero, maintaining `player.selection_hash` and initializing correct base hero stats on `_finalize`.
+- Verified across all Skye skins: `Skye_DefaultSkin`, `Skye_Skin_Eagle_T1`, `Skye_Skin_Eagle_T2`, `Skye_Skin_Eagle_T3`, `Skye_Skin_Bike`, and `Skye_Skin_Exoframe`.
+- Tested by `server/test/test_skin_selection.py` (12 tests) and `server/test/test_skye_ab_presentation.py` (7 tests).

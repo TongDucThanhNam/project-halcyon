@@ -121,9 +121,9 @@ class TestWaveDirector(unittest.TestCase):
         d = self._director()
         frames = d.pump(d.t0 + roster.WAVE_FIRST_SPAWN_AT + 0.01)
         ops = [op for op, _ in frames]
-        # corpus raw-burst order: 1010,1016,1070(B) right · 1010,1016,1070(B)
-        # left · 1070(A) left · 1070(A) right · 1067 left · 1067 right
-        self.assertEqual(ops, [1010, 1016, 1070, 1010, 1016, 1070,
+        # Authoritative HP initialization now follows each creation; all
+        # remaining measured movement/visibility order is unchanged.
+        self.assertEqual(ops, [1010, 1052, 1053, 1016, 1070, 1010, 1052, 1053, 1016, 1070,
                                1070, 1070, 1067, 1067])
         # minion eid lives at +8 on the 1010, +0 on 1070/1067
         eids = [struct.unpack_from(">I", p, 8)[0] if op == 1010
@@ -132,26 +132,26 @@ class TestWaveDirector(unittest.TestCase):
         self.assertEqual(sorted(set(eids)), [4610, 4611])
         # 1010: right eid first, then left
         self.assertEqual(struct.unpack_from(">I", frames[0][1], 8)[0], 4610)
-        self.assertEqual(struct.unpack_from(">I", frames[3][1], 8)[0], 4611)
+        self.assertEqual(struct.unpack_from(">I", frames[5][1], 8)[0], 4611)
         # spawner +0 and class +4 (wave-1 pair 0 → 366)
         self.assertEqual(struct.unpack_from(">I", frames[0][1], 0)[0], 366)
         # B positions at spawn, A points after
-        b_r = struct.unpack_from(">ff", frames[2][1], 4)
+        b_r = struct.unpack_from(">ff", frames[4][1], 4)
         self.assertEqual((round(b_r[0], 3), round(b_r[1], 3)),
                          (round(roster.LANE_SPAWN_RIGHT[0], 3),
                           round(roster.LANE_SPAWN_RIGHT[1], 3)))
-        a_l = struct.unpack_from(">ff", frames[6][1], 4)
+        a_l = struct.unpack_from(">ff", frames[10][1], 4)
         self.assertLess(a_l[0], -70.0)                       # mirrored A
         # 1067 states: left (01) before right (02), spawn state 00
-        self.assertEqual(frames[8][1][4:7], b"\x01\x01\x00")
-        self.assertEqual(frames[9][1][4:7], b"\x02\x01\x00")
+        self.assertEqual(frames[12][1][4:7], b"\x01\x01\x00")
+        self.assertEqual(frames[13][1][4:7], b"\x02\x01\x00")
         # seq: shared counter, +1 per 1010 (corpus 33/34)
         self.assertEqual(frames[0][1][116], 0x21)
-        self.assertEqual(frames[3][1][116], 0x22)
+        self.assertEqual(frames[5][1][116], 0x22)
         self.assertEqual(d.seq_1010[0], 0x22)
         # 1016 carries the same seq byte as the minion's 1010
-        self.assertEqual(frames[1][1][0], 0x21)
-        self.assertEqual(frames[4][1][0], 0x22)
+        self.assertEqual(frames[3][1][0], 0x21)
+        self.assertEqual(frames[8][1][0], 0x22)
 
     def test_full_wave_has_10_minions_on_measured_grid(self):
         d = self._director()

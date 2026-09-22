@@ -21,6 +21,17 @@ def team(entity):
     return getattr(entity, "team", getattr(entity, "side", 0))
 
 
+def basic_attack_reach(attacker, target):
+    """Center distance for a basic attack against a qualified target radius.
+
+    Native ca1284 adds the target definition's scaled radius to range.
+    Structure radii are qualified; other actors retain the existing point-
+    target policy until their attack-range/radius contracts are reconstructed.
+    This is deliberately separate from ability collision/AoE radii.
+    """
+    return attacker.attack_range + getattr(target, "basic_attack_radius", 0.0)
+
+
 @dataclass
 class AttackState:
     phase: str = "idle"
@@ -89,7 +100,8 @@ class BasicAttackEngine:
                    and (status_manager is None or status_manager.can_attack(hero.eid, now)))
         valid = target is not None and alive(target) and team(target) != team(hero)
         if valid:
-            valid = within_distance((hero.x, hero.y), (target.x, target.y), hero.attack_range)
+            valid = within_distance((hero.x, hero.y), (target.x, target.y),
+                                    basic_attack_reach(hero, target))
         if (not allowed or not valid or hero.target_eid != state.target_eid
                 or order != state.order_version
                 or (state.phase == "windup" and interrupt_serial != state.interrupt_serial)):

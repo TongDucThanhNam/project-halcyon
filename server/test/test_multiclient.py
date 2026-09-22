@@ -5,7 +5,8 @@ Verifies:
 - Dynamic slot assignment across teams (default alternating [0, 3, 1, 4, 2, 5]: Client 1 gets slot 0 / eid 1500; Client 2 gets slot 3 / eid 1517).
 - Hero pick and lock synchronized across both clients in s2c 1113 snapshots.
 - Ready barrier: both clients send 1134 and 1137 before world ticks.
-- Multi-hero simulation: Client 1 and Client 2 can move independently; both receive 1070 position updates for both heroes.
+- Multi-hero simulation: accepted 1016 movement intents reach both clients;
+  periodic 1070 corrections reach the other client, not the walking owner.
 - PvP Combat: Client 1 attacks Client 2 (c2s 1060); both receive s2c 1054 combat deltas and s2c 1053 type-0 HP updates.
 - Reconnection: Client 2 disconnects and reconnects with same UUID; receives world state dump and resumes match stream.
 """
@@ -135,7 +136,12 @@ class TestMultiClientE2E(unittest.TestCase):
         target_c1 = (roster.SPAWN_X + 2.0, roster.SPAWN_Y)
         c1.sendall(wire.encode_message(self.cipher, wire.OP.MOVE_CAST, struct.pack(">ff", *target_c1) + bytes(6)))
 
-        # Both c1 and c2 should observe 1070 for eid 1500
+        # The owning client walks from the accepted intent, without recurring
+        # 1070 corrections that fight native navigation. The other client
+        # retains those authoritative updates (native qualification Sept 22).
+        expected_move = roster.build_move_intent(0, *target_c1)
+        self.assertEqual(self._await_op(c1, wire.OP.MOVE_TO), expected_move)
+        self.assertEqual(self._await_op(c2, wire.OP.MOVE_TO), expected_move)
         def find_pos(sock, eid):
             deadline = time.monotonic() + 4.0
             while time.monotonic() < deadline:
@@ -146,8 +152,19 @@ class TestMultiClientE2E(unittest.TestCase):
                         return True
             return False
 
-        self.assertTrue(find_pos(c1, 1500))
         self.assertTrue(find_pos(c2, 1500))
+
+        # Exercise the inverse direction too: slot 3 owns its intent while
+        # slot 0 receives slot 3's position stream.
+        sim2 = self.gw.matches[-1].session.hero_sims[1517]
+        target_c2 = (sim2.x - 2.0, sim2.y)
+        c2.sendall(wire.encode_message(
+            self.cipher, wire.OP.MOVE_CAST,
+            struct.pack('>ff', *target_c2) + bytes(6)))
+        expected_move2 = roster.build_move_intent(3, *target_c2)
+        self.assertEqual(self._await_op(c2, wire.OP.MOVE_TO), expected_move2)
+        self.assertEqual(self._await_op(c1, wire.OP.MOVE_TO), expected_move2)
+        self.assertTrue(find_pos(c1, 1517))
 
         # Test PvP combat: Move Client 1 near Client 2's hero (eid 1517)
         # Spawn for 1517 is HERO_SPAWNS[1517] = (78.18, 0.88)
@@ -197,6 +214,58 @@ class TestMultiClientE2E(unittest.TestCase):
         setup2 = self._await_op(c2, wire.OP.GAME_SETUP)
         self.assertEqual(struct.unpack_from(">I", setup2, 0)[0], 1517)
 
+    def test_six_owned_connections_keep_movement_identity_and_remote_updates(self):
+        """Production socket coverage, not six rendered-client acceptance."""
+        expected_eids = (1500, 1517, 1515, 1518, 1516, 1519)
+        clients = []
+        for index, eid in enumerate(expected_eids):
+            client = self._connect_client(f'{index+1:08x}-aaaa-4bbb-8ccc-123456789abc')
+            setup = self._await_op(client, wire.OP.GAME_SETUP)
+            self.assertEqual(struct.unpack_from('>I', setup)[0], eid)
+            clients.append(client)
+        for client in clients:
+            client.sendall(wire.encode_message(self.cipher, wire.OP.JOIN_1118,
+                           struct.pack('>II', 265, 0) + bytes(6)))
+            self._await_op(client, wire.OP.JOIN_1118)
+            client.sendall(wire.encode_message(self.cipher, wire.OP.BUILD_LOCK, bytes(6)))
+            client.sendall(wire.encode_message(self.cipher, wire.OP.LOCK_COMMIT, bytes(6)))
+        for client in clients:
+            self._await_op(client, wire.OP.ROSTER_FINAL)
+        for client, eid in zip(clients, expected_eids):
+            client.sendall(wire.encode_message(self.cipher, wire.OP.SHOP_OPEN, bytes(6)))
+            self._await_op(client, wire.OP.SHOP_OPEN)
+            ready = struct.pack('>IBB', eid, 1, 0)
+            client.sendall(wire.encode_message(self.cipher, wire.OP.HERO_READY, ready))
+            self.assertEqual(self._await_op(client, wire.OP.HERO_READY), ready)
+        world = self.gw.matches[-1].session
+        self.assertEqual({p.eid for p in world.players if not p.is_bot}, set(expected_eids))
+        expected_intents = {}
+        for client, eid in zip(clients, expected_eids):
+            hero = world.hero_sims[eid]
+            player = next(p for p in world.players if p.eid == eid)
+            destination = (hero.x + (2 if player.team == 1 else -2), hero.y)
+            expected_intents[player.slot] = roster.build_move_intent(player.slot, *destination)
+            client.sendall(wire.encode_message(self.cipher, wire.OP.MOVE_CAST,
+                           struct.pack('>ff', *destination) + bytes(6)))
+        # Every subscriber must see all six correctly attributed intents and
+        # a position stream for each of the other five humans.
+        for client, eid in zip(clients, expected_eids):
+            intents, remote_positions = {}, set()
+            deadline = time.monotonic() + 4
+            wanted_remote = set(expected_eids) - {eid}
+            while time.monotonic() < deadline:
+                op, payload = self._read_message(client, deadline-time.monotonic())
+                if op == wire.OP.MOVE_TO:
+                    intents[payload[0]] = payload
+                elif op == wire.OP.POSITION:
+                    other = struct.unpack_from('>I', payload)[0]
+                    if other in wanted_remote:
+                        remote_positions.add(other)
+                if intents == expected_intents and remote_positions == wanted_remote:
+                    break
+            self.assertEqual(intents, expected_intents, eid)
+            self.assertEqual(remote_positions, wanted_remote, eid)
+
     def test_new_uuid_midworld_join_gets_world_dump(self):
         """A distinct device (own session uuid) joining while the match is
         already in the world phase receives a full world dump for its own
@@ -234,11 +303,23 @@ class TestMultiClientE2E(unittest.TestCase):
         self._await_op(c3, wire.OP.HERO_BLOCK)
         self._await_op(c3, wire.OP.POSITION)
 
-        # The existing clients stay in the world stream (movement → 1070)
+        # Existing clients retain accepted intents plus remote corrections;
+        # owner movement no longer depends on its own 1070 updates.
         c1.sendall(wire.encode_message(
             self.cipher, wire.OP.MOVE_CAST,
             struct.pack(">ff", roster.SPAWN_X + 2.0, roster.SPAWN_Y) + bytes(6)))
-        self._await_op(c1, wire.OP.POSITION)
+        accepted = self._await_op(c1, wire.OP.MOVE_TO)
+        self.assertEqual(accepted, roster.build_move_intent(
+            0, roster.SPAWN_X + 2.0, roster.SPAWN_Y))
+        self.assertEqual(self._await_op(c2, wire.OP.MOVE_TO), accepted)
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline:
+            position = self._await_op(
+                c2, wire.OP.POSITION, timeout=deadline-time.monotonic())
+            if struct.unpack_from('>I', position)[0] == 1500:
+                break
+        else:
+            self.fail('remote owner position stream did not resume after join')
 
     def test_second_mapready_client_gets_own_world_dump(self):
         """In a duo the second 1134 arrives after the first client's dump

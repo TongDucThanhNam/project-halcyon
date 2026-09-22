@@ -76,6 +76,22 @@ mix of legal discipline and technical safety.
 6. **Do not commit unless asked.** Keep the worktree honest; report diffs, do
    not auto-commit.
 
+7. **No image/video dependency — invariant (operator, 2026-09-21).** Diagnose,
+   implement and verify through code, structured telemetry, wire/runtime traces,
+   deterministic reproduction and anchored observation of the owned client.
+   Do not take or analyze screenshots/video, run screenrecord/desktop recording,
+   investigate FPS, or build/repair capture tooling. This also covers setup/UI
+   guards: `capture_backend: none` does not make a screenshot-dependent driver
+   compliant. Use nonvisual process/activity/UI-state/protocol guards; a missing
+   guard stays an explicit setup unknown, never a silently weakened check.
+   Do not make progress or acceptance depend on visual review. Client behavior
+   still needs client-side evidence: server positions, exact determinism and
+   passing tests are not proof of smooth client movement. If an accessor is
+   unavailable, retain that unknown and pursue bounded, concrete anchors and
+   independent useful work; no blind ARM hooks or broad heap scans. Older
+   image/video-based procedures below or in leaves are historical, superseded
+   by this invariant, not instructions to resume visual/capture work.
+
 ---
 
 ## Progressive-disclosure task index
@@ -102,6 +118,7 @@ in the leaf; this entry point holds routes and brief status only.
 | Building the deterministic server-authoritative sim | `Docs/Research/veilbound-multiplayer-design.md` (input-stream model) | the determinism spike under `Docs/Research/spikes/determinism/` |
 | Current Tier 1 solo sandbox implementation and acceptance | `Docs/Plan/solo-sandbox.md` | `solo-sandbox-acceptance-status.md` and the subsystem leaf linked for the scenario |
 | Repeatable Skye/minion scenario verification and reference comparisons | `Docs/Plan/solo-sandbox-scenarios.md` (shipped pilot: `Tools/run_scenarios.py` headless scenarios, two-process exact repeatability, client driver, reference interface) | `solo-sandbox-acceptance-status.md` for active gate status and the relevant subsystem leaf for the scenario under test |
+| Scalable nonvisual validation, independent CE evidence and offline client comparison | `Docs/Plan/differential-validation.md` | `solo-sandbox-navigation.md` for measured movement cases; existing scenario/reference interface remains the execution path |
 | After Phase 0: closing T1 (matchmaking schema) and opening the T3 thin slice; RE-asset→server mapping, determinism decisions, open gaps | `Docs/Plan/next-steps.md` | the Teardown leaves it cites per row |
 
 When no row matches, stay with this file and the source. Do not load docs "just
@@ -156,33 +173,36 @@ these rather than inventing a parallel toy engine.
 
 **Scripts own time-sensitive client execution.** Check HP/energy/ranks/available
 points/cooldowns/target validity and required target lock, perform the bounded UI
-sequence, retain timestamps, input/response trace and video as needed. No model/tool
-reasoning round trips between a basic hit and the dependent short-lived cast.
+sequence, retain timestamps, input/response traces and scalar client-state evidence.
+No model/tool reasoning round trips between a basic hit and the dependent short-lived cast.
 Automation must report distinct observed stages: missing input; rejected/ignored input
 (explicit rejection only when actually observed — otherwise unacknowledged with unknown
-reason); accepted operation; and authoritative outcome plus visible presentation.
-Unknown presentation is unverified, not automatically missing. Setup failure must not
+reason); accepted operation; and authoritative outcome plus measured client-side effect.
+Unknown client-side effect is unverified, not automatically missing. Setup failure must not
 be called a gameplay regression. QA preparation is allowed only within acceptance-leaf
 scope; QA damage/forced casts cannot prove real UI behavior.
 
-**Headless for simulation; rendered client for acceptance.** Use short headless scenarios
+**Headless for simulation; instrumented owned client for client acceptance.** Use short headless scenarios
 through actual production integration for simulation diagnosis and regression, with
-necessary nav, structures/turrets and lifecycle enabled. Use the rendered CE client to
-establish native presentation. Keep real-duration soak/long-timer tests when those are
-the claim; do not replace acceptance with artificially sped-up time or isolated
-subsystems.
+necessary nav, structures/turrets and lifecycle enabled. Use identified, nonvisual CE
+runtime observations to establish client behavior; missing instrumentation is an open
+measurement gap, not a reason to fall back to screenshots/video. Keep real-duration
+soak/long-timer tests when those are the claim; do not replace acceptance with
+artificially sped-up time or isolated subsystems.
 
-**Independent gameplay fidelity.** Reuse owned captures first, then ordinary-client
-passive observation for missing cases, preserving rank/items/HP/positions/time and
-relevant inputs. Local Halcyon recordings prove Halcyon behavior only. Recorded server
-outputs alone (`.vgr`) are not a complete computation oracle. Compare semantic outcomes
+**Independent gameplay fidelity.** Reuse owned wire/runtime traces first, then
+ordinary-client passive nonvisual observation for missing cases, preserving
+rank/items/HP/positions/time and relevant inputs. Local Halcyon runtime observations
+prove Halcyon behavior only. Recorded server outputs alone (`.vgr`) are not a
+complete computation oracle. Compare semantic outcomes
 after explicit identity/time normalization and measured justified tolerances; never claim
 raw packet equality guarantees official fidelity. Determinism within our same
 implementation stays exact.
 
-**Community tooling scope.** VGNA replay/spectator is an evaluation lead for repeated
-visual reference; HackedGlory is capture/decoder research; VGReborn is matchmaking
-integration. None is evidence of a complete replacement simulation. The original Trick 8
+**Community tooling scope.** VGNA replay/spectator is a historical reference lead,
+subject to the no-image/video invariant; HackedGlory is transport/decoder research;
+VGReborn is matchmaking integration. None is evidence of a complete replacement
+simulation. The original Trick 8
 zero-noise/AFK swarm assertions are superseded by the opening review in
 `Docs/Teardown/vainglory-community-ecosystem-tricks.md`. Headless clients only against
 our own server under existing boundaries. Do not restart binary/codec dead ends without
@@ -190,8 +210,8 @@ genuinely new evidence routed through existing leaves.
 
 **Delegation discipline.** Delegate bounded scenario/tool or subsystem changes with
 explicit outputs and checks; one owner per emulator/runtime and per overlapping file set.
-Agent summarizes measured results with artifact paths; parent reviews. Don't spend cycles
-on repeated ad-hoc screenshot probing or re-discovering known trace layouts. Stop a
+Agent summarizes measured results with artifact paths; parent reviews. Do not use
+screenshot probing or spend cycles re-discovering known trace layouts. Stop a
 failed experiment with preserved evidence and a classified unknown instead of blind
 repeated retries; continue independent work. Do not add permission gates.
 
@@ -216,7 +236,7 @@ status is `UNAVAILABLE`. See
 status. Do not invent another executable path for these scenarios.
 
 **Measurement hierarchy.** Distinguish: harness repeatability, internal determinism,
-visible client acceptance, and independently measured gameplay fidelity. A passing test
+instrumented client acceptance, and independently measured gameplay fidelity. A passing test
 count alone never closes faithful-gameplay acceptance.
 
 **Artifacts.** Keep all QA output outside the repo; never delete old journals/captures

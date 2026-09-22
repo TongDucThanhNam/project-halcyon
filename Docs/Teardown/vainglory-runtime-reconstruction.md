@@ -117,6 +117,165 @@ them.
 
 ## 8. Runtime observation and differential comparison — corrected 2026-09-12
 
+### September22 ordinary input and native lifecycle readiness
+
+`Tools/android_input_health.py` parses the owned PID's existing NUO lifecycle
+log (`logcat -d -v epoch -t2000 -s NUO:D`). A new completed `Resume - Post`,
+with no later resume/suspend transition, is a conservative readiness gate;
+foreground Android activity alone is insufficient. Do not compare guest log
+wall time directly with host gesture wall time: their measured offset in05
+was about16.6s, and ResumePost already preceded a failed PLAY by about2.3s.
+The source anchor is owned `NuoActivityGame.processTouch` → `NuoView`/
+`Renderer.isInitialized` and `executeState`'s JNI resume completion. The
+initialized predicate itself only excludes uninitialized state, so do not
+claim that it alone explains the lost input. Successful control/wire response
+is still required. Missing logs or stale/wrong-PID events remain unknown.
+This reads lifecycle state, not images, frame pacing or FPS.
+
+An external bounded06probe additionally qualified the JNI touch pipeline:
+ELF`7f638c` checks app`2b08f98` and callback`2b08f30`; callback`18843c8`
+uses owner`3114448`, vtable`2aaec70`, then`1884460` writes32slots at
+owner+28, stride40. One ordinary PLAY yielded17active queue reads and16UI
+captures, then the native mode chooser. This qualifies read-only delivery
+observation, not the site dropping earlier touches. Lifecycle/button flags
+alone are not successful-input evidence. See checkpoint19 in the run leaf.
+
+The subsequent08trial attached a bounded Java observer before the first PLAY
+(`Activity.dispatchTouchEvent`, owned`onTouchEvent` and`processTouch`), calling
+each original unchanged and detaching afterward. No dispatch or native queue
+event appeared. The owned view reported`hasWindowFocus=false` despite Android
+global focus naming the game. A later stable true view-focus observation
+preceded successful delivery and mode transition. This narrows that failed
+input upstream of Activity dispatch; it is not a universal root-cause claim.
+The read-only activity lookup follows`ActivityThread.mActivities` (bound8),
+not a heap scan. External Frida17Java bridge bundle/version/digest and event
+receipts are preserved under the run's`java-input-observer/` and08directories.
+The observer itself adds overhead; its measurements are delivery/state, not
+timing acceptance. See checkpoint20.
+
+09then qualified a minimized/backgrounded owned LDPlayer host window as
+one readiness failure. `activate_owned_ldplayer` validates the executable
+path and unique window, restores/activates it, and releases temporary input
+thread attachments; guest view focus must still qualify.12demonstrated why:
+host activation succeeded but the view remained unfocused. Android input
+state identified a second, dialog-sized window owned by the game. A bounded
+accessibility XML read identified the sign-in-failure message and one enabled
+OK control (`android:id/button3`, bounds `[244,275][308,323]`). One ordinary
+tap at its center removed the dialog; stable Java focus and the subsequent
+PLAY/mode transition qualified entry. These coordinates are historical
+evidence, not a reusable blind tap. XML lives outside Git under12;
+no image/video was produced. See checkpoints21–23 in the run leaf.
+
+The optional source-pinned persistent ordinary Android input wrapper is
+documented in [the scenario leaf](../Plan/solo-sandbox-scenarios.md#current-nonvisual-paths--september-22-2026).
+It calls the same device input class as `/system/bin/input`, retaining native
+UI and wire gates while avoiding a new VM per gesture. Source/dex/remote
+digests and sequential timing receipts are external. Transport completion
+does not prove native command consumption; no game function or packet is
+injected.
+
+### September 22 ten-hour run: model and baked navigation qualification
+
+Active camera projection is also now qualified through `81ef94 -> 8bbfb0 ->
+8bd5c8 -> 8b891c`, viewport `e00238/e034d4`. Owned manager global302ede8,
+active camera+2b0, view+18c, projection+20c, vtable26c2288; dirty bit2 is
+rejected rather than calling the native lazy updater. `camera_view()` and
+`project_position()` feed optional `world_points` in the existing movement
+scenario, with retained matrix/input provenance and central-playfield bounds.
+Three live world-point inputs pass; ground picking on a slope can differ from
+the supplied world point, so projection is not claimed to invert navigation.
+
+The read-only native observer now supports `model_transform=True` with
+owner/type/vtable/generation/resource checks. `c58004` forwards position via
+the entity presentation interface to `8ad524`; `d7cce0` updates the model
+translation, `d7ccd0` returns its column-major matrix, and `8a9d6c/8b2364`
+bind its mesh/animation component. This is root model world state, **not bone
+pose, view projection, frame pacing or display-time acceptance**. No image or
+video path was used. Offline inspection uses `--client-position model` and
+rejects missing/unqualified model samples rather than falling back to logical.
+
+A separate bounded owner-query chain (`c60ff4`, `df09b4/df09f8`, manager
+`3110ca8`) recovered the baked Detour geometry. All870 tiles' immutable geometry
+matches the owned `4D562D63B9D0796F7FCC5EC61ADB111B` asset. This proves that the
+old server A001 authoring mesh was the wrong geometry for at least one measured
+corner. See [navigation finding, code changes and evidence](../Plan/solo-sandbox-navigation.md#september-22-native-baked-navigation-replaces-authoring-geometry).
+Keep the native path and root-model qualification distinct from complete
+rendered/gameplay acceptance and from simulation determinism.
+
+### 2026-09-22: external CE passive reference workflow
+
+The owned client has now completed two nonvisual movement batteries against
+the external CE service: **14 inputs / 10,030 logical client samples**.
+See [reference measurements](../Plan/solo-sandbox-navigation.md#external-ce-movement-reference--2026-09-22).
+This is independent semantic evidence, not a full computation oracle or
+general movement-smoothness acceptance.
+
+`Tools/Teardown/observe_reference_wire.py` adapts an **already running owned
+client packet trace** to the existing scenario JSONL contract. It starts no
+capture, contacts no backend and sends no game packets. It incrementally
+reassembles the selected ordinary TCP match flow and uses the production
+codec, validates route/ack framing, rejects conflicting retransmissions,
+records incomplete tails/gaps, and excludes opcode 1000 login data from JSONL.
+Evidence/output must be external; existing output directories are rejected.
+
+```powershell
+python -B Tools/Teardown/observe_reference_wire.py --adb D:/LDPlayer/LDPlayer9/adb.exe --serial 127.0.0.1:5555 --remote-pcap /sdcard/<owned-existing-trace>.pcap --match-id <verified-match-uuid> --server-port <observed-port> --duration 125 --output <new-external-directory>
+python -B Tools/run_scenarios.py --mode client --scenario movement-walk --adb-serial 127.0.0.1:5555 --wire-trace <adapter-output>/wire.jsonl --connection <observed-client-port> --client-profile <nonvisual-profile> --output <new-external-run>
+python -B Tools/Teardown/inspect_movement_trace.py trace <adapter-output>/wire.jsonl --connection <observed-client-port> --timing --eid <verified-owner> --slot <verified-slot>
+```
+
+Before driving: verify stock external routing, preserve/isolate local-issued
+profile credentials, use ordinary native-label-guarded entry, establish fresh
+match identity from **manifest contents**, and wait for native gameplay state.
+Wire-ready can precede native owner creation. The retained label/layout entry
+helper is qualified on this pinned build, not a general UI navigator.
+Restore the local profile/routing afterward and stop only owned observers.
+No image fallback, broad memory scan or remote packet injection is permitted.
+
+The adapter retains packet capture time and measured host/guest brackets.
+`inspect_movement_trace.py` labels these **client-interface** intervals;
+mixed/unknown timestamp sources and local-server tick correlation of this
+external trace are rejected. Do not call them server input-to-ack measurements.
+One polling batch is an observation/export window, not a simulation tick.
+
+**Replay qualification correction:** this paired run has zero `1070` in
+15,041 native replay frames despite 45 owner corrections on wire. Fourteen
+ordinary owner `1016` payloads/order match exactly, plus one extra shorter
+native record. Preserve packet + native state + replay together; `.vgr` alone
+omits the very correction traffic relevant to the walking defect.
+
+### 2026-09-22: anchored client data reads qualified on LDPlayer
+
+**The position-accessor blocker is superseded, not the ARM-hook closure.**
+The September 21 same-session check found ARM64 `libGameKindred.so` in
+`/proc/<pid>/maps` while native Frida enumeration omitted it: a namespace
+visibility split. Following the identified `1070` consumer now yields a
+read-only entity registry → EID → position/navigation-component chain.
+Frida's native realm can read those mapped addresses despite not enumerating
+the guest library. No translated ARM function call/hook or broad heap scan is
+needed. The owned library digest and mapped anchor bytes are checked first.
+
+The durable observer is `Tools/Teardown/observe_client_movement.py` with
+`client_movement_observer.js`, integrated into the existing movement scenario.
+Owner 1500 was qualified stationary; moving bot 1515 produced 779 samples,
+193 distinct positions and 17 correction-timer resets. Host/guest monotonic
+clock brackets and per-read duration are retained. These are non-atomic
+logical entity reads, **not model/render transforms or owned-hero smoothness
+acceptance**. The subsequent native UI tree/text anchor identified a blocking
+Choose a Build panel. A title-guarded Back restored input, then the walking
+owner produced 4,194 samples. A short-walk A/B/A measured backward logical
+motion on 8/12 baseline legs versus 0/6 with periodic owner corrections
+suppressed; a scoped walking-publication fix follows from this evidence.
+See the [owner correction experiment](../Plan/solo-sandbox-navigation.md#measured-owner-correction-reversal-and-walking-fix--2026-09-22)
+for the native UTF-16 anchors, measurement boundaries and current fix status.
+
+Exact ELF anchors, build hash, tests, evidence and outstanding guards:
+[nonvisual client accessor](../Plan/solo-sandbox-navigation.md#nonvisual-client-position-and-correction-accessor--2026-09-22).
+AGENTS.md now forbids image/video dependencies, including entry guards;
+older capture procedures are historical, not fallbacks.
+
+### Historical qualification and comparison boundaries
+
 The 2026-09-07 version of this section described proposed opcode, JSON-RPC
 and allocator hooks as an active, working instrumentation stack. That claim
 was not supported by the later qualification run and is withdrawn.
@@ -126,9 +285,17 @@ emulated sessions attached, loaded a no-op observer, enumerated modules and
 detached. Neither enumeration exposed the target `libGameKindred`: the native
 realm reported 196 modules and the emulated realm seven. This is **target not
 observed**, not a working game-state observer, proof of a private loader, or
-proof that every instrumentation route is impossible. The LDPlayer route is
-parked pending a specific new anchor/environment result. Preserved evidence:
+proof that every instrumentation route is impossible. At that point the
+LDPlayer route was parked pending the new anchor/environment result above.
+Preserved evidence:
 `%LOCALAPPDATA%/halcyon-evidence/halcyon-corr32-observer-final-20260912/`.
+
+A 2026-09-18 method note
+([vainglory-instrumentation-transfer.md](vainglory-instrumentation-transfer.md)
+§1) reports the identical enumeration signature for any translated arm64 app
+on this LDPlayer + Houdini stack and names the specific environment test the
+route was parked on: compare `/proc/<pid>/maps` against the native realm's
+enumeration in one session. [Inferred]
 
 The older “static analysis is blocked by stripped symbols” wording was also
 too broad. Symbols are absent, but identified dispatch handlers and CFF

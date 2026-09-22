@@ -453,6 +453,26 @@ class TestSessionPreconditions(unittest.TestCase):
         self.assertEqual((caught.exception.stage, caught.exception.status),
                          ("SETUP", "FAIL"))
 
+    def test_native_hud_before_first_world_state_waits_without_input(self):
+        directory = self.base / 'first-world'
+        directory.mkdir()
+        qa = sc.QaSession(str(directory), submit=self.harness.qa.submit)
+        def publish(_seconds):
+            if not (directory/'state.json').exists():
+                (directory/'state.json').write_text('{"tick":100}', encoding='utf-8')
+        with mock.patch.object(sc.time, 'sleep', side_effect=publish):
+            session = sc.verify_session(qa, timeout=1)
+        self.assertGreater(session['tick'], 100)
+        self.assertFalse(any(call[0] in ('tap','swipe') for call in self.harness.adb.calls))
+
+    def test_first_world_state_still_absent_at_deadline_is_not_accepted(self):
+        directory = self.base / 'missing-first-world'
+        directory.mkdir()
+        qa = sc.QaSession(str(directory), submit=self.harness.qa.submit)
+        with self.assertRaises(sc.ClientStageFailure):
+            sc.verify_session(qa, timeout=0)
+        self.assertEqual(self.harness.qa.snapshots, 0)
+
     def test_qa_dir_inside_repository_is_refused(self):
         inside = ROOT / "Docs" / ".halcyon-qa-test"
         qa = sc.QaSession(str(inside))
@@ -758,7 +778,13 @@ class TestSetupDiagnosticsLinkage(unittest.TestCase):
 
                     with mock.patch.object(sc, "QaSession", fake_qa), \
                             mock.patch.object(sc, "Adb",
-                                              lambda serial: harness.adb):
+                                              lambda serial: harness.adb), \
+                            mock.patch.object(sc.ClientDriver, "_qualify_nonvisual_world",
+                                              return_value=(SKYE_EID, 0, 265)):
+                        # This fixture tests diagnostics refusal after WORLD
+                        # qualification. Native foreground/wire qualification
+                        # has its own nonvisual negative tests; the historical
+                        # fake ADB does not implement that newer precondition.
                         result = sc.run_client("skye-b", types.SimpleNamespace(
                             adb_serial="emulator-5554",
                             qa_dir=str(harness.base / "qa"),

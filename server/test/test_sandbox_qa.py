@@ -17,6 +17,24 @@ from Tools import sandbox_qa as qa_cli
 
 
 class TestSandboxQA(unittest.TestCase):
+    def test_request_enumeration_preserves_glob_candidates_amid_retained_receipts(self):
+        self.assertEqual(sandbox_qa.request_paths(self.directory), [])
+        for i in range(64):
+            (self.directory / f'ack-retained-{i}.json').write_text('{}')
+        names = ['command-z.json', 'command-a.json', 'command.json',
+                 'COMMAND-upper.JSON', 'command-trailing.json.tmp', 'command-noextension']
+        for name in names:
+            (self.directory / name).write_text('{}')
+        (self.directory / 'command-directory.json').mkdir()
+        expected = sorted(p.name for p in self.directory.glob('command*.json'))
+        observed = sorted(p.name for p in sandbox_qa.request_paths(self.directory))
+        self.assertEqual(observed, expected)
+        # Enumeration must retain malformed/directory candidates for explicit
+        # rejection, rather than silently treating them as valid or skipping them.
+        self.assertIn('command.json', observed)
+        self.assertIn('command-directory.json', observed)
+        self.assertEqual(len(list(self.directory.glob('ack-retained-*.json'))), 64)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='halcyon-qa-test-')
         self.addCleanup(self.temporary.cleanup)
@@ -159,6 +177,24 @@ class TestSandboxQA(unittest.TestCase):
         self.assertFalse(self.world.economy.players)
         self.assertFalse(self.frames)
 
+    def test_snapshot_retired_corpse_history_cannot_hide_living_creatures(self):
+        hero = self.world.hero_sims[1500]
+        actors = [wave_module.Minion(6000+i, 2, 0) for i in range(71)]
+        for actor in actors:
+            actor.x, actor.y = hero.x, hero.y
+            actor.hp = 0
+            actor.alive = False
+        actors[-1].x += 5
+        actors[-1].hp, actors[-1].alive = 100, True
+        with patch.object(self.world, '_ability_targets', return_value=actors):
+            snapshot = sandbox_qa.SandboxQA.snapshot(self.world)
+        self.assertEqual(snapshot['nearby_creatures'][0]['eid'], actors[-1].eid)
+        self.assertEqual(len(snapshot['nearby_creatures']), 64)
+        self.assertEqual(snapshot['nearby_creatures_total'], 71)
+        self.assertEqual(snapshot['nearby_creatures_alive'], 1)
+        self.assertEqual(len(actors), 71)  # Diagnostic ordering changes no game state.
+        self.assertFalse(self.frames)
+
     def test_resources_clamp_to_actor_caps_and_publish_only_actual_native_deltas(self):
         hero = self.world.hero_sims[1500]
         old = hero.hp, hero.energy, self.world.economy.players[1500].gold
@@ -185,6 +221,24 @@ class TestSandboxQA(unittest.TestCase):
         self.assertFalse(hero.is_moving)
         self.assertEqual(self.frames[-1][0], 1070)
         self.assertEqual(struct.unpack_from('>Iff', self.frames[-1][1]), (1500, 100, 0))
+        # 1070 is a collision-constrained correction, not an instant relocation.
+        # A long fixture teleport needs the native flag-zero 1033 first.
+        relocations = [p for op, p in self.frames if op == 1033]
+        self.assertEqual(len(relocations), 1)
+        self.assertEqual(struct.unpack('>Ifff6s', relocations[0]), (1500, 100, 0, 0, bytes(6)))
+        self.assertNotIn(1074, [op for op, _ in self.frames])
+
+    def test_absorbed_fixture_damage_reports_hp_loss_separately_from_wire_amount(self):
+        victim = self.world.hero_sims[1517]
+        self.world.status_manager.apply_effect(StatusEffect(
+            'qa-barrier', StatusType.BARRIER, 1517, 1517, 5, 10, 15, 200))
+        before = victim.hp
+        result = self.run_command({'command': 'damage', 'source': 1500, 'target': 1517,
+                                   'amount': 100, 'kind': 'true'})
+        self.assertTrue(result['ok'])
+        self.assertEqual(victim.hp, before)
+        self.assertEqual(result['result']['actual_damage'], 0)
+        self.assertEqual(result['result']['published_damage'], 100)
 
     def test_damage_uses_production_mitigation_and_one_native_hp_delta(self):
         victim = self.world.hero_sims[1517]
@@ -560,6 +614,36 @@ class TestSandboxQA(unittest.TestCase):
                 completed = qa_cli.submit({'command': 'snapshot'}, timeout=.5, request_id='cli2')
             self.assertTrue(completed['ok'])
             self.assertEqual(completed['tick'], 200)
+
+    def test_cli_receipt_sharing_error_retries_read_not_command(self):
+        real_open = Path.open
+        failures = []
+        def sharing_once(path, *args, **kwargs):
+            if path.name == 'ack-sharing.json' and path.exists() and not failures:
+                failures.append(path)
+                raise PermissionError(13, 'receipt temporarily held')
+            return real_open(path, *args, **kwargs)
+        with patch.dict(os.environ, {'HALCYON_QA_DIR': str(self.directory)}), \
+                patch.object(Path, 'open', sharing_once), \
+                patch('Tools.sandbox_qa.time.sleep', side_effect=lambda _: self.qa.pump(self.world)):
+            result = qa_cli.submit({'command':'snapshot'}, timeout=.5, request_id='sharing')
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(result['_client_receipt_read_errors']),1)
+        self.assertEqual(len(list(self.qa.consumed.glob('command*.json'))),1)
+        self.assertFalse(list(self.directory.glob('command*.json')))
+
+    def test_cli_permanent_receipt_sharing_error_remains_pending(self):
+        real_open = Path.open
+        def sharing(path, *args, **kwargs):
+            if path.name == 'ack-sharing.json':
+                raise PermissionError(13, 'receipt held')
+            return real_open(path, *args, **kwargs)
+        with patch.dict(os.environ, {'HALCYON_QA_DIR': str(self.directory)}), patch.object(Path,'open',sharing):
+            result = qa_cli.submit({'command':'snapshot'}, timeout=0, request_id='sharing')
+        self.assertTrue(result['pending'])
+        self.assertEqual(len(result['receipt_read_errors']),1)
+        self.assertEqual(len(list(self.directory.glob('command*.json'))),1)
+        self.assertEqual(result['id'],'sharing')
 
 
 if __name__ == '__main__':

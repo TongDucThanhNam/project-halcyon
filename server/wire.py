@@ -60,6 +60,7 @@ class OP:
     ENTITY_FULL_UPDATE = 1010
     MOVE_CAST = 1012          # c2s move tap / targeted cast [f32 x][f32 y][6B 0]
     MOVE_TO = 1016            # s2c ActionMoveTo: [u8 compact actor id][f32 x][f32 y][5B pad]
+    MOVE_TO_3D = 1017         # [u8 actor][f32 x,height,z][u8 preserve_selection]
     ENTITY_FLOAT = MOVE_TO    # legacy name retained for minion encoders
     ENTITY_RESPAWN = 1033     # pre-return relocation; hero remains dead until 1074
     DESPAWN = 1035

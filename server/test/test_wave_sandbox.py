@@ -5,7 +5,7 @@ import unittest
 
 from server import jungle, roster, structures, wave
 from server.hero_movement import HeroMovement
-from server.navigation import DEFAULT_A001_PATH, load_halcyon_navmesh
+from server.navigation import DEFAULT_CLASSIC_NAVMESH, load_halcyon_navmesh
 from server.status_effects import StatusEffect, StatusManager, StatusType
 
 
@@ -216,7 +216,7 @@ class TestWaveCombatAndPush(unittest.TestCase):
         self.assertIsInstance(states[0][0][1][0], int)
 
 
-@unittest.skipUnless(DEFAULT_A001_PATH.is_file(), 'external A001 navmesh unavailable')
+@unittest.skipUnless(DEFAULT_CLASSIC_NAVMESH.is_file(), 'owned baked navmesh unavailable')
 class TestWaveActualNavigation(unittest.TestCase):
     def test_lane_wave_and_postfight_push_remain_on_actual_mesh(self):
         mesh = load_halcyon_navmesh()

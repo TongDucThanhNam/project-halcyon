@@ -15,6 +15,7 @@ from .attack_wire import (build_attack_start, MELEE_MINION_BASIC_VARIANTS,
                           RANGED_MINION_BASIC_VARIANTS)
 from .lifecycle_wire import build_hero_death
 from .navigation import SCALE, fixed
+from .combat import basic_attack_reach
 from dataclasses import dataclass, field
 import heapq
 import math
@@ -188,7 +189,8 @@ class Minion:
                 nx = self._x + (abs(dx) * budget // dist) * (1 if dx >= 0 else -1)
                 ny = self._y + (abs(dy) * budget // dist) * (1 if dy >= 0 else -1)
                 if self.navigation is not None:
-                    nx, ny = map(fixed, self.navigation.clamp_segment((self.x, self.y), (nx / SCALE, ny / SCALE)))
+                    nx, ny = map(fixed, self.navigation.clamp_walk_step(
+                        (self.x, self.y), (nx / SCALE, ny / SCALE), self.path[self.seg], budget))
                 self._x, self._y = nx, ny
                 budget = 0
 
@@ -206,7 +208,7 @@ class Minion:
             self._pursuit_destination = destination
         distance = math.dist((self.x, self.y), destination)
         if len(mover.waypoints) == 1 and dt:
-            mover.base_speed = min(mover.base_speed, max(0.0, distance - self.attack_range) / dt)
+            mover.base_speed = min(mover.base_speed, max(0.0, distance - basic_attack_reach(self, target)) / dt)
         mover.step(dt)
         self.x, self.y = mover.x, mover.y
 
@@ -271,6 +273,13 @@ class Director:
                        else self.rules.siege_spawner if pair == 5 else SANDBOX_SPAWNERS[pair])
             frames.append((OP_SPAWN_1010, roster.build_minion_spawn_1010(
                 spawner, m.eid, m.x, m.y, seq, m.side)))
+            # Creation126 has no HP fields. Native archetype defaults (e.g.
+            # melee575/ranged475) otherwise disagree with sandbox composition
+            # and wave growth, causing native death before server death. Set
+            # the new actor's authoritative maximum, then fill its new pool.
+            # Current-health1053 clamps to that maximum; this is spawn-only.
+            frames.append((1052, roster.build_entity_base_attribute(m.eid, m.max_hp, 0)))
+            frames.append((1053, roster.build_hero_stat(m.eid, m.hp, roster.STAT_HEALTH)))
             frames.extend(self._publish_move_intent(m, m.path[0]))
             frames.append((OP_POSITION_1070,
                            roster.build_position(m.eid, m.x, m.y)))
@@ -682,7 +691,7 @@ class Director:
     def _in_attack_range(minion, target):
         # Integer directional integration rounds each component toward origin;
         # permit its two-microunit endpoint error at the nominal range boundary.
-        radius = fixed(minion.attack_range) + 2
+        radius = fixed(basic_attack_reach(minion, target)) + 2
         dx, dy = fixed(minion.x) - fixed(target.x), fixed(minion.y) - fixed(target.y)
         return dx * dx + dy * dy <= radius * radius
 

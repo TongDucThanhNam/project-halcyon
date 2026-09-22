@@ -8,6 +8,21 @@ from server.hero_movement import HeroMovement
 
 
 class TestHeroMovement(unittest.TestCase):
+    def test_invalidated_pursuit_stops_without_following_its_obsolete_route(self):
+        hero=HeroMovement(eid=1500,team=1,x=0,y=0)
+        hero.set_target_eid(1517)
+        hero.step(.05,now=.05,target_pos=(12,0))
+        self.assertTrue(hero.is_moving)
+        before,version=hero.position_fixed,hero.order_version
+        frames=hero.step(.05,now=.1,target_pos=None)
+        self.assertEqual(hero.position_fixed,before)
+        self.assertFalse(hero.is_moving)
+        self.assertIsNone(hero.target_eid)
+        self.assertIsNone(hero.move_target)
+        self.assertEqual(hero.waypoints,[])
+        self.assertEqual(hero.order_version,version)
+        self.assertEqual(frames,[(wire.OP.POSITION,roster.build_position(1500,hero.x,hero.y))]*2)
+
     def test_walk_single_target_arrives_and_stops(self):
         hero = HeroMovement(eid=1500, team=1)
         self.assertEqual(hero.position_fixed, (-78180000, 880000))

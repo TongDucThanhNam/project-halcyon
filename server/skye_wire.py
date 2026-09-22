@@ -23,6 +23,52 @@ CLUSTER_ARCHETYPE = 384
 LINE_ARCHETYPE = 385
 _MATCH = 'ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e889'
 
+# Native Skye presentation constants
+SOCKET_BARRAGE = 0x259FD523
+SOCKET_ROCKET_POD_L = 0x4578DE4F
+SOCKET_ROCKET_POD_R = 0x3B78CE91
+
+KIND_SKYE_BASIC = 108
+KIND_SKYE_BARRAGE = 110
+KIND_SKYE_MISSILE = 111
+
+BUFF_SKYE_PERK_CONTROL = 600
+BUFF_SKYE_LOCKED_SKYE = 601
+BUFF_SKYE_LOCKED_TARGET = 602
+BUFF_SKYE_HARD_LOCK_INDICATOR = 603
+BUFF_SKYE_CIRCLE_STRAFING = 604
+BUFF_SKYE_JUMP_JETS_PENDING = 605
+BUFF_SKYE_JUMP_JETS = 606
+BUFF_SKYE_BARRAGE = 607
+BUFF_SKYE_BARRAGE_SLOW = 608
+BUFF_SKYE_EXECUTING_B_DASH = 609
+BUFF_SKYE_FIRING_B_MISSILES = 610
+BUFF_SKYE_HIT_BY_B_MISSILES = 611
+
+# Captured 1027/1039 elevation word (chunk36, every dash and barrage frame).
+GROUND_ELEVATION_BITS = 0x3BE7A8F8
+
+
+def pack_angle_bits(direction: tuple[float, float]) -> int:
+    """1087 state word holding f32 atan2(dir_y, dir_x).
+
+    Chunk36:1341 carries 0x402C7089 (2.6944 rad) for the captured barrage
+    direction (-0.902, 0.432); chunk36:2118 carries 0xC046D217 (-3.1067 rad)
+    for the dash toward (-1, ~0). Both decode to the aim angle within ~1e-4
+    rad of atan2 over the rounded 1039 direction components.
+    """
+    import math as _math
+    import struct as _struct
+    dx, dy = direction
+    angle = _math.atan2(dy, dx)
+    return _struct.unpack_from('>I', _struct.pack('>f', angle))[0]
+
+
+def pack_scalar_bits(value: float) -> int:
+    """1087 state word holding one f32 scalar (e.g. the 610 dash distance)."""
+    import struct as _struct
+    return _struct.unpack_from('>I', _struct.pack('>f', value))[0]
+
 
 @lru_cache(maxsize=1)
 def native_volley_templates():

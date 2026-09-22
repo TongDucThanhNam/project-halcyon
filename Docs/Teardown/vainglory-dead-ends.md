@@ -139,6 +139,33 @@ wrong conclusion.
 Recorded only to close the question. Veilbound is offline by design — backend,
 accounts and matchmaking remain deferred/non-goals in `CLAUDE.md` and `GOAL.md`.
 
+## Frida native hooks on the translated LDPlayer client — closed on translation grounds
+
+> **2026-09-22 distinction:** ARM hooks remain closed; **anchored mapped-data
+> reads now work** through Frida's native realm. The namespace split is
+> confirmed, and the known `1070` consumer supplied a qualified EID-position
+> and correction-state accessor. See runtime reconstruction §8 and its
+> evidence link. Do not conflate native module enumeration with memory
+> readability, or repeat blind hook/heap-scan experiments.
+
+> **2026-09-18 update — diagnosis for the corr32 signature.** corr32
+> (runtime leaf §8) attached cleanly but neither realm enumerated
+> `libGameKindred` (196 native + 7 emulated modules). An unrelated
+> 2026-09-18 case on the same LDPlayer 9 + Houdini stack shows the identical
+> signature for any translated arm64 app: Frida's native realm does not
+> enumerate guest ARM modules, while Java-realm tooling works normally.
+> Leading explanation is the translator's separate ARM linker namespace
+> [Inferred]; a minutes-long `/proc/<pid>/maps` vs `enumerateModules()`
+> comparison on our own emulator settles it (method and falsification in
+> `vainglory-instrumentation-transfer.md` §1).
+>
+> Stays closed: `Interceptor` hooks inside translated ARM code. The
+> precondition is a native ARM execution environment (rooted physical arm64
+> device), not better Frida configuration. Unchanged sanctioned routes: the
+> PC lab, a physical device, and the HackedGlory loader-shim lead. Do not
+> re-run module-enumeration qualifications on the translated emulator
+> expecting a different list.
+
 ## Breaking the INST codec — stop, and the route that replaced it
 
 > **2026-09-03 update — route closed, replaced by a sanctioned one.** The 45-combination

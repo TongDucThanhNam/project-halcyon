@@ -38,6 +38,47 @@ class TestSkyeSession(unittest.TestCase):
         for _ in range(count):
             self.world.advance_simulation()
 
+    def test_experimental_perk_control_is_persistent_and_not_recreated_every_tick(self):
+        self.world.native_skye_control=True
+        self.ticks(3)
+        rows=[p for op,p in self.frames if op==1087 and struct.unpack_from('>H',p,14)[0]==600]
+        self.assertEqual(len(rows),1)
+        self.assertEqual(struct.unpack_from('>II',rows[0]),(1500,1500))
+        self.assertEqual(struct.unpack_from('>e',rows[0],8)[0],-1)
+        self.assertEqual(struct.unpack_from('>H4I',rows[0],16),(1,0,0,0,0))
+        self.world.status_manager.clear_target(1500,now=self.world.sim_time)
+        self.hero.is_alive=False
+        self.frames.clear();self.ticks(1)
+        self.assertFalse(any(op==1087 and struct.unpack_from('>H',p,14)[0]==600 for op,p in self.frames))
+        self.hero.is_alive=True
+        self.ticks(1)
+        self.assertIn((1500,'skye_perk_control'),self.world.status_manager.presentation.active)
+
+    def test_temporary_skye_speed_publication_preserves_equipment_and_expires(self):
+        self.world.publish_skye_speed=True
+        self.kit.locked_target=self.enemy
+        self.kit.lock_expires_at=1.0
+        self.kit._strafe_until=.3
+        self.hero.item_move_speed=.3
+        self.hero.set_target(10,35)
+        self.ticks(2)
+        speed=lambda:[struct.unpack_from('>f',p,8)[0] for op,p in self.frames
+                      if op==1052 and p[:4]==struct.pack('>I',1500) and p[12]==18]
+        self.assertEqual(speed(),[2.0])
+        self.hero.set_target(-10,35)
+        self.ticks(1)
+        self.assertAlmostEqual(speed()[-1],-1.8,places=6)
+        reconnect=[]
+        self.world._reconnect_hero_state(self.world.players[0],lambda op,p:reconnect.append((op,p)))
+        restored=[struct.unpack_from('>f',p,8)[0] for op,p in reconnect
+                  if op==1052 and p[:4]==struct.pack('>I',1500) and p[12]==18]
+        self.assertEqual(restored,[.5])
+        self.ticks(4)
+        self.assertEqual(len(speed()),3)
+        self.assertAlmostEqual(speed()[-1],-.2,places=6)
+        self.assertEqual(self.hero.item_move_speed,.3)
+        self.assertAlmostEqual(self.hero.effective_speed(self.world.sim_time),4.0)
+
     def learn(self, slot):
         self.world._apply_event(1078, bytes((slot,)) + bytes(5), self.owner)
 
@@ -105,6 +146,48 @@ class TestSkyeSession(unittest.TestCase):
         self.assertEqual([p[8] for op, p in self.frames if op == 1045], [1])
         self.assertAlmostEqual(cost_energy, 960)
 
+    def test_basic_target_resumes_after_barrage_without_a_second_selection_input(self):
+        self.learn(0)
+        self.world._apply_event(1060, roster.build_target_entity(1517))
+        self.ticks(8)
+        self.cast(0)
+        self.assertIsNone(self.hero.target_eid)  # No automatic pursuit during mobile A.
+        self.ticks(61)
+        self.assertEqual(self.hero.target_eid, 1517)
+        self.frames.clear()
+        self.ticks(30)
+        hits = [p for op, p in self.frames if op == 1054 and
+                struct.unpack_from('>II', p) == (1517, 1500) and p[12:] == roster.COMBAT_DELTA_HERO_TAIL]
+        self.assertTrue(hits, 'native selection is retained; no second1060 is required to resume basics')
+
+    def test_new_ground_order_during_barrage_supersedes_the_suspended_attack_target(self):
+        self.learn(0)
+        self.world._apply_event(1060, roster.build_target_entity(1517))
+        self.ticks(2)
+        self.cast(0)
+        self.world._apply_event(1012, roster.build_move(-10, 35))
+        self.ticks(61)
+        self.assertIsNone(self.hero.target_eid)
+        self.assertLess(self.hero.x, 0)
+
+    def test_barrage_target_restoration_respects_retarget_recall_stop_and_death(self):
+        for cause in ('retarget', 'recall', 'stop', 'death'):
+            with self.subTest(cause=cause):
+                self.setUp()
+                self.learn(0)
+                self.hero.set_target_eid(1517)
+                self.cast(0)
+                if cause == 'retarget':
+                    self.hero.set_target_eid(9001)
+                elif cause == 'recall':
+                    self.hero.start_recall(.1)
+                elif cause == 'stop':
+                    self.hero.stop()
+                else:
+                    self.hero.is_alive = False
+                self.kit.cancel_native_action(1, .2)
+                self.assertEqual(self.hero.target_eid, 9001 if cause == 'retarget' else None)
+
     def test_b_native_action_two_requires_lock_then_dash_and_missiles_resolve(self):
         self.learn(1)
         self.cast(2, (4, 35))
@@ -122,6 +205,34 @@ class TestSkyeSession(unittest.TestCase):
         self.assertFalse(self.hero.basic_attack_disabled)
         self.assertLess(self.enemy.hp, before)
         self.assertEqual(sum(op == 1054 for op, _ in self.frames), 4)
+
+    def test_suri_restores_retained_selection_and_resumes_basics_without_second_1060(self):
+        self.learn(1)
+        self.establish_lock()
+        self.world._apply_event(1060,roster.build_target_entity(1517))
+        self.cast(2,(2,35))
+        self.assertIsNotNone(self.kit._suri)
+        self.assertIsNone(self.hero.target_eid)
+        self.ticks(12)
+        self.assertEqual(self.hero.target_eid,1517)
+        self.frames.clear()
+        self.ticks(35)
+        self.assertTrue(any(op==1054 and struct.unpack_from('>II',p)==(1517,1500)
+                            and p[12:]==roster.COMBAT_DELTA_HERO_TAIL for op,p in self.frames))
+
+    def test_suri_target_restoration_does_not_overwrite_superseding_intent_or_death(self):
+        for cause in ('retarget','recall','stop','ground','death'):
+            with self.subTest(cause=cause):
+                self.setUp();self.learn(1);self.establish_lock()
+                self.world._apply_event(1060,roster.build_target_entity(1517))
+                self.cast(2,(2,35))
+                if cause=='retarget':self.hero.set_target_eid(9001)
+                elif cause=='recall':self.hero.start_recall(self.world.sim_time)
+                elif cause=='stop':self.hero.stop()
+                elif cause=='ground':self.hero.set_target(-5,35)
+                else:self.hero.is_alive=False
+                self.kit.interrupt_channel(self.world.sim_time+.05)
+                self.assertEqual(self.hero.target_eid,9001 if cause=='retarget' else None)
 
     def test_c_native_action_four_pays_energy_and_waits_for_delayed_damage(self):
         progression = self.world.economy.get_or_create(1500)

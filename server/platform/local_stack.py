@@ -659,7 +659,11 @@ def main(argv=None) -> None:
                     help="Gateway port (default: _gw_port or 7100)")
     ap.add_argument("--hb-port", type=int, default=None,
                     help="Heartbeat port (default: _hb_port or 2112)")
+    ap.add_argument("--same-hero", action="store_true",
+                    help="Sandbox: all six slots mirror the host's hero and skin at lock")
     args = ap.parse_args(argv)
+    if args.same_hero:
+        os.environ["HALCYON_SAME_HERO"] = "1"
 
     os.makedirs(STACK_DIR, exist_ok=True)
     if not os.path.exists(ANSWERS_PATH):

@@ -6,6 +6,7 @@ client scenario. Their effects are diagnostic setup, never acceptance evidence.
 from __future__ import annotations
 
 import copy
+import fnmatch
 import hashlib
 import json
 import math
@@ -17,7 +18,7 @@ import struct
 import time
 import tempfile
 
-from . import combat, economy, roster, wire
+from . import combat, economy, recall_wire, roster, wire
 from .abilities import NATIVE_STATUS_KINDS
 from .status_effects import StatusEffect, StatusType
 
@@ -37,6 +38,50 @@ _SCHEMAS = {
     "status": ({"command", "eid", "type", "duration"}, {"magnitude", "dx", "dy", "speed"}),
     "learn": ({"command", "eid", "slot"}, set()),
 }
+
+
+def request_paths(directory):
+    """Enumerate requests without materializing every retained Windows ack.
+
+    Path.glob scans the whole directory in Python. A long instrumented match
+    accumulates thousands of immutable receipts beside its pending requests.
+    The native name filter avoids bringing all those entries into each tick.
+    Ordering, reservation, file validation and at-most-once semantics stay in
+    pump/read_command. Other platforms retain the existing implementation.
+    See https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-findfirstfilew
+    """
+    if os.name != 'nt':
+        return list(directory.glob('command*.json'))
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    first, advance, close = kernel.FindFirstFileW, kernel.FindNextFileW, kernel.FindClose
+    pointer = ctypes.POINTER(wintypes.WIN32_FIND_DATAW)
+    first.argtypes, first.restype = [wintypes.LPCWSTR, pointer], wintypes.HANDLE
+    advance.argtypes, advance.restype = [wintypes.HANDLE, pointer], wintypes.BOOL
+    close.argtypes, close.restype = [wintypes.HANDLE], wintypes.BOOL
+    data = wintypes.WIN32_FIND_DATAW()
+    handle = first(str(directory / 'command*.json'), ctypes.byref(data))
+    if handle == ctypes.c_void_p(-1).value:
+        error = ctypes.get_last_error()
+        if error == 2:  # ERROR_FILE_NOT_FOUND means no matching request.
+            return []
+        raise ctypes.WinError(error)
+    paths = []
+    try:
+        while True:
+            # Win32 also matches short names/DOS wildcard variants. Preserve
+            # the prior long-filename glob predicate before schema validation.
+            name = data.cFileName
+            if fnmatch.fnmatchcase(name.lower(), 'command*.json'):
+                paths.append(directory / name)
+            if not advance(handle, ctypes.byref(data)):
+                error = ctypes.get_last_error()
+                if error != 18:  # ERROR_NO_MORE_FILES, never swallow I/O errors.
+                    raise ctypes.WinError(error)
+                return paths
+    finally:
+        close(handle)
 
 
 def _number(value, name, low, high):
@@ -225,7 +270,7 @@ class SandboxQA:
         # locked, pause new fixture work while ordinary gameplay keeps ticking.
         capacity = MAX_COMMANDS_PER_PUMP - len(self._pending_acks)
         try:
-            paths = sorted(self.directory.glob("command*.json"), key=lambda path: path.name)[:capacity] if capacity else []
+            paths = sorted(request_paths(self.directory), key=lambda path: path.name)[:capacity] if capacity else []
         except OSError as error:
             self._io_error(world, "list requests", error)
             paths = []
@@ -342,7 +387,13 @@ class SandboxQA:
             "tape_file_identity": file_identity,
             "env": {name: os.environ.get(name)
                     for name in ("HALCYON_NO_BOTS", "HALCYON_TRACE_WIRE",
-                                 "HALCYON_NO_TAPE", "HALCYON_NO_WAVE")},
+                                 "HALCYON_NO_TAPE", "HALCYON_NO_WAVE",
+                                 "HALCYON_NATIVE_STEERING_LIBRARY", "HALCYON_OWNER_WALK_ANCHORS",
+                                 "HALCYON_PUBLISH_PURSUIT_INTENT", "HALCYON_NATIVE_SKYE_CONTROL",
+                                 "HALCYON_PUBLISH_SKYE_SPEED")},
+            "navigation":dict(getattr(getattr(world,'navigation',None),'source_metadata',{})),
+            "steering_counts":dict(getattr(getattr(world,'navigation',None),'query_counts',{})),
+            "runtime_source_root":str(Path(__file__).resolve().parents[1]),
             "match_id": getattr(world, "match_id", None),
             "phase": getattr(world, "phase", None),
             "match_finished": getattr(
@@ -392,12 +443,13 @@ class SandboxQA:
                 raise ValueError("damage requires two existing living actors")
             before = target.hp
             frames = world._deal_damage(source, target, command["amount"], command["kind"], now)
-            actual = sum(-struct.unpack_from(">f", payload, 8)[0] for opcode, payload in frames
+            published = sum(-struct.unpack_from(">f", payload, 8)[0] for opcode, payload in frames
                          if opcode == 1054 and struct.unpack_from(">I", payload)[0] == command["target"])
             world._emit_frames(frames)
             world._drain_effect_frames()
             return {"target": command["target"], "hp_before": before, "hp_after": target.hp,
-                    "current_eid": target.eid, "actual_damage": max(0, actual)}
+                    "current_eid": target.eid, "actual_damage": max(0, before - target.hp),
+                    "published_damage": max(0, published)}
         hero = self._hero(world, command["eid"])
         if name == "teleport":
             if world.navigation is None:
@@ -405,10 +457,17 @@ class SandboxQA:
             x, y = world.navigation.nearest_point((command["x"], command["y"]))
             hero.set_target_eid(None)
             world.attacks.cancel(hero.eid)
-            frames = hero.stop() + hero.teleport(x, y)
+            height = world.navigation.height_at((x, y))
+            frames = hero.stop()
+            # A 1070 correction integrates through client collision/pathing;
+            # it can stop far short across an obstacle. The identified 1033
+            # flag-zero consumer performs relocation without resurrection.
+            frames.append((1033, recall_wire.build_return_relocation(hero.eid, x, y, height)))
+            frames.extend(hero.teleport(x, y))
             world._emit_frames(frames)
             world._drain_effect_frames()
-            return {"eid": hero.eid, "x": hero.x, "y": hero.y}
+            return {"eid": hero.eid, "x": hero.x, "y": hero.y, "height": height,
+                    "relocation": 1033, "scope": "diagnostic fixture; mesh surface, not model height"}
         if name == "resources":
             econ = world.economy.get_or_create(hero.eid)
             frames = []
@@ -486,10 +545,17 @@ class SandboxQA:
             row = {"eid": eid, "team": hero.team, "hero_id": getattr(hero, "hero_id", None),
                    "x": hero.x, "y": hero.y, "hp": hero.hp, "max_hp": hero.max_hp,
                    "energy": hero.energy, "max_energy": hero.max_energy, "alive": hero.is_alive,
+                   "combat_stats": {"weapon_power": hero.attack_damage,
+                                    "crystal_power": hero.crystal_power,
+                                    "armor": hero.armor, "shield": hero.shield},
                    "target": hero.target_eid, "recall_completes_at": hero.recall_completes_at,
+                   "movement_speed": hero.effective_speed(now, world.status_manager.get_speed_multiplier(eid, now), world.status_manager),
                    "respawn_at": hero.respawn_at, "ranks": {}, "ability_cooldowns": {},
                    "gold": None, "xp": None, "level": hero.level, "ability_points": None,
                    "inventory": [], "item_cooldowns": {}, "default_items": []}
+            score = world.scoreboard.players[eid]
+            row["score"] = {"kills": score.kills, "deaths": score.deaths, "farm": score.farm,
+                            "assists": None, "assist_policy": "UNIMPLEMENTED"}
             if kit is not None:
                 row["ranks"] = {str(int(slot)): rank for slot, rank in sorted(kit.ranks.items())}
                 row["ability_cooldowns"] = {str(int(slot)): max(0, ready - now) for slot, ready in sorted(kit.cooldowns.items())}
@@ -510,8 +576,15 @@ class SandboxQA:
                     "alive": combat.alive(actor), "distance": round(distance, 3),
                     "kind": getattr(getattr(actor, "kind", None), "value", None)}
         creatures = [actor_row(actor) for actor in world._ability_targets()]
-        nearby = sorted((row for row in creatures if row["distance"] <= 40), key=lambda row: (row["distance"], row["eid"]))[:64]
+        nearby_all = [row for row in creatures if row["distance"] <= 40]
+        # The director retains dead history after native corpse removal. Those
+        # nearest corpses must not consume the entire bounded diagnostic window
+        # and hide living targets during a longer ordinary match exercise.
+        nearby = sorted(nearby_all, key=lambda row: (not row["alive"], row["distance"], row["eid"]))[:64]
         return {"diagnostic_fixture": True, "match_id": world.match_id, "phase": world.phase,
                 "tick": world.sim_tick, "time": now, "heroes": heroes, "nearby_creatures": nearby,
+                "nearby_creatures_total": len(nearby_all),
+                "nearby_creatures_alive": sum(row["alive"] for row in nearby_all),
+                "nearby_creatures_order": "living-first-distance-eid",
                 "structures": [actor_row(actor) for _, actor in sorted(world.structures.structures.items())][:32],
                 "match_finished": world.structures.match_finished, "winner_team": world.structures.winner_team}

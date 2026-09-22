@@ -380,8 +380,12 @@ class PlayerEconomy:
                 stats["energy_regen"] += item.energy_regen
         return stats
 
-    def apply_to_hero(self, hero: HeroMovement):
-        """Update hero stats based on level and item bonuses."""
+    def apply_to_hero(self, hero: HeroMovement, *, level_increment: bool = False):
+        """Update stats; native 1076 preserves HP/energy fractions on growth.
+
+        Item attribute changes have their own resource publication and must not
+        accidentally inherit the level action's implicit resource adjustment.
+        """
         # Ensure base stats are preserved on hero
         if not hasattr(hero, "base_max_hp"):
             hero.base_max_hp = hero.max_hp
@@ -395,10 +399,10 @@ class PlayerEconomy:
 
         old_max_hp = hero.max_hp
         hero.max_hp = hero.base_max_hp + (lvl_bonus * getattr(hero, "hp_per_level", HP_PER_LEVEL)) + item_stats["max_hp"]
-        # Maintain HP proportion or grant flat bonus
         hp_delta = hero.max_hp - old_max_hp
         if hp_delta > 0 and hero.is_alive:
-            hero.hp = min(hero.max_hp, hero.hp + hp_delta)
+            fraction = hero.hp / old_max_hp if level_increment and old_max_hp > 0 else 1.0
+            hero.hp = min(hero.max_hp, hero.hp + hp_delta * fraction)
         else:
             hero.hp = min(hero.hp, hero.max_hp)
 
@@ -416,7 +420,9 @@ class PlayerEconomy:
                 hero.base_energy_regen = hero.energy_regen
             old_max_energy = hero.max_energy
             hero.max_energy = hero.base_max_energy + item_stats["max_energy"] + lvl_bonus * getattr(hero, "energy_per_level", 0.0)
-            hero.energy = min(hero.max_energy, hero.energy + max(0.0, hero.max_energy - old_max_energy))
+            fraction = hero.energy / old_max_energy if level_increment and old_max_energy > 0 else 1.0
+            hero.energy = min(hero.max_energy,
+                              hero.energy + max(0.0, hero.max_energy - old_max_energy) * fraction)
             hero.energy_regen = (hero.base_energy_regen + item_stats["energy_regen"]
                                 + lvl_bonus * getattr(hero, "energy_regen_per_level", 0.0)
                                 + getattr(hero, "buff_energy_regen", 0.0))
@@ -462,7 +468,7 @@ class EconomyManager:
             return []
         # The native level action applies client-side base stat growth. Update
         # authoritative HP/stats once; a second 1053 HP delta would duplicate it.
-        econ.apply_to_hero(hero)
+        econ.apply_to_hero(hero, level_increment=True)
         frames = []
         for level in levels:
             frames.append((level_wire.OP_LEVEL_INCREMENT, level_wire.build_level_increment(econ.eid)))
@@ -591,10 +597,12 @@ class EconomyManager:
     @staticmethod
     def _item_attribute_frames(eid: int, item: Item, sign: float = 1.0) -> List[Tuple[int, bytes]]:
         # Measured adjacent 1085/1052 purchase signatures, including fractional
-        # attack speed and cooldown reduction. Move-speed wire index is unbound.
+        # attack speed and cooldown reduction. Native c9ee8c also identifies
+        # movement speed as attribute18;1085 inventory alone does not add it.
         attributes = ((0, item.max_hp), (2, item.max_energy), (3, item.energy_regen),
                       (4, item.weapon_power), (5, item.crystal_power), (7, item.armor),
                       (8, item.shield), (15, item.attack_speed / 100.0),
+                      (18, item.move_speed),
                       (25, item.cooldown_reduction))
         return [(1052, roster.build_entity_attribute(eid, amount * sign, attribute_id))
                 for attribute_id, amount in attributes if amount]

@@ -1,5 +1,28 @@
 # Native level, experience and ability-point progression
 
+## 2026-09-22 correction: growth preserves resource percentages
+
+Fresh native resource observation exposed a wounded-level desynchronization:
+Skye level 5, HP 806/max 1214.2, grows to max 1340.75 at level 6. Native HP
+becomes 890.00535; the previous authoritative implementation incorrectly
+granted all 126.55 growth, producing 932.55. Subsequent delta-based QA setting
+did not repair that existing 42.54465 discrepancy.
+
+Pinned ARM64 action `c03ef8`, apply `c03f24`, and entity level consumer
+`c56aa4` independently establish that HP and energy growth each multiply by
+their own pre-level current/maximum ratio. Existing item maximum bonuses
+participate in that denominator. Zero current resources remain zero; a dead
+hero does not revive. No additional HP/energy delta accompanies 1076.
+
+`PlayerEconomy.apply_to_hero(..., level_increment=True)` now implements this
+contract for `_level_frames`. Ordinary item changes keep their separate
+resource publication policy. Two new failing-before/passing-after regressions
+cover the live Skye numbers, partial energy, existing item HP and multiple
+levels. The former constant-missing-HP assertion was an incorrect premise.
+Fresh live observation on the patched stack passes level 3→4: HP error
+`7.39e-7`, matching maximum HP, and energy within the before/after native
+measurement bracket. See [active evidence record](classic-ten-hour-run.md).
+
 The sandbox formerly accumulated XP and raised authoritative hero stats while
 never emitting the native `1076` level action. This explains the local Adagio
 HUD staying at level 1: one 1,925-second local trace contained 1,540 XP worth

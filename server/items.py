@@ -21,6 +21,15 @@ DamageCallback = Callable[[Any, Any, float, str, float], Frames]
 
 @dataclass(frozen=True)
 class ItemRules:
+    # Owned HealingFlask metadata + two level-attributed native uses. The
+    # callback/effect registration (ELF c3053c/c305c0) supplies the .3 s cadence.
+    flask_duration: float = 5.0
+    flask_interval: float = 0.3
+    flask_barrier_base: float = 115.0
+    flask_barrier_per_level: float = 35.0
+    flask_heal_base: float = 200.0
+    flask_heal_per_level: float = 25.0
+    flask_energy_fraction: float = 0.30
     sprint_speed: float = 2.0
     sprint_duration: float = 3.0
     fountain_duration: int = 3
@@ -55,6 +64,7 @@ class ItemActivation:
     reason: str = ""
     cooldown: float = 0.0
     cooldown_tag: Optional[int] = None
+    resource_frames: tuple[tuple[int, bytes], ...] = ()
 
     def frames(self, eid: int) -> Frames:
         if not self.success or self.cooldown_tag is None:
@@ -174,11 +184,51 @@ class ItemManager:
             self._cooldown_timers[(eid, group)] = (item.cooldown_tag, item.cooldown, now + item.cooldown)
         return ItemActivation(True, cooldown=item.cooldown, cooldown_tag=item.cooldown_tag)
 
+    def activate_default(self, eid: int, instance_id: int, now: float,
+                         all_heroes: Dict[int, Any]) -> ItemActivation:
+        """Authenticate the separate default inventory; do not invent a gear slot."""
+        hero, player = all_heroes.get(eid), self.economy.players.get(eid)
+        if hero is None or player is None or not self._alive(hero):
+            return ItemActivation(False, "hero unavailable")
+        item = player.default_items.get(instance_id)
+        if item is None or item.item_id != 457 or item.key != 'healing_flask':
+            return ItemActivation(False, "unsupported default item")
+        if any(self.status.has_effect(eid, kind, now) for kind in (StatusType.STUN, StatusType.KNOCKBACK)):
+            return ItemActivation(False, "hero controlled")
+        if not item.is_ready(now):
+            return ItemActivation(False, "item on cooldown")
+        duration, interval = self.rules.flask_duration, self.rules.flask_interval
+        key = f'flask:{eid}'
+        self._effect(key, StatusType.PERIODIC_HEAL, eid, eid, now, duration,
+                     native_kind=buff_wire.ITEM_BUFF_KINDS['healing_flask'])
+        self._effect(key + ':barrier', StatusType.BARRIER, eid, eid, now, duration,
+                     self.rules.flask_barrier_base + self.rules.flask_barrier_per_level * (hero.level - 1),
+                     native_kind=buff_wire.ITEM_BUFF_KINDS['healing_flask'], native_key=key)
+        # Energy samples max energy at activation; the healing callback reads
+        # the current level at each pulse. Both use the native fixed interval.
+        energy = hero.max_energy * self.rules.flask_energy_fraction * interval / duration
+        for kind, amount in (('flask_heal', 0.0), ('flask_energy', energy)):
+            self._periodic[(kind, eid, eid)] = PeriodicEffect(
+                eid, eid, kind, now + interval, now + duration, amount, interval, key)
+        item.begin_cooldown(now)
+        tag = cooldown_wire.ITEM_TAGS[item.key]
+        self._cooldown_timers[(eid, item.key)] = (tag, item.cooldown, item.cooldown_until)
+        immediate = self._restore_flask_energy(hero, energy)
+        return ItemActivation(True, cooldown=item.cooldown, cooldown_tag=tag,
+                              resource_frames=tuple(immediate))
+
+    @staticmethod
+    def _restore_flask_energy(hero: Any, amount: float) -> Frames:
+        actual = min(max(0.0, amount), max(0.0, hero.max_energy - hero.energy))
+        hero.energy += actual
+        return [(wire.OP.ENTITY_STAT, roster.build_hero_stat(hero.eid, actual,
+                    stat_type=roster.STAT_ENERGY))] if actual else []
+
     def cooldown_frames(self, eid: int, now: float) -> Frames:
         """Authoritative active-family timers for reconnect, including sold items."""
         return [(wire.OP.TIMER_TICK, cooldown_wire.build_item_timer(eid, tag, max(0.0, expires - now), duration))
                 for (owner, _group), (tag, duration, expires) in sorted(self._cooldown_timers.items())
-                if owner == eid]
+                if owner == eid and _group != 'healing_flask']  # default_item_frames owns its reconnect timer
 
     def on_ability_cast(self, hero: Any, now: float):
         """Call only after a valid ability has spent energy and begun its cast."""
@@ -300,11 +350,30 @@ class ItemManager:
                 continue
             if effect.kind == "fountain":
                 frames.extend(self._heal(source, target, at))
+            elif effect.kind == 'flask_energy':
+                frames.extend(self._restore_flask_energy(target, effect.amount))
+            elif effect.kind == 'flask_heal':
+                amount = (self.rules.flask_heal_base + self.rules.flask_heal_per_level * (target.level - 1))
+                amount *= effect.interval / self.rules.flask_duration
+                before = target.hp
+                target.heal(amount, at, self.status)
+                actual = target.hp - before
+                if actual:
+                    frames.append((wire.OP.COMBAT_DELTA,
+                        roster.build_combat_delta(source.eid, target.eid, actual,
+                                                   tail=roster.COMBAT_DELTA_HERO_TAIL)))
             elif damage_callback is not None:
                 frames.extend(damage_callback(source, target, effect.amount, "crystal", at))
             else:
                 raise ValueError("item DoT requires the authoritative damage callback")
             effect.next_tick += effect.interval
             if effect.next_tick > effect.expires_at:
-                self._periodic.pop(key, None)
+                # Native healing has a terminal callback (17 full pulses in
+                # each measured five-second use); energy starts immediately
+                # and has no terminal pulse. Arrival timestamps do not establish
+                # the reference server's within-tick initial phase.
+                if effect.kind == 'flask_heal' and at < effect.expires_at:
+                    effect.next_tick = effect.expires_at
+                else:
+                    self._periodic.pop(key, None)
         return frames

@@ -6,7 +6,7 @@ import unittest
 
 from server.paths import research_dir
 from server import buff_wire, cooldown_wire, economy, item_input
-from Tools.Teardown.inspect_item_input import inspect_uses, read_capture
+from Tools.Teardown.inspect_item_input import CapturedFrame, inspect_contract, inspect_uses, read_capture
 
 
 CAPTURE = research_dir('vg_max') / 'vg5_final.pcap'
@@ -76,6 +76,39 @@ class TestItemInputValidation(unittest.TestCase):
                 item_input.parse_item_input(1098, payload)
 
 
+class TestItemContract(unittest.TestCase):
+    def test_observations_keep_order_baseline_and_confounders_without_claiming_acceptance(self):
+        use = item_input.build_item_use(2000)
+        frames = {"c2s": [CapturedFrame(10, 1096, use)], "s2c": [
+            CapturedFrame(0, 1085, struct.pack(">IIIH", 1500, 457, 2000, 0)),
+            CapturedFrame(9.5, 1053, struct.pack(">IfB5x", 1500, 2, 0)),
+            CapturedFrame(10.1, 1096, use),
+            CapturedFrame(10.2, 1054, struct.pack(">IIf6x", 1500, 1500, 18)),
+            CapturedFrame(10.2, 1054, struct.pack(">IIf6x", 1500, 1517, -10)),
+            CapturedFrame(10.5, 1054, struct.pack(">IIf6x", 1500, 1500, 18)),
+            CapturedFrame(10.5, 1054, struct.pack(">IIf6x", 1517, 1517, 99)),
+            CapturedFrame(17, 1054, struct.pack(">IIf6x", 1500, 1500, 99))]}
+        report = inspect_contract(frames, 1500)
+        attempt, = report['attempts']
+        self.assertEqual([event['s2c_index'] for event in attempt['events']], [1, 3, 4, 5])
+        self.assertEqual(attempt['observed_summary']['positive_self_combat_sum'], 36)
+        self.assertEqual(attempt['observed_summary']['positive_self_combat_intervals'], [.3])
+        self.assertEqual(attempt['observed_summary']['resource_delta_values'], {})
+        self.assertEqual(attempt['mechanical_acceptance'], 'NOT_ESTABLISHED_BY_CORRELATION')
+        self.assertEqual(report['visual_acceptance'], 'UNVERIFIED')
+        frames['s2c'].pop(2)
+        attempt, = inspect_contract(frames, 1500)['attempts']
+        self.assertEqual(attempt['acknowledgement_stage'], 'UNACKNOWLEDGED_REASON_UNKNOWN')
+
+    def test_no_invented_attempt_for_missing_owned_item_or_empty_capture(self):
+        frames = {'c2s': [CapturedFrame(1, 1096, item_input.build_item_use(2000))], 's2c': []}
+        self.assertEqual(inspect_contract(frames, 1500)['attempts'], [])
+        self.assertEqual(inspect_contract({'c2s': [], 's2c': []}, 1500)['attempts'], [])
+        for window in (0, -1, math.inf, math.nan):
+            with self.subTest(window=window), self.assertRaises(ValueError):
+                inspect_contract(frames, 1500, window=window)
+
+
 @unittest.skipUnless(CAPTURE.is_file(), "external passive item capture unavailable")
 class TestItemInputCorpus(unittest.TestCase):
     @classmethod
@@ -127,6 +160,23 @@ class TestItemInputCorpus(unittest.TestCase):
             self.assertEqual(selected[0].source_eid, 1500)
             self.assertEqual(selected[0].duration, duration)
             self.assertNotEqual(selected[0].instance_id, instance)
+
+    def test_two_flask_windows_separate_regen_damage_and_self_healing(self):
+        report = inspect_contract(self.frames, 1500)
+        self.assertEqual(len(report['attempts']), 2)
+        for attempt, shield, pulse in zip(report['attempts'], (255, 325), (18, 21)):
+            summary = attempt['observed_summary']
+            self.assertEqual(summary['positive_self_combat_count'], 17)
+            self.assertEqual(summary['positive_self_combat_values'], [pulse])
+            self.assertEqual(summary['positive_self_combat_sum'], 17 * pulse)
+            self.assertEqual(summary['resource_delta_values']['4'][0], shield)
+            events = attempt['events']
+            buff, = [e for e in events if e['kind'] == 'buff_add' and e['buff_kind'] == 259]
+            self.assertEqual(buff['duration'], 5)
+            self.assertLess(attempt['echo_s2c_index'], buff['s2c_index'])
+            self.assertTrue(any(e['kind'] == 'combat_delta' and e['amount'] < 0 for e in events))
+            self.assertIn('0', summary['resource_delta_values'])  # ordinary regeneration is separate
+        self.assertEqual(report['visual_acceptance'], 'UNVERIFIED')
 
     def test_ground_totem_intent_echoes_and_creates_matching_native_actor(self):
         request = next(row for row in self.frames["c2s"] if row.opcode == 1098)

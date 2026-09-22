@@ -49,11 +49,12 @@ def digest_file(path: Path) -> str:
 
 def source_manifest() -> dict[str, str]:
     paths = sorted((ROOT / "server").glob("*.py")) + [Path(__file__).resolve()]
+    paths.append(ROOT/'Tools/Teardown/detour_route_oracle.cpp')
     return {str(path.relative_to(ROOT)).replace("\\", "/"): digest_file(path) for path in paths}
 
 
 def pin_sources(directory: Path) -> tuple[Path, dict[str, str]]:
-    """Copy only authored Python source, retrying if a concurrent edit races it."""
+    """Copy authored simulation source, retrying if a concurrent edit races it."""
     while True:
         before = source_manifest()
         try:
@@ -86,6 +87,7 @@ def freeze_state(world, controller, mesh_digest: str) -> bytes:
     Callable rule hooks are identified by their qualified names.
     """
     from server.navigation import NavMesh
+    from server.native_steering import NativeSteeringMesh, SurfacePath
 
     seen: dict[int, int] = {}
 
@@ -105,6 +107,15 @@ def freeze_state(world, controller, mesh_digest: str) -> bytes:
             return {"bytes": value.hex()}
         if isinstance(value, NavMesh):
             return {"external_navmesh": mesh_digest}
+        if isinstance(value, NativeSteeringMesh):
+            # Query scratch buffers/pointers and diagnostic counters do not
+            # feed future queries. Pin geometry and native rule implementation.
+            return {"external_navmesh":mesh_digest,
+                    "native_steering":value.source_metadata}
+        if isinstance(value, SurfacePath):
+            return {"surface_path":[freeze(item) for item in value],
+                    "height_fixed":list(value.height_fixed),
+                    "cursor_height_fixed":value.cursor_height_fixed}
         if isinstance(value, Path):
             return {"path": str(value)}
         if callable(value):
@@ -359,7 +370,7 @@ def run_worker(args) -> dict:
     manifest = source_manifest()
     directory = args.output.resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    path = Path(args.navmesh or os.environ.get("HALCYON_NAVMESH", navigation.DEFAULT_A001_PATH))
+    path = Path(args.navmesh or os.environ.get("HALCYON_NAVMESH", navigation.DEFAULT_CLASSIC_NAVMESH))
     mesh_digest = digest_file(path)
     started = time.perf_counter()
     mesh = navigation.load_halcyon_navmesh(path)

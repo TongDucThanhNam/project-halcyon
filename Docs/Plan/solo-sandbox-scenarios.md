@@ -1,5 +1,131 @@
 # Repeatable scenario verification — pilot record
 
+## Current nonvisual paths — September 22, 2026
+
+The no-image/video invariant in `AGENTS.md` supersedes the historical capture
+procedures below. Existing runner client scenarios `movement-walk`,
+`healing-flask`, `skye-a/b/c`, `recall-return`, `shop-purchase` and `classic-match` use anchored native reads and
+ordinary ADB inputs. Select an already-qualified WORLD with explicit
+`--wire-trace`, `--connection`, `--adb-serial` and, except reference walking,
+`--qa-dir`. No recorder or screenshot-based entry guard runs on these paths.
+The historical `minion-push` client driver has not yet been converted; do not
+run its image-dependent path. Production headless minion checks remain usable.
+
+Skye trials pin cast/upgrade controls to the native owner lifetime, check both
+actors' native logical positions against disclosed QA placement, obtain real
+Target Lock for B/C, and compare native HP/EP with server state. QA teleport
+now publishes flag-zero relocation, not only a collision-constrained 1070
+correction. A bot is stunned before placement, avoiding a mailbox-order race.
+Natural levels preserve resource fractions: the damage gate uses that fraction
+plus final scalar agreement, not a pre-level absolute HP threshold. No forced
+cast or cooldown bypass is used. These diagnostic trials do not replace the
+declared compare-pair contract or establish independent CE parity.
+
+`recall-return` measures ordinary input, the four-second return, native logical
+arrival and resource refill. Profile `recall_return.cancel_after_s: 1` instead
+issues one ordinary ground tap, requires its 1012 and both buff removals, and
+checks that neither server nor native client returns. Model effects remain
+unverified in both modes.
+
+`shop-purchase` uses ordinary native shop/open/select/BUY controls, with no QA
+preparation. It requires an idle owner already at base, sufficient earned gold,
+and native/server position, inventory and combat-stat agreement. Default item458
+buys Weapon Blade into an empty equipment inventory. Profile
+`shop_purchase.item_id: 505` upgrades exactly one Weapon Blade to Heavy Steel
+for850gold, checking consumed instance removal and native +45 total item bonus.
+Unknown/offscreen controls stop before input; no blind shop scrolling is used.
+
+`classic-match` is the ordinary full-lifecycle exercise implemented in
+`Tools/classic_client.py`, dispatched only through the existing runner. Profile:
+`{"classic_match":{"capture_backend":"none","drive_entry":false,
+"hero_id":265,"max_duration_s":1800,"max_entry_sim_time_s":75}}`.
+It requires a fresh qualified WORLD, performs native-bound upgrades, purchases,
+ground movement, enemy selection, A/B/C, Flask and Recall, and journals wire,
+authoritative state and native logical/root-model/resource/selection data.
+QA is read-only. Native result labels, final structure health, K/D/farm and
+process/session continuity are required; a missing ordinary input fails its
+stage. Default`abilities:["A","B","C"]` requires all declared casts;
+an explicit narrower subset retains its narrower coverage. B/C require a
+fresh owner/target-specific602lock, excluding cancelled/superseded/dead-target
+locks, requalified immediately before the one gesture. Matching1046and the
+ability-specific1162are required. Default`require_recall:true` requires a
+native/authoritative return plus paired buffs, trigger and relocation.
+Interrupted channels do not count as returns; exact cancellation cause can
+remain unknown. A missing cast overlapping native/wire-confirmed owner death
+during its gesture is separately retained as unacknowledged, never a cast PASS.
+Later/unobserved death does not excuse missing input. These expanded ordinary
+coverage gates have unit qualification; a live complete run is still pending.
+Explicit `require_fresh_start:false` permits a diagnostic continuation,
+but its result cannot claim a complete ordinary match. Maximum duration is
+bounded30..2400seconds. The lane policy is a test exercise, not an official
+bot/AI implementation. Initial live attempts exposed real target-retention and
+minion-health publication defects; no full-match PASS is yet established.
+
+Optional `classic_match.input_bridge_dex` names an **external** dex built from
+`Tools/android/HalcyonInput.java`, with its sibling `.build.json` manifest:
+
+```powershell
+python -B Tools/build_input_bridge.py --r8 <external-r8-8.3.37.jar> --output <new-external-build-directory>
+```
+
+The build helper verifies the pinned public R8 SHA256 and records source/dex
+identity. Obtain R8 from its [official prebuilt distribution](https://r8.googlesource.com/r8/+/refs/heads/main/README.md).
+The wrapper invokes the device's existing ordinary input class, whose route is
+documented in [Android9 Input.java](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android-9.0.0_r1/cmds/input/src/com/android/commands/input/Input.java).
+It does not hook the game or synthesize game packets. Sequential transport
+receipts are not game acknowledgements; all native/wire gates still apply.
+Exact-target diagnostic calls remain strict. The ordinary lane policy may
+select any explicitly eligible enemy in overlapping pick capsules and records
+the actual EID; narrowly wire/native-confirmed concurrent target deaths are
+logged as unacknowledged races, never accepted attacks or blind retries.
+`1060` pursuit acceptance is read-only authoritative target intent plus native
+selection;`1045` is attack start, not an immediate selection acknowledgment.
+The aim-search radius does not limit which known living enemy capsule may
+overlap the aim. Exact prepared attack trials retain their stricter1045gate.
+
+Optional`nonvisual_cast.pursuit_target_position:[12,38]` in`skye-a/b/c` adds a
+disclosed **prepared diagnostic**: select and hit the enemy before the ordinary
+cast, retain selection, then stun/relocate that enemy after the effect. Three
+seconds of native position brackets around authoritative snapshots require
+actual native navigation activation, not only1070correction displacement.
+The0.75-unit diagnostic moving-gap ceiling is not a general smoothness or
+independent-fidelity tolerance. This preparation cannot count as ordinary
+full-match coverage. Outputs include`post-cast-pursuit.jsonl`. Logical and
+root-model reads are both mandatory; selected-target retention is a separate
+gate. Cooldown/energy expenditure uses the retained post-ability snapshot
+before the extra diagnostic can outlast the cooldown, not a later regenerated
+state.11`a-pursuit-02` passes this contract; see the navigation leaf.
+
+The ordinary Classic policy now qualifies one planned Recall at its first
+safe non-base opportunity, then uses resource/gold conditions for later
+returns. Gold now requires an actual affordable purchase supported by the
+qualified shop policy: six completed Heavy Steels must not cause endless
+full-health Recalls for unspendable gold. Flask checks native liveness after
+reading its control; an already-dead owner gets no tap/use credit. This does
+not excuse an otherwise unacknowledged item input or remove later death races.
+This is ordinary input, not forced relocation. B/C input races are
+classified only when the exact locked target dies and its exact lock is
+cancelled within the actual gesture window, plus native death or wire-backed
+native destruction. An interruption does not count as a cast or trigger a
+retry. Missing input without these predicates remains a failure.12retains
+the original C-raceFAIL;13's subsequent UI traversal failure is also retained.
+14ran30minutes and remainsFAIL for not reaching a native result screen despite
+ABC/Recall coverage. Its later diagnostic continuations explicitly set
+`require_fresh_start:false`; they cannot become uninterrupted full-match
+acceptance, and none of the normal end/coverage gates is weakened for them.
+
+For long live work,`pin_sources(external_directory)` now snapshots authored
+server/platform/runtime/observer/query sources together. Launch the local stack
+and existing runner from that same returned source root, with
+`HALCYON_LOCAL_ROOT` pointing at the existing ignored owned inputs. Retain the
+source manifest, launch environment and QA startup/current digest. Do not edit
+that snapshot during a trial. Workspace edits remain independent.
+
+Live evidence under the [ten-hour run](classic-ten-hour-run.md):
+`relocation-live/skye-a-02`, `skye-b-02`, `skye-c-01`, `recall-01` and
+`recall-cancel-01` passed their stated nonvisual gates. Earlier failed trials
+are preserved and explained there; no screenshot/video review is pending.
+
 **Environment setup (2026-09-13):** the
 [Windows reproduction guide](../Setup/windows-local-development.md) documents
 the ignored project-local input layout, exact file inventory, importer and
@@ -3019,3 +3145,46 @@ diffs with `replay_diffs.py` + `diff-replay.json`, the 29-case
 typed-entry verdicts, the parent witnesses under `witness/`), the offline
 bracket calibration `measure_qa_bracket.py` + `qa-bracket.json` + its run
 records, the focused test logs, `hashes.json` and `README.md`.
+
+## 2026-09-13 Skye A/B presentation frames and skin selection repair
+
+Stage: `skins-skye-repair`
+Contract: `29969dc8ddbf181e8990e69135302465de5a3e03324d4ee54c53f48329f12132`
+
+### Cited owned-evidence provenance for wire constants
+- **Sockets (`0x259FD523`, `0x4578DE4F`, `0x3B78CE91`)**: Exact 32-bit FNV-1a / Murmur socket name hashes from client store metadata bindings; verified by `server/test/test_projectile_socket_metadata.py`.
+- **Opcodes 1027, 1038, 1039**: Recovered directly from native Skye match capture `ea4c7fda-4b61-481d-abb7-1c757d24ae58-a683aa80-9811-47c3-bb64-0731a802e889.36.vgr` (`inspect_packet.py`), matching exact 22 B, 30 B, and 46 B payload layouts.
+- **Buffs 600..618**: Recovered from native `KindredBuffs` symbol table in client binary and confirmed in `.vgr` capture stream.
+
+### Candidate presentation wire implementation
+- **Forward Barrage (A)**:
+  - Opcode `1039` (`OP_BARRAGE_PROJECTILE`, 46 B): `[u32 inst][u32 socket 0x259FD523][f32 px, pz, py][f32 dir_x, dir_y, dir_x, dir_y][5s zero][u8 kind=110][u8 src_slot, own_slot][u16 0]`. Emitted on each 0.1s barrage pulse.
+  - Buff 607 (`Buff_Skye_Barrage`): Applied to Skye on cast start, removed on channel end or cancel (`1093`).
+  - Buff 608 (`Buff_Skye_BarrageSlow`): Applied to victims hit during the pulse.
+- **Suri Strike (B)**:
+  - Opcode `1027` (`OP_DASH_TRANSLATION`, 22 B): `[u32 eid][f32 speed=18.0][f32 dest_x, dest_z, dest_y][u16 0]` emitted at dash initiation.
+  - Buff 609 (`Buff_Skye_Executing_B_Dash`): Applied to Skye for dash duration.
+  - Buff 610 (`Buff_Skye_Firing_B_Missiles`): Applied to Skye during missile launches (~0.61s).
+  - Opcode `1038` (`OP_CURVED_PROJECTILE`, 30 B): `[u32 inst][u32 socket][f32 px, pz, py][f32 curve][u8 0][u8 kind=111][u8 src_slot, own_slot][u16 0]` emitted for each of the 4 missiles, alternating RocketPod_L (`0x4578DE4F`, `curve=1.0`) and RocketPod_R (`0x3B78CE91`, `curve=-1.0`).
+  - Buff 611 (`Buff_Skye_HitBy_B_Missiles`): Applied to victims upon missile impact.
+- **Death from Above (C)**:
+  - Retains existing Opcode `1010` volley actor creation (`build_skye_volley_spawn`, `wire.py`) and native buffs `612..618`.
+- **Wire Builders and Parsers**:
+  - Implemented in `server/projectile_wire.py`: `build_dash_translation`, `parse_dash_translation`, `build_curved_projectile`, `parse_curved_projectile`, `build_barrage_projectile`, `parse_barrage_projectile`.
+  - Constants in `server/skye_wire.py`: sockets `0x259FD523` (Barrage), `0x4578DE4F` (RocketPod_L), `0x3B78CE91` (RocketPod_R); projectile kinds `108` (basic), `110` (barrage), `111` (curved missile); buffs `600..618`.
+
+### Candidate skin selection and lock phase
+- Native skin manifest (`getSkinManifest`) served with 290 skins, 192 themes, 276 unlocks, and `canUseAllHeroes: true` in `answers.json` (backup preserved at `attempt-2/answers_backup/answers.json`).
+- `server/hero_catalog.py`: Added canonical base hero mapping and alias resolution (`Krul` -> `Hero009`, `Rona` -> `Hero016`, `Skaarf` -> `Hero010`, `Taka` -> `Sayoc`) to allow any skin ID to resolve to its underlying base hero gameplay kit.
+- `server/roster.py`: Updated `hero_init_for` and `build_hero_block` to resolve skin IDs to canonical base hero IDs.
+- `server/match_server.py`: Preserved cosmetic updates during draft lock countdown via `player.selection_hash` while binding gameplay stats to resolved base hero.
+
+### Worker-tested behavior
+- `server/test/test_skin_selection.py`: 14 tests passed, including `TestSkinSelectionCalibration` verifying pre-fix KeyError / lock-drop failure modes against post-fix resolution.
+- `server/test/test_skye_ab_presentation.py`: 9 tests passed, including `TestSkyeABCalibration` contrasting pre-fix damage-only emissions against post-fix 1027/1038/1039 and buff emissions.
+- Combined new suites: 23 tests pass in 0.064s with ResourceWarning checks enabled.
+- Headless scenarios: `python Tools/run_scenarios.py --mode headless --scenario all` passed with exact byte comparison across independent seeds 11 and 7919 (output: `AppData/Local/Temp/halcyon-scenario-pilot-20260913-162241/summary.json`).
+
+### Live observed rendering & platform validation
+- Real Android CE client connected to local stack on `emulator-5554`: successfully fetched `getSkinManifest`, rendered skin selection cards on draft screen (`screen_skin_panel.png`), and locked in skin with wire trace `c2s 1118`/`1119` (hero 925, selection_hash `0x2fd7245d`, acknowledged by `s2c 1118`/`1119` in `wire-1789291815201156100.jsonl`). Artifacts saved to `C:/Users/terasumi/AppData/Local/halcyon-evidence/agy-skins-skye-328174e8e46f4131befdef14dfe02b07/live-verification/`.
+- Machine packet frames (1027, 1038, 1039) are proven at the wire/unit level; full human visual rendering review of in-world ability VFX remains unreviewed / pending visual acceptance.

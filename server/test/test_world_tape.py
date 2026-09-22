@@ -120,5 +120,55 @@ class TestBootstrapCompletion(_TapeCase):
             self.assertEqual(fh.read(), self.data)
 
 
+class TestAuthoritativeBootstrap(_TapeCase):
+    def test_archived_turret_barriers_do_not_create_unmodeled_native_damage_pools(self):
+        grant = lambda eid, value=100, kind=4: _body(1053,
+            struct.pack(">IfB", eid, value, kind) + b"\x00\x01\x00\x00\x00")
+        times = (9934, 10443, 10955, 11468, 11970, 12478)
+        turrets = (3539, 3540, 3541, 3542, 3543, 3545, 3546, 3547, 3548, 3549)
+        keep = [(0, _body(1087, b"allocation")), (9934, grant(1500)),
+                (9934, grant(3544)), (9934, grant(3550)),
+                (9934, grant(3539, 99)), (9934, grant(3539, kind=0)),
+                (9935, grant(3539))]
+        frames = sorted(keep + [(at, grant(eid)) for at in times for eid in turrets],
+                        key=lambda record: record[0])
+        original = list(frames)
+        fingerprint = hashlib.sha256(b"".join(_record(t, b) for t, b in frames)).hexdigest()
+        with patch.object(world_tape, "_TRUNCATED_BOOTSTRAP_SHA256", fingerprint):
+            completed = world_tape.complete_corpus_bootstrap(frames)
+            published = world_tape.authoritative_corpus_bootstrap(completed)
+            self.assertEqual(published, keep + completed[len(frames):])
+            self.assertEqual(len(completed) - len(published), 60)
+            self.assertEqual(frames, original)
+            self.assertEqual(world_tape.authoritative_corpus_bootstrap(published), published)
+        self.assertEqual(world_tape.authoritative_corpus_bootstrap(completed), completed)
+
+    def test_archived_handicap_does_not_change_native_combat_attributes(self):
+        handicap = lambda eid: _body(1052, struct.pack(">IIfBB", eid, 0xffffffff, .1, 4, 2) + bytes(8))
+        legitimate = _body(1052, roster.build_entity_attribute(1500, 10, 4))
+        frames = [(0, _body(1087, b"allocation")),
+                  *[(8517, handicap(eid)) for eid in (1500, 1516, 1515)],
+                  (12478, legitimate)]
+        original = list(frames)
+        fingerprint = hashlib.sha256(b"".join(_record(t, b) for t, b in frames)).hexdigest()
+        with patch.object(world_tape, "_TRUNCATED_BOOTSTRAP_SHA256", fingerprint):
+            completed = world_tape.complete_corpus_bootstrap(frames)
+            published = world_tape.authoritative_corpus_bootstrap(completed)
+            self.assertEqual(published, [frames[0], frames[-1]] + completed[len(frames):])
+            self.assertEqual(frames, original)
+            self.assertEqual(world_tape.authoritative_corpus_bootstrap(published), published)
+            self._write(b"".join(_record(t, b) for t, b in frames))
+            players = roster.default_solo_bots("test-session", "00000000-1111-4222-8333-444455556666")
+            stream = match_server.SnapshotStream(None, players,
+                "00000000-1111-4222-8333-444455556666", lambda op, p: None, log=lambda *a: None)
+            with patch.object(match_server, "WORLD_TAPE_PATH", self.path), patch.dict(os.environ):
+                os.environ.pop("HALCYON_NO_TAPE", None)
+                stream._load_tape()
+                self.assertEqual(stream.tape_frames, published)
+            self.assertEqual(world_tape.load_tape(self.path), frames)
+        # Identical-looking records in unqualified tapes are not silently edited.
+        self.assertEqual(world_tape.authoritative_corpus_bootstrap(completed), completed)
+
+
 if __name__ == "__main__":
     unittest.main()

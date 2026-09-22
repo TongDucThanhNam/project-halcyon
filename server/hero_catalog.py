@@ -75,3 +75,56 @@ def catalog_payload(name: str) -> bytes:
     if len(body) > CATALOG_1107_PAYLOAD_SIZE:
         raise ValueError(f"hero name {name!r} exceeds {CATALOG_1107_PAYLOAD_SIZE} B payload")
     return body + bytes(CATALOG_1107_PAYLOAD_SIZE - len(body))
+
+
+HERO_INTERNAL_ALIASES: dict[str, str] = {
+    'Krul': 'Hero009',
+    'Rona': 'Hero016',
+    'Skaarf': 'Hero010',
+    'Taka': 'Sayoc',
+}
+
+
+def is_skin_name(name: str) -> bool:
+    """Check if a catalog or asset name represents a hero skin."""
+    return "_Skin_" in name or name.endswith("_DefaultSkin")
+
+
+def get_base_hero_name(name: str) -> str:
+    """Extract the base hero name from a skin or hero name."""
+    clean = name.strip("*")
+    if "_Skin_" in clean:
+        return clean.split("_Skin_")[0]
+    if clean.endswith("_DefaultSkin"):
+        return clean[:-len("_DefaultSkin")]
+    return clean
+
+
+def resolve_hero_name(name_or_id: str | int) -> str:
+    """Resolve a hero or skin name / numeric registry id to its base hero name.
+
+    Numeric ids use the native registry space (HERO_NAMES); the 1107 catalog
+    list is an ordered name payload whose indices are not wire identities.
+    """
+    if isinstance(name_or_id, int):
+        from .hero_balance import HERO_NAMES
+        if name_or_id in HERO_NAMES:
+            return HERO_NAMES[name_or_id]
+        return f"Hero_{name_or_id}"
+    base = get_base_hero_name(str(name_or_id))
+    return HERO_INTERNAL_ALIASES.get(base, base)
+
+
+def resolve_hero_id(name_or_id: str | int) -> int:
+    """Resolve a hero or skin name / numeric registry id to its base hero id."""
+    from .hero_balance import HERO_NAMES
+    if isinstance(name_or_id, int):
+        if name_or_id in HERO_NAMES:
+            return name_or_id
+        return name_or_id
+    base = get_base_hero_name(str(name_or_id))
+    canonical = HERO_INTERNAL_ALIASES.get(base, base)
+    for hid, hname in HERO_NAMES.items():
+        if hname == canonical:
+            return hid
+    return 65535

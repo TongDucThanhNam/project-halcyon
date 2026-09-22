@@ -117,7 +117,32 @@ OP_POSITION_EVENT = 1046
 OP_DAMAGE = 1054
 OP_ENTITY_FULL_UPDATE = 1010
 OP_MOVE_ORDER = 1016
+OP_MOVE_CAST = 1012
 OP_BUFF_ADD = 1086
+
+
+def np_pixel_count(image, predicate):
+    """Count pixels of a PIL RGB image whose channels satisfy predicate()."""
+    import numpy as np
+    array = np.asarray(image).astype(int)
+    r, g, b = array[:, :, 0], array[:, :, 1], array[:, :, 2]
+    return int(np.count_nonzero(predicate(r, g, b)))
+
+
+def screenshot_mean_abs_diff(path_a, path_b):
+    """Mean absolute RGB difference between two screenshots, or None when
+    either cannot be read or the sizes disagree (tooling trouble never
+    counts as gameplay evidence in either direction)."""
+    try:
+        from PIL import Image
+        import numpy as np
+        a = np.asarray(Image.open(path_a).convert("RGB"), dtype=np.int16)
+        b = np.asarray(Image.open(path_b).convert("RGB"), dtype=np.int16)
+    except Exception:
+        return None
+    if a.shape != b.shape:
+        return None
+    return float(np.abs(a - b).mean())
 # s2c [u32 victim][u32 killer][6 pad] — the only explicit minion-death
 # evidence the trace carries: the lane census serves living minions only, so
 # a disappearing row states an absence, never a death.
@@ -138,7 +163,7 @@ STAGES = ("SETUP", "UI_COMMAND_SUBMITTED", "CLIENT_INPUT_OBSERVED",
           "LANE_APPROACH", "OPPOSING_COMBAT", "SURVIVOR_RESUMPTION",
           "STRUCTURE_INTERACTION")
 
-CLIENT_SCENARIOS = ("skye-a", "skye-b", "skye-c", "minion-push")
+CLIENT_SCENARIOS = ("skye-a", "skye-b", "skye-c", "minion-push", "movement-walk", "healing-flask", "recall-return", "shop-purchase", "classic-match")
 
 ANDROID_PACKAGE = "com.superevilmegacorp.game"
 PROFILE_RESOLUTION = (960, 540)
@@ -184,6 +209,67 @@ DEFAULT_PROFILE = {
     # Client minion-push observation point: near the lane but off its marching
     # path, inside the 40u snapshot radius of passing minions.
     "minion_push_hero_position": [0.0, 10.0],  # 8 u off the lane center:
+}
+
+# Classic solo-bots entry taps (LDPlayer 960x540, measured live 2026-09-20).
+# PLAY dialog page 1 -> SOLO BOTS opens the category page -> 3V3 opens the
+# bot-difficulty dialog -> VERY EASY opens the hero draft.
+CLASSIC_ENTRY_TAPS = {
+    "play": (787, 471),
+    "solo_bots": (860, 350),
+    "map_3v3": (715, 290),
+    "difficulty_very_easy": (714, 185),
+    "lock_in": (479, 505),
+    # The skin carousel card row that dismisses with the account default.
+    "skin_default": (479, 70),
+}
+# One page-up swipe inside the draft hero grid (x1, y1, x2, y2), and the Skye
+# tile as it sits after three page scrolls (measured live 2026-09-20).
+HERO_GRID_SCROLL = (480, 420, 480, 130)
+SKYE_DRAFT_TILE = (446, 332)
+SKYE_DRAFT_SCROLLS = 3
+# Google Play Games sign-in prompt over the menu (observed on a fresh app
+# start 2026-09-21, before-run-01): a light full-width panel that swallows
+# every mode-select tap. Cancel is its top-left button.
+GOOGLE_PLAY_CANCEL = (209, 248)
+# The game's own "Failed to sign in" dialog (observed right after cancelling
+# the Play Games prompt on a fresh app start, before-run-02; same transient
+# as the 2026-09-20 manual session). OK is its bottom-left control.
+SIGNIN_ERROR_OK = (276, 299)
+# In-match Settings panel close (X), measured live 2026-09-21: the BACK key
+# TOGGLES this panel in-world (it does not dismiss the post-lock build panel
+# from the client's current flow), and an open panel swallows every world
+# tap. Never tap this blindly: the X pixel is world-space input otherwise.
+SETTINGS_PANEL_CLOSE = (927, 35)
+
+# Default movement-walk plan: scripted touches with nonvisual runtime/wire
+# observation. straight = one fountain lane walk
+# control; retarget = two lateral corrections while walking; corner probes =
+# destinations whose accepted navmesh route bends (verified from the wire
+# trace afterwards); return = walk back toward the spawn side. World
+# destinations are whatever the client camera maps these pixels to; the wire
+# trace keeps the authoritative accepted targets.
+#
+# Every tap must map to a world point clearly away from the hero at that
+# moment: the client suppresses an intent for a tap that lands within about a
+# couple of units of the standing hero, and after between_walks_s the previous
+# walk has long arrived (before-run-14: a retarget re-click produced no 1012
+# and the battery honestly failed its input check 6/7).
+MOVEMENT_WALK_DEFAULTS = {
+    "walks": [
+        {"label": "straight", "taps": [[870, 365]], "tap_gap_s": 0.0},
+        {"label": "retarget", "taps": [[620, 330], [870, 365], [620, 330]],
+         "tap_gap_s": 0.9},
+        {"label": "corner-a", "taps": [[740, 300]], "tap_gap_s": 0.0},
+        {"label": "corner-b", "taps": [[700, 430]], "tap_gap_s": 0.0},
+        {"label": "return", "taps": [[350, 180]], "tap_gap_s": 0.0},
+    ],
+    "between_walks_s": 7.0,
+    "capture_backend": "none",
+    # The old screenshot-dependent entry is historical. Nonvisual entry from
+    # the menu is not qualified; require an existing, runtime-verified WORLD.
+    "drive_entry": False,
+    "settle_before_first_walk_s": 5.0,
 }
 
 
@@ -5498,6 +5584,13 @@ def verify_session(qa: QaSession, *, timeout: float) -> dict:
                                  f"QA directory must stay outside the repository: {resolved}")
     if not Path(qa_dir).is_dir():
         raise ClientStageFailure("SETUP", "FAIL", f"QA directory does not exist: {qa_dir}")
+    # Native HUD/bootstrap may become observable just before the first WORLD
+    # QA publication. Wait only for initial file creation; invalid, stale or
+    # non-progressing state still fails the existing checks below. No input or
+    # repeated QA command is sent during this read-only readiness interval.
+    deadline = time.monotonic() + min(max(timeout, 0.0), 10.0)
+    while not _state_path(qa_dir).exists() and time.monotonic() < deadline:
+        time.sleep(.05)
     first = read_state(qa_dir)
     first_snapshot = qa.snapshot(timeout=timeout)
     tick = first_snapshot.get("tick")
@@ -5554,6 +5647,46 @@ def verify_trace(trace_path: str | None, *, timeout: float) -> TraceTail:
             "wire trace exists but produced no complete records; it may be stale "
             "or belong to a finished connection")
     return tail
+
+
+class _AbsentQa:
+    """Stand-in for scenarios that run without a server QA mailbox.
+
+    movement-walk proves world entry and hero state from the wire trace
+    alone (the September 20 controlled-walk methodology — no QA teleports or
+    forced state), so it may run against a stack launched without
+    HALCYON_QA_DIR. Any QA-dependent call fails SETUP loudly instead of
+    pretending.
+    """
+
+    def __init__(self) -> None:
+        self.qa_dir = None
+        self.receipts = []
+
+    def submit(self, *_args, **_kwargs) -> dict:
+        raise ClientStageFailure("SETUP", "FAIL",
+                                 "no QA mailbox configured for this stack")
+
+    def snapshot(self, *_args, **_kwargs) -> dict:
+        raise ClientStageFailure("SETUP", "FAIL",
+                                 "no QA mailbox configured for this stack")
+
+
+def newest_wire_trace(after_epoch: float, *, trace_dir: str | None = None) -> str | None:
+    """Newest server wire trace modified at/after ``after_epoch``.
+
+    The stack writes one ``wire-<time_ns>.jsonl`` per match server into
+    ``%TEMP%/halcyon_stack``; a freshly driven match therefore gets a fresh
+    file. Returns None while the new match's file has not appeared yet.
+    """
+    directory = Path(trace_dir or (Path(os.environ.get("TEMP", ".")) / "halcyon_stack"))
+    if not directory.is_dir():
+        return None
+    candidates = [p for p in directory.glob("wire-*.jsonl")
+                  if p.stat().st_mtime >= after_epoch - 5.0]
+    if not candidates:
+        return None
+    return str(max(candidates, key=lambda p: p.stat().st_mtime))
 
 
 def select_connection(tail: TraceTail, explicit: int | None, *,
@@ -5729,6 +5862,7 @@ class ClientDriver:
                    if row.get("team") != self._skye.get("team") and row.get("alive")
                    and row.get("eid") != self._skye.get("eid")]
         self._enemy = enemies[0] if enemies else None
+        self._enemy_eid = (self._enemy or {}).get('eid')
         self.stage("SETUP", "PASS",
                    f"owned session at {self.qa.qa_dir}, phase=world, tick={session['tick']}, "
                    f"resolution={resolution['width']}x{resolution['height']}, "
@@ -6009,12 +6143,18 @@ class ClientDriver:
         if not skye.get("alive"):
             raise ClientStageFailure("SETUP", "FAIL", "Skye is dead after preparation")
         self._skye = skye
+        # Setup already chose a living opponent. Preserve that identity;
+        # taking the first enemy row can replace it with an unrelated corpse.
+        preferred_eid = getattr(self, '_enemy_eid', None) or (self._enemy or {}).get('eid')
         enemy = next((row for row in heroes
                       if row.get("team") != skye.get("team")
-                      and row.get("eid") != skye.get("eid")), None)
+                      and row.get("eid") != skye.get("eid")
+                      and (row.get('eid') == preferred_eid if preferred_eid is not None else row.get('alive'))), None)
         if enemy is not None and not enemy.get("alive"):
             enemy = None
         self._enemy = enemy
+        if preferred_eid is None and enemy is not None:
+            self._enemy_eid = enemy['eid']
         return snapshot
 
     def prepare_positions(self) -> None:
@@ -6196,6 +6336,159 @@ class ClientDriver:
         finally:
             self.finalize_capture()
         return self.capture
+
+    # -- host-window capture (movement-walk) --------------------------------
+
+    def restore_ldplayer_window(self, title: str = "LDPlayer") -> dict:
+        """Restore the emulator host window so gdigrab sees live frames.
+
+        An Android-side screenrecord drops to ~4 FPS while the window is
+        minimized (measured 2026-09-20); the restored window sustains a ~30 FPS
+        host capture. Uses FindWindow/ShowWindow through ctypes — no new
+        dependency. Never closes, moves or resizes the window.
+        """
+        import ctypes
+        user32 = ctypes.windll.user32
+        handle = user32.FindWindowW(None, title)
+        evidence: dict[str, Any] = {"title": title, "found": bool(handle)}
+        if not handle:
+            return evidence
+        evidence["was_minimized"] = bool(user32.IsIconic(handle))
+        evidence["restored"] = bool(user32.ShowWindow(handle, 9))  # SW_RESTORE
+        time.sleep(0.8)
+        return evidence
+
+    def _require_host_surface_matches_guest(self, title: str = "LDPlayer") -> dict:
+        """Host-surface liveness gate before spending a walk battery.
+
+        adb screencaps prove the GUEST renders, but the capture films the
+        LDPlayer window's own surface, which can show a store ad or a black
+        frame while the guest stays live (after-run-08 2026-09-21: a full
+        battery with healthy wire was filmed against the MU store ad).
+        Compares a host-side window grab against the guest framebuffer —
+        HUD-free crop, downscaled and blurred so live-world changes (camera
+        drift, ticking counters) stay small. Measured separation
+        2026-09-21: matching world 7.5, store ad 31.0, black surface 56.2;
+        threshold 15 sits 2x below the nearest mismatch class. One retry
+        absorbs transient presentation lag; a surviving mismatch fails
+        SETUP with both surfaces retained.
+        """
+        import ctypes
+        from ctypes.wintypes import RECT
+        import numpy as np
+        from PIL import Image, ImageFilter, ImageGrab
+
+        def norm(image):
+            width, height = image.size
+            inner = image.crop((int(width * 0.06), int(height * 0.20),
+                                int(width * 0.94), int(height * 0.80)))
+            return np.asarray(inner.convert("L").resize((96, 54))
+                              .filter(ImageFilter.GaussianBlur(3)),
+                              dtype=np.float32)
+
+        user32 = ctypes.windll.user32
+        user32.SetProcessDPIAware()
+        handle = user32.FindWindowW(None, title)
+        if not handle:
+            raise ClientStageFailure(
+                "SETUP", "FAIL",
+                f"host window {title!r} not found — the capture would film "
+                "nothing")
+        stamp = time.time_ns()
+        evidence: dict[str, Any] = {"threshold": 15}
+        diff = None
+        for attempt in range(2):
+            host_path = self.out_dir / f"prebattery-host-{stamp}-{attempt}.png"
+            guest_path = self.out_dir / f"prebattery-guest-{stamp}-{attempt}.png"
+            rect = RECT()
+            user32.GetWindowRect(handle, ctypes.byref(rect))
+            try:
+                host = ImageGrab.grab(
+                    bbox=(rect.left, rect.top, rect.right, rect.bottom))
+            except Exception as exc:        # noqa: BLE001
+                raise ClientStageFailure(
+                    "SETUP", "FAIL", f"host window grab failed: {exc!r}")
+            host.save(host_path)
+            self.adb.screencap(guest_path)
+            guest = Image.open(guest_path)
+            diff = float(np.abs(norm(host) - norm(guest)).mean())
+            evidence.update({"host_grab": self.artifact(host_path),
+                             "guest_grab": self.artifact(guest_path),
+                             "diff": round(diff, 1), "attempts": attempt + 1})
+            if diff < 15:
+                break
+            time.sleep(1.5)
+        if diff is None or diff >= 15:
+            raise ClientStageFailure(
+                "SETUP", "FAIL",
+                f"the LDPlayer window surface does not show the guest "
+                f"(occlusion, ad, or stale presentation; host/guest diff "
+                f"{diff}) — the capture would not be rendered evidence; "
+                "restore and uncover LDPlayer, check its surface, then rerun")
+        return evidence
+
+    def start_host_capture(self, *, duration: float, fps: int = 30) -> dict:
+        """Capture the restored LDPlayer window with imageio-ffmpeg gdigrab.
+
+        Records wall-clock bounds around the subprocess so tap timestamps can
+        be correlated with video PTS later. The capture stays UNVERIFIED until
+        frame-level analysis confirms distinct presentation frames.
+        """
+        ffmpeg = None
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg = "ffmpeg"
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        video = self.out_dir / f"host-{self.scenario}-{stamp}.mp4"
+        window = self.restore_ldplayer_window()
+        started_at = time.time()
+        argv = [ffmpeg, "-f", "gdigrab", "-framerate", str(fps),
+                "-i", "title=LDPlayer", "-t", f"{duration:.3f}",
+                "-y", str(video)]
+        log_path = self.out_dir / f"host-{self.scenario}-{stamp}.log"
+        try:
+            log_handle = log_path.open("w")
+            process = subprocess.Popen(argv, stdout=log_handle,
+                                       stderr=subprocess.STDOUT)
+        except Exception as exc:
+            self.stage("SETUP", "FAIL", f"host capture start failed: {exc!r}")
+            raise ClientStageFailure("SETUP", "FAIL",
+                                     f"host capture start failed: {exc!r}")
+        self._host_capture = {
+            "video": str(video), "log": str(log_path), "process": process,
+            "log_handle": log_handle, "started_at": started_at,
+            "requested_duration_s": duration, "fps": fps, "window": window,
+            "finalized": False,
+        }
+        # gdigrab initializes its window capture asynchronously; a short sleep
+        # keeps the first authored tap outside the startup margin.
+        time.sleep(1.2)
+        return {k: v for k, v in self._host_capture.items()
+                if k not in ("process", "log_handle")}
+
+    def finalize_host_capture(self) -> None:
+        """Stop this driver's own ffmpeg capture and record its exit."""
+        capture = getattr(self, "_host_capture", None)
+        if not capture or capture.get("finalized"):
+            return
+        process = capture["process"]
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=6)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        capture["log_handle"].close()
+        capture["ended_at"] = time.time()
+        capture["exit_code"] = process.returncode
+        video = Path(capture["video"])
+        capture["video_bytes"] = video.stat().st_size if video.exists() else 0
+        capture["finalized"] = True
+        if capture["video_bytes"]:
+            self.artifact(capture["video"])
 
     def aim_for_enemy(self, label: str, fallback: tuple[int, int],
                       *, required: bool = True,
@@ -7227,6 +7520,1803 @@ class ClientDriver:
             self.finalize_capture()
             raise
 
+    def _foreground_package(self) -> str | None:
+        """Focused Android package, or None when it cannot be determined.
+
+        ``dumpsys window`` carries one ``mCurrentFocus`` line per display;
+        a transient ``mCurrentFocus=null`` precedes the focused one, so
+        nulls are skipped rather than trusted.
+        """
+        try:
+            out = self.adb.shell("dumpsys window")
+            for line in out.splitlines():
+                line = line.strip()
+                if not line.startswith("mCurrentFocus="):
+                    continue
+                value = line[len("mCurrentFocus="):]
+                if value == "null":
+                    continue
+                marker = " u0 "
+                at = value.find(marker)
+                if at < 0:
+                    return None
+                tail = value[at + len(marker):]
+                return tail.split("/")[0].rstrip("}") or None
+        except Exception:
+            return None
+        return None
+
+    def _screen_still(self) -> bool:
+        """True when two screencaps ~1.2 s apart are identical.
+
+        The Vainglory menu animates continuously (~2.5 mean abs diff at
+        full resolution), so a frozen pair means the renderer is
+        SUSPENDED and the surface is stale — the GMS sign-in flow pauses
+        the game and its renderer never resumes on its own (observed
+        02:47-49 logcat queueSuspend, after-run-02/03).
+        """
+        import numpy as np
+        from PIL import Image
+        frames = []
+        for k in (0, 1):
+            if k:
+                time.sleep(1.2)
+            path = self.out_dir / f"entry-anim-{time.time_ns()}.png"
+            try:
+                self.adb.screencap(path)
+                frames.append(np.asarray(Image.open(path).convert("RGB"),
+                                         dtype=np.int16))
+            except Exception:
+                return False
+        if len(frames) < 2 or frames[0].shape != frames[1].shape:
+            return False
+        return bool(np.abs(frames[0] - frames[1]).mean() < 0.5)
+
+    def _relaunch_game(self) -> None:
+        """Force-stop and relaunch the client, waiting for its window.
+
+        The launch auto-fires the GPG sign-in ~16 s in; its GMS activity
+        covers the game and suspends the renderer again, so the wait
+        cancels it whenever it takes focus (same Cancel spot as the
+        entry-start guard)."""
+        self.adb.shell(f"am force-stop {ANDROID_PACKAGE}")
+        time.sleep(6.0)
+        self.adb.shell(f"monkey -p {ANDROID_PACKAGE} "
+                       "-c android.intent.category.LAUNCHER 1")
+        deadline = time.time() + 90.0
+        while time.time() < deadline:
+            time.sleep(4.0)
+            current = self._foreground_package()
+            if current == ANDROID_PACKAGE:
+                return
+            if current == "com.google.android.gms":
+                self.adb.tap(208, 248)
+                time.sleep(1.5)
+            else:
+                self.adb.shell(f"monkey -p {ANDROID_PACKAGE} "
+                               "-c android.intent.category.LAUNCHER 1")
+
+    def _ensure_game_foreground(self, step: str) -> dict | None:
+        """Refocus the game when another app (observed: Chrome opened by an
+        AppsFlyer attribution intent right after PLAY, before-run-10) holds
+        the foreground — every tap would land outside the client. Returns a
+        journal record when a hijack was refocused, else None; raises when
+        the foreground cannot be recovered."""
+        foreign = self._foreground_package()
+        if foreign is None or foreign == ANDROID_PACKAGE:
+            return None
+        record = {"step": step, "foreign_package": foreign}
+        for attempt in range(4):
+            if foreign == "com.android.chrome":
+                # force-stop both removes the observed hijacker and puts
+                # Chrome into the stopped state, which blocks further
+                # implicit VIEW intents (the AppsFlyer attribution link
+                # re-fired between guards during before-run-11) until
+                # something explicitly launches it again.
+                self.adb.shell("am force-stop com.android.chrome")
+            elif foreign == "com.google.android.gms":
+                # The Google Play Games sign-in flow runs as a GMS activity
+                # over the menu (before-run-12). Cancelling it lets the game's
+                # own "Failed to sign in" dialog surface, which the play-step
+                # dismissal chain already handles. The activity re-pops right
+                # after a Cancel on some launches (after-run-07: both guard
+                # rounds consumed by one sign-in loop), so keep cancelling
+                # while it stays foreground instead of once per round.
+                for _cancel in range(3):
+                    # Native GMS layouts vary (the September 21 dialog puts
+                    # Cancel near y=60, not y=248). BACK cancels that activity
+                    # without guessing coordinates; never send it in-game.
+                    self.adb.back()
+                    record["cancelled_gms_signin"] = record.get(
+                        "cancelled_gms_signin", 0) + 1
+                    time.sleep(1.5)
+                    if self._foreground_package() != "com.google.android.gms":
+                        break
+            if self._foreground_package() != ANDROID_PACKAGE:
+                self.adb.shell(f"monkey -p {ANDROID_PACKAGE} "
+                               "-c android.intent.category.LAUNCHER 1")
+                time.sleep(3.0)
+            current = self._foreground_package()
+            if current == ANDROID_PACKAGE:
+                # A static sign-in error dialog is not evidence of a frozen
+                # renderer. Dismiss dialogs before the battery's surface gate;
+                # do not relaunch here and retrigger the sign-in activity.
+                record["recovered"] = True
+                record["after"] = current
+                return self.gesture("entry-guard", **record)
+            foreign = current
+        record["recovered"] = False
+        record["after"] = current
+        raise ClientStageFailure(
+            "SETUP", "FAIL",
+            f"foreground app is {current!r}, not {ANDROID_PACKAGE} — "
+            "taps would land outside the client")
+
+    def _mode_dialog_present(self) -> bool:
+        """Positive probe for the PLAY mode-selection dialog.
+
+        Distinctive white marks measured 2026-09-21 (before-run-15 dialog
+        vs. before-run-17 plain menu vs. the GMS sign-in activity): the
+        mode label row, the white X, and the HOW TO PLAY row. A plain menu
+        has none of them in these boxes; the GMS sign-in card floods the
+        label box but has no X and no HOW TO PLAY row.
+        """
+        stamp = time.time_ns()
+        path = self.out_dir / f"entry-00d-mode-dialog-{stamp}.png"
+        try:
+            self.adb.screencap(path)
+            from PIL import Image
+
+            def white(box):
+                return np_pixel_count(
+                    Image.open(path).convert("RGB").crop(box),
+                    lambda r, g, b: (r > 190) & (g > 190) & (b > 190))
+            labels = white((60, 255, 525, 335))
+            xglyph = white((875, 45, 925, 100))
+            howto = white((55, 435, 275, 480))
+            return labels > 400 and xglyph > 60 and howto > 150
+        except Exception:
+            return False
+
+    def _google_play_dialog_present(self) -> bool:
+        """Brightness probe for the light Google Play Games panel.
+
+        The menu and the mode dialogs are dark artwork; the sign-in panel is
+        a light gray card covering the menu centre. Screencap failure counts
+        as absent so the guard can never wedge the drive.
+        """
+        stamp = time.time_ns()
+        path = self.out_dir / f"entry-00b-play-guard-{stamp}.png"
+        try:
+            self.adb.screencap(path)
+            from PIL import Image, ImageStat
+            # Right-hand panel body below the sign-in text: light on the
+            # Google Play card, dark on the menu, and at most partially
+            # covered by the game's dark "Failed to sign in" dialog — the
+            # original centre region false-positived on that dialog's white
+            # text (before-run-04).
+            region = Image.open(path).convert("L").crop((620, 285, 700, 395))
+            return ImageStat.Stat(region).mean[0] > 130.0
+        except Exception:
+            return False
+
+    def _dismiss_google_play_dialog(self) -> dict | None:
+        """Cancel the Google Play Games prompt if it covers the menu.
+
+        Returns the journal record when a dialog was detected and cancelled,
+        else None. The caller re-opens the mode dialog with a fresh PLAY tap.
+        """
+        if not self._google_play_dialog_present():
+            return None
+        x, y = GOOGLE_PLAY_CANCEL
+        self.adb.tap(x, y)
+        record = self.gesture("entry-guard", step="dismiss-google-play", x=x, y=y)
+        time.sleep(2.0)
+        stamp = time.time_ns()
+        path = self.out_dir / f"entry-00b-play-dismissed-{stamp}.png"
+        self.adb.screencap(path)
+        record["screenshot"] = self.artifact(path)
+        return record
+
+    def _signin_error_dialog_present(self) -> bool:
+        """Flat-gray "Failed to sign in" panel probe.
+
+        The panel is a solid #424242 card; region (640,280)-(715,320) sits
+        inside it right of the text and reads exactly (66,66,66) with zero
+        variance, which no menu artwork ever produces. Screencap failure
+        counts as absent so the guard can never wedge the drive.
+        """
+        stamp = time.time_ns()
+        path = self.out_dir / f"entry-00c-signin-guard-{stamp}.png"
+        try:
+            self.adb.screencap(path)
+            from PIL import Image, ImageStat
+            region = Image.open(path).convert("RGB").crop((640, 280, 715, 320))
+            stat = ImageStat.Stat(region)
+            return (max(stat.stddev) < 3.0
+                    and all(55.0 <= channel <= 90.0 for channel in stat.mean))
+        except Exception:
+            return False
+
+    def _dismiss_sign_in_error_dialog(self) -> dict | None:
+        """OK the "Failed to sign in" dialog if it covers the menu.
+
+        Returns the journal record when the dialog was detected and
+        acknowledged, else None. The caller re-opens the mode dialog with a
+        fresh PLAY tap once no dialog is detected any more.
+        """
+        if not self._signin_error_dialog_present():
+            return None
+        x, y = SIGNIN_ERROR_OK
+        self.adb.tap(x, y)
+        record = self.gesture("entry-guard", step="dismiss-signin-error", x=x, y=y)
+        time.sleep(2.0)
+        stamp = time.time_ns()
+        path = self.out_dir / f"entry-00c-signin-dismissed-{stamp}.png"
+        self.adb.screencap(path)
+        record["screenshot"] = self.artifact(path)
+        return record
+
+    def _settings_panel_present(self) -> bool:
+        """In-match Settings panel probe over the world.
+
+        Two independent signals, both required: the panel's dark backdrop
+        puts the headline region (15,70)-(205,120) near black (measured max
+        channel 11 on live panels) against spawn-side terrain (98/71/45),
+        and its X button is a white glyph at (905,15)-(950,55) (109 white
+        pixels live) where the roster/versus screen and the menu have none
+        and the clean world corner stays under half that. The second signal
+        is what rejects the dark-cornered roster screen, which otherwise
+        false-positives during slow world entry (before-run-07). Screencap
+        failure counts as absent so the guard can never wedge the drive.
+        """
+        stamp = time.time_ns()
+        path = self.out_dir / f"entry-07d-settings-guard-{stamp}.png"
+        try:
+            self.adb.screencap(path)
+            from PIL import Image, ImageStat
+            image = Image.open(path).convert("RGB")
+            mean = ImageStat.Stat(image.crop((15, 70, 205, 120))).mean
+            if max(mean) >= 30.0:
+                return False
+            button = np_pixel_count(image.crop((905, 15, 950, 55)),
+                                    lambda r, g, b: (r > 200) & (g > 200) & (b > 200))
+            return button > 80
+        except Exception:
+            return False
+
+    def _build_panel_present(self) -> bool:
+        """Post-lock "Choose a Build" panel probe over the world.
+
+        The white script headline reads ~1353 white pixels in device box
+        (10,40)-(270,95) where the settings headline stays at 73 and the
+        world HUD at 7; the right-hand description block is near black
+        (mean < 30) where spawn-side terrain is greenish (~55/60/36).
+        Both signals required. Screencap failure counts as absent.
+        """
+        stamp = time.time_ns()
+        path = self.out_dir / f"entry-07e-build-guard-{stamp}.png"
+        try:
+            self.adb.screencap(path)
+            from PIL import Image, ImageStat
+            image = Image.open(path).convert("RGB")
+            headline = np_pixel_count(image.crop((10, 40, 270, 95)),
+                                      lambda r, g, b: (r > 200) & (g > 200) & (b > 200))
+            block = ImageStat.Stat(image.crop((760, 150, 950, 320))).mean
+            return headline > 400 and max(block) < 30.0
+        except Exception:
+            return False
+
+    def _dismiss_blocking_panels(self, rounds: int = 4):
+        """Close whatever verified panel blocks world input, in any order.
+
+        Settings closes via its X; "Choose a Build" has no X and dismisses
+        on BACK. Every keypress is gated by a fresh on-screen probe, so a
+        BACK never lands on the live world (where it would be world input)
+        and the X never lands blind. Returns (records, blocked) where
+        blocked says a verified panel survived all rounds.
+        """
+        records = []
+        for _round in range(4):
+            if self._settings_panel_present():
+                x, y = SETTINGS_PANEL_CLOSE
+                self.adb.tap(x, y)
+                record = self.gesture("entry-guard", step="close-settings",
+                                      x=x, y=y)
+                time.sleep(1.5)
+                stamp = time.time_ns()
+                path = self.out_dir / f"entry-07d-settings-dismissed-{stamp}.png"
+                self.adb.screencap(path)
+                record["screenshot"] = self.artifact(path)
+                record["still_open"] = self._settings_panel_present()
+                records.append(record)
+                continue
+            if self._build_panel_present():
+                self.adb.back()
+                record = self.gesture("entry-guard", step="dismiss-build-panel")
+                time.sleep(2.5)
+                stamp = time.time_ns()
+                path = self.out_dir / f"entry-07e-build-dismissed-{stamp}.png"
+                self.adb.screencap(path)
+                record["screenshot"] = self.artifact(path)
+                record["still_open"] = self._build_panel_present()
+                records.append(record)
+                continue
+            break
+        return records, bool(self._settings_panel_present()
+                             or self._build_panel_present())
+
+    def _dismiss_entry_dialogs(self, records: list, rounds: int = 4) -> None:
+        """Bounded dismissal of the Google Play Games panel and the game's
+        own "Failed to sign in" dialog at any point of the entry flow.
+
+        The GMS sign-in retry fires on its own schedule: after-run-05
+        (2026-09-21) landed one between the positively verified mode
+        dialog and the solo-bots tap, closing the dialog and swallowing
+        every draft tap after it (screens entry-01..05 all show the plain
+        menu). The play-step dismissal chain alone therefore cannot keep
+        the draft clear; every draft tap dismisses first.
+        """
+        for _ in range(rounds):
+            guard = (self._dismiss_google_play_dialog()
+                     or self._dismiss_sign_in_error_dialog())
+            if guard is None:
+                return
+            records.append(guard)
+            time.sleep(1.0)
+
+    def _require_mode_dialog(self, records: list, settle: float) -> bool:
+        """Positively require the PLAY mode dialog before the solo-bots
+        tap; re-open it with PLAY (bounded) if a late dialog closed it.
+        Returns False when it never reopened — the caller restarts the
+        whole entry attempt, since a dead draft cannot be resumed."""
+        for _round in range(3):
+            if self._mode_dialog_present():
+                return True
+            self._dismiss_entry_dialogs(records)
+            if self._mode_dialog_present():
+                return True
+            px, py = CLASSIC_ENTRY_TAPS["play"]
+            self.adb.tap(px, py)
+            records.append(self.gesture("entry-tap", step="play-reopen",
+                                        x=px, y=py))
+            time.sleep(settle)
+        return False
+
+    def drive_classic_entry(self) -> dict:
+        """Drive menu -> Classic solo-bots 3v3 draft -> world with Skye locked.
+
+        Journaling UI drive for the measured LDPlayer 960x540 layout; every
+        step saves a numbered screenshot and a tap record, so a human can
+        audit the drive afterwards. Assumes the client shows the main menu
+        when called. World entry is proven afterwards by a fresh wire
+        connection carrying s2c 1010 bootstrap frames (see
+        ``run_movement_walk``); this method itself only journals taps.
+        """
+        steps = [
+            ("play", CLASSIC_ENTRY_TAPS["play"], 2.5),
+            ("solo_bots", CLASSIC_ENTRY_TAPS["solo_bots"], 2.5),
+            ("map_3v3", CLASSIC_ENTRY_TAPS["map_3v3"], 2.5),
+            ("difficulty_very_easy", CLASSIC_ENTRY_TAPS["difficulty_very_easy"], 4.0),
+        ]
+        records: list[dict] = []
+        hijack = self._ensure_game_foreground(step="entry-start")
+        if hijack is not None:
+            records.append(hijack)
+        # A dismissed sign-in error can leave the draft aborted on the plain
+        # menu even though every dialog is gone (after-run-09 2026-09-21:
+        # the OK landed after the client had already reset its UI state).
+        # No tap sequence can resume a dead draft, so a detected desync
+        # restarts the whole entry chain from PLAY, bounded — each attempt
+        # keeps its numbered screens (tagged a1/a2) as retained evidence.
+        entry_attempts = 3
+        for entry_attempt in range(entry_attempts):
+            attempt_tag = "" if entry_attempt == 0 else f"-a{entry_attempt}"
+            desync = None
+            prev_shot = None
+            for index, (name, (x, y), settle) in enumerate(steps):
+                if name != "play":
+                    # A late sign-in dialog (or GMS activity) can surface
+                    # between any two draft taps; dismiss whatever is up, and
+                    # before the tap that leaves the mode dialog, positively
+                    # re-verify it is still open.
+                    if (hijack := self._ensure_game_foreground(
+                            step=f"{name}-hijack")) is not None:
+                        records.append(hijack)
+                    self._dismiss_entry_dialogs(records)
+                    if name == "solo_bots" and not self._require_mode_dialog(
+                            records, settle):
+                        desync = f"{name}: mode dialog never reopened"
+                        break
+                self.adb.tap(x, y)
+                record = self.gesture("entry-tap", step=name, x=x, y=y)
+                time.sleep(settle)
+                if name == "play":
+                    # A fresh app start pops the Google Play Games sign-in panel
+                    # and, once it is cancelled, the game's own "Failed to sign
+                    # in" dialog; both swallow mode-select taps (observed
+                    # 2026-09-21, before-run-01/02). The PLAY action can also
+                    # fire an AppsFlyer attribution intent that puts Chrome in
+                    # front (before-run-10), and a late sign-in dialog can eat
+                    # the PLAY tap itself (before-run-13/17). Dismiss whatever
+                    # is up, then positively verify the mode dialog opened --
+                    # absence of dialogs is NOT evidence the flow advanced --
+                    # and retry PLAY until it is, bounded.
+                    hijack = self._ensure_game_foreground(step="play-hijack")
+                    if hijack is not None:
+                        records.append(hijack)
+                        self.adb.tap(x, y)
+                        records.append(self.gesture("entry-tap",
+                                                    step="play-retry-after-hijack",
+                                                    x=x, y=y))
+                        time.sleep(settle)
+                    opened = False
+                    for _round in range(4):
+                        hijack = self._ensure_game_foreground(step="play-round")
+                        if hijack is not None:
+                            records.append(hijack)
+                            self.adb.tap(x, y)
+                            records.append(self.gesture(
+                                "entry-tap", step="play-retry-after-round",
+                                x=x, y=y))
+                            time.sleep(settle)
+                        for _dismissal in range(4):
+                            guard = (self._dismiss_google_play_dialog()
+                                     or self._dismiss_sign_in_error_dialog())
+                            if guard is None:
+                                break
+                            records.append(guard)
+                            time.sleep(1.0)
+                        if self._mode_dialog_present():
+                            opened = True
+                            break
+                        self.adb.tap(x, y)
+                        records.append(self.gesture("entry-tap", step="play-retry",
+                                                    x=x, y=y))
+                        time.sleep(settle)
+                    if not opened:
+                        desync = ("play: mode dialog never opened")
+                        break
+                path = self.out_dir / f"entry-{index:02d}-{name}{attempt_tag}.png"
+                self.adb.screencap(path)
+                if prev_shot is not None and name != "play":
+                    # Swallowed-tap signature: a tap that lands on a dialog or
+                    # a plain menu leaves the screen identical (measured
+                    # exactly 0.0 on after-run-05's dead pairs), while every
+                    # advanced draft step measured >= 9.5. One dismiss+re-tap
+                    # retry; a still-dead screen means the draft was aborted
+                    # and the attempt restarts from PLAY.
+                    diff = screenshot_mean_abs_diff(prev_shot, path)
+                    if diff is not None and diff < 0.5:
+                        self._dismiss_entry_dialogs(records)
+                        self.adb.tap(x, y)
+                        records.append(self.gesture("entry-tap",
+                                                    step=f"{name}-retry",
+                                                    x=x, y=y))
+                        time.sleep(settle)
+                        self.adb.screencap(path)
+                        diff = screenshot_mean_abs_diff(prev_shot, path)
+                        record["swallowed_once"] = True
+                        if diff is None or diff < 0.5:
+                            desync = (f"{name}: tap swallowed by overlay or "
+                                      "aborted draft")
+                            break
+                    if diff is not None:
+                        record["screen_change_vs_prev"] = round(diff, 2)
+                record["screenshot"] = self.artifact(path)
+                records.append(record)
+                prev_shot = path
+            if desync is None:
+                break
+            records.append(self.gesture("entry-restart", reason=desync,
+                                        attempt=entry_attempt + 1))
+            self._dismiss_entry_dialogs(records)
+        else:
+            raise ClientStageFailure(
+                "SETUP", "FAIL",
+                "the classic entry desynced on every bounded attempt; "
+                "the cause is not established by the screen-change check "
+                "(all probe screens retained). Check connection setup and "
+                "blocking dialogs before retrying")
+        for scroll in range(SKYE_DRAFT_SCROLLS):
+            self.adb.swipe(*HERO_GRID_SCROLL, duration_ms=500)
+            time.sleep(1.4)
+        self.gesture("entry-grid-scroll", times=SKYE_DRAFT_SCROLLS)
+        if (hijack := self._ensure_game_foreground(step="hero-tile")) is not None:
+            records.append(hijack)
+        self._dismiss_entry_dialogs(records)
+        x, y = SKYE_DRAFT_TILE
+        self.adb.tap(x, y)
+        record = self.gesture("entry-tap", step="hero_tile_skye", x=x, y=y)
+        time.sleep(1.5)
+        path = self.out_dir / "entry-04-hero-skye.png"
+        self.adb.screencap(path)
+        record["screenshot"] = self.artifact(path)
+        records.append(record)
+        self.adb.tap(*CLASSIC_ENTRY_TAPS["lock_in"])
+        records.append(self.gesture("entry-tap", step="lock_in",
+                                    x=CLASSIC_ENTRY_TAPS["lock_in"][0],
+                                    y=CLASSIC_ENTRY_TAPS["lock_in"][1]))
+        time.sleep(3.0)
+        if (hijack := self._ensure_game_foreground(step="post-lock-in")) is not None:
+            records.append(hijack)
+        self.adb.tap(*CLASSIC_ENTRY_TAPS["skin_default"])
+        records.append(self.gesture("entry-tap", step="skin_default"))
+        time.sleep(2.5)
+        if (hijack := self._ensure_game_foreground(step="post-skin")) is not None:
+            records.append(hijack)
+        path = self.out_dir / "entry-05-roster.png"
+        self.adb.screencap(path)
+        self.artifact(path)
+        # Roster countdown then world load; the build panel may follow.
+        time.sleep(12.0)
+        self.adb.back()
+        records.append(self.gesture("entry-back", step="dismiss-build"))
+        # The BACK press is unreliable in the current client flow: it may be
+        # buffered during the roster screen and delivered once the world
+        # becomes interactive, where it opens the in-match Settings panel
+        # (before-run-04/07), and the Choose-a-Build panel may still be up
+        # when BACK lands elsewhere (before-run-09). Wait out world entry,
+        # then close whichever verified panel blocks input; a panel that
+        # survives the guard fails the entry honestly — the walk battery
+        # would only produce swallowed taps.
+        time.sleep(8.0)
+        guard_records, blocked = self._dismiss_blocking_panels()
+        records.extend(guard_records)
+        if blocked:
+            raise ClientStageFailure(
+                "SETUP", "FAIL",
+                "a blocking panel (Settings / Choose a Build) survived the "
+                "entry guards — world input would be blocked")
+        time.sleep(2.0)
+        if (hijack := self._ensure_game_foreground(step="world-screen")) is not None:
+            # The browser (or any foreign app) covering the world invalidates
+            # the entry-06 evidence and the battery that follows.
+            records.append(hijack)
+            time.sleep(2.0)
+        path = self.out_dir / "entry-06-world.png"
+        self.adb.screencap(path)
+        self.artifact(path)
+        self.observations["entry"] = {
+            "steps": records,
+            "note": "menu->world UI drive; world proof comes from the wire "
+                    "bootstrap check in run_movement_walk",
+        }
+        return records
+
+    def _guard_nonvisual_movement_ui(self, observer, *, dismiss_build=False, state_reader=None):
+        """Wait for known loading, dismiss one identified build panel, prove HUD."""
+        try:
+            read_state = state_reader or observer.ui_state
+            state = read_state()
+            record = {'before': state}
+            self.observations.setdefault('native_ui_guards', []).append(record)
+            deadline = time.monotonic() + min(self.timeout, 25.0)
+            while any('Pro Tip:' in label or label.startswith('Prepare For Battle')
+                      for label in state['labels']):
+                if not dismiss_build or time.monotonic() >= deadline:
+                    raise ClientStageFailure('SETUP', 'FAIL',
+                        'native loading/countdown still active; no movement attempted')
+                time.sleep(1.0)
+                state = read_state()
+                record.setdefault('loading_wait', []).append({'at': time.time(), 'state': state})
+            if 'Choose a Build' in state['labels'] and dismiss_build:
+                self.adb.back()
+                self.gesture('native-ui-back', reason='code-anchored Choose a Build title')
+                time.sleep(2.0)
+                state = read_state()
+                record['after'] = state
+            # "Item Shop" also exists alongside the gameplay HUD, so its
+            # text alone is not a qualified modal-panel discriminator.
+            blocking = {'Choose a Build', 'Settings'}.intersection(state['labels'])
+            if blocking:
+                raise ClientStageFailure('SETUP', 'FAIL',
+                    f'known native panel blocks walking: {sorted(blocking)}; no blind retry')
+            if ('BUY:' not in state['labels'] or
+                    not any(re.fullmatch(r'\d+:\d{2}', label) for label in state['labels'])):
+                raise ClientStageFailure('SETUP', 'FAIL',
+                    'native gameplay HUD (BUY and match clock) not verified; no movement attempted')
+        except ClientStageFailure:
+            raise
+        except Exception as exc:
+            raise ClientStageFailure('SETUP', 'FAIL', f'native UI state unavailable: {exc}') from exc
+
+    def _qualify_nonvisual_world(self, plan):
+        """Shared pinned-client, owner/slot and live WORLD qualification."""
+        if self.tail is None or self.connection is None:
+            raise ClientStageFailure('SETUP', 'FAIL',
+                'nonvisual walking requires --wire-trace and --connection for the existing WORLD')
+        self._client_version = self.adb.client_version()
+        if self._client_version != {'version_name': '4.13.4', 'version_code': 147219}:
+            raise ClientStageFailure('SETUP', 'FAIL', 'runtime anchors require CE 4.13.4/build 147219')
+        verify_resolution(self.adb, self.profile)
+        if self._foreground_package() != ANDROID_PACKAGE:
+            raise ClientStageFailure('SETUP', 'FAIL', 'owned game is not the focused Android package')
+        self.tail.poll()
+        records = [r for r in self.tail.records if r.get('connection') == self.connection]
+        setups = {int(r['payload'][:8], 16) for r in records
+                  if r.get('direction') == 's2c' and r.get('opcode') == 1001 and len(r['payload']) == 204}
+        if len(setups) != 1:
+            raise ClientStageFailure('SETUP', 'FAIL', 'wire owner identity absent or ambiguous')
+        eid = next(iter(setups))
+        blocks = [bytes.fromhex(r['payload']) for r in records
+                  if r.get('direction') == 's2c' and r.get('opcode') == 1011
+                  and len(r['payload']) == 1500 and int(r['payload'][16:24], 16) == eid]
+        expected_hero = int(plan.get('hero_id', SKYE_HERO_ID))
+        if not blocks or any(struct.unpack_from('>I', b)[0] != expected_hero for b in blocks):
+            raise ClientStageFailure('SETUP', 'FAIL', f'owned hero {expected_hero} bootstrap identity not verified')
+        slots = {b[745] for b in blocks}
+        recent = [r for r in records if r.get('direction') == 's2c' and 0 <= time.time() - r['time'] <= 5]
+        if len(slots) != 1 or not recent or not any(r.get('opcode') == 1137 and r.get('direction') == 's2c' for r in records):
+            raise ClientStageFailure('SETUP', 'FAIL', 'slot, ready echo, or live connection freshness not verified')
+        return eid, next(iter(slots)), expected_hero
+
+    def run_movement_walk(self) -> dict:
+        """Existing walking scenario, guarded by protocol and client memory only."""
+        from Tools.Teardown.observe_client_movement import ClientMovementObserver
+        plan = dict(MOVEMENT_WALK_DEFAULTS)
+        plan.update(self.profile.get('movement_walk') or {})
+        if plan.get('capture_backend') != 'none' or plan.get('drive_entry'):
+            raise ClientStageFailure('SETUP', 'FAIL',
+                'AGENTS.md forbids image/video dependencies; use capture_backend=none, '
+                'drive_entry=false and an explicitly selected live WORLD connection')
+        for walk in plan['walks']:
+            if ('taps' in walk) == ('world_points' in walk):
+                raise ClientStageFailure('SETUP', 'FAIL', 'walk needs exactly one of taps/world_points')
+            if not walk.get('taps', walk.get('world_points')):
+                raise ClientStageFailure('SETUP', 'FAIL', 'empty movement input sequence')
+        eid, slot, expected_hero = self._qualify_nonvisual_world(plan)
+        observer = ClientMovementObserver(self.adb, self.out_dir / 'client-movement.jsonl', eid,
+                                         **(plan.get('runtime_observer') or {}))
+        executed = []
+        started = time.time()
+        try:
+            identity = observer.start()
+            self.observations['client_runtime'] = identity
+            self.observations['wire_identity'] = {'eid': eid, 'slot': slot,
+                                                  'hero_id': expected_hero, 'connection': self.connection}
+            self.observations['ui_guard_limit'] = (
+                'Foreground/process, live wire WORLD and native owner entity are verified. '
+                'Known build/settings panels are checked using native text; other panels remain '
+                'unclassified. Each tap must produce a fresh 1012 '
+                'or the battery stops without a blind retry.')
+            self._guard_nonvisual_movement_ui(observer, dismiss_build=True)
+            if any('world_points' in w for w in plan['walks']):
+                self._lock_nonvisual_camera(observer)
+            self.stage('SETUP', 'PASS', f'nonvisual WORLD + runtime owner {eid}, PID {identity["pid"]}')
+            time.sleep(float(plan['settle_before_first_walk_s']))
+            for index, walk in enumerate(plan['walks']):
+                taps = []
+                points = walk.get('taps', walk.get('world_points'))
+                for order, point in enumerate(points):
+                    if observer.errors:
+                        raise ClientStageFailure('TRIAL_CONTINUITY', 'FAIL', repr(observer.errors))
+                    if self._foreground_package() != ANDROID_PACKAGE:
+                        raise ClientStageFailure('SETUP', 'FAIL', 'focus changed during walking')
+                    self._guard_nonvisual_movement_ui(observer)
+                    projection = None
+                    if 'world_points' in walk:
+                        try:
+                            projection = observer.project_position(point)
+                        except Exception as exc:
+                            raise ClientStageFailure('SETUP', 'FAIL',
+                                f'world-point projection unavailable; no input: {exc}') from exc
+                        x, y = map(round, projection['screen_xy'])
+                        # Qualified 960x540 central playfield: avoid persistent
+                        # HUD controls. This is not an arbitrary UI hit tester.
+                        if (projection['camera']['dimensions'] != [960, 540]
+                                or not 240 <= x <= 680 or not 100 <= y <= 420):
+                            raise ClientStageFailure('SETUP', 'FAIL',
+                                'projected point outside qualified central playfield; no input')
+                    else:
+                        x, y = point
+                    before = time.time()
+                    hold = int(plan.get('tap_hold_ms', 0))
+                    if not 0 <= hold <= 500:
+                        raise ClientStageFailure('SETUP', 'FAIL', 'tap_hold_ms must be 0..500')
+                    if hold:
+                        self.adb.swipe(int(x), int(y), int(x), int(y), duration_ms=hold)
+                    else:
+                        self.adb.tap(int(x), int(y))
+                    self.gesture('walk-tap', walk=walk['label'], order=order, x=x, y=y,
+                                 wall_before=before, hold_ms=hold, projection=projection)
+                    event = self.tail.wait_for(lambda r: r.get('connection') == self.connection
+                        and r.get('direction') == 'c2s' and r.get('opcode') == OP_MOVE_CAST,
+                        timeout=min(self.timeout, 2.0), min_time=before)
+                    if event is None:
+                        raise ClientStageFailure('CLIENT_INPUT_OBSERVED', 'FAIL',
+                            'tap produced no fresh 1012; input/UI path unverified, no retry')
+                    taps.append({'order': order, 'x': x, 'y': y, 'wall_before': before,
+                                 'input': event, 'projection': projection})
+                    if order < len(points) - 1:
+                        time.sleep(float(walk.get('tap_gap_s', 0)))
+                executed.append({'label': walk['label'], 'taps': taps})
+                if index < len(plan['walks']) - 1:
+                    time.sleep(float(plan['between_walks_s']))
+            time.sleep(float(plan.get('final_wait_s', 6)))
+        finally:
+            self.observations['client_runtime'] = observer.stop()
+            self.artifact(observer.output)
+            self.artifact(observer.output.with_suffix('.metadata.json'))
+        if observer.errors or not observer.samples:
+            raise ClientStageFailure('TRIAL_CONTINUITY', 'FAIL', f'client observation failed: {observer.errors}')
+        self.tail.poll()
+        moves = [r for r in self.tail.records if r.get('connection') == self.connection
+                 and r.get('direction') == 'c2s' and r.get('opcode') == OP_MOVE_CAST and r['time'] >= started]
+        planned = sum(len(w.get('taps', w.get('world_points'))) for w in plan['walks'])
+        input_ok = len(moves) == planned
+        self.stage('UI_COMMAND_SUBMITTED', 'PASS', f'{planned} scripted taps')
+        self.stage('CLIENT_INPUT_OBSERVED', 'PASS' if input_ok else 'FAIL', f'{len(moves)}/{planned} fresh 1012 inputs')
+        self.stage('TRIAL_CONTINUITY', 'PASS', f'{observer.samples} owner-attributed runtime samples; no observer errors')
+        self.stage('PRESENTATION', 'UNVERIFIED',
+                   ('Logical position and owner-bound root-model matrix measured; general smoothness unverified'
+                    if observer.metadata.get('model_transform') else
+                    'Logical client position/correction measured; root-model transform is not observed'))
+        return self.finish('PASS' if input_ok else 'FAIL', observed={
+            'walks': executed, 'capture_backend': 'none', 'wire_trace': str(self.tail.path),
+            'connection': self.connection, 'client_runtime': self.observations['client_runtime'],
+            'data_window': {'started_at': started, 'ended_at': time.time()},
+            'move_intents': {'planned_taps': planned, 'observed_1012': len(moves)}},
+            expected={'planned_taps': planned, 'client_smoothness': 'UNVERIFIED'})
+
+    def _lock_nonvisual_camera(self, observer):
+        """Qualify the owner-bound preference; toggle once only if unlocked."""
+        before = observer.camera_control()
+        self.observations['camera_lock'] = {'before': before}
+        if not before['locked']:
+            if self._foreground_package() != ANDROID_PACKAGE:
+                raise ClientStageFailure('SETUP', 'FAIL', 'owned client lost focus before camera input')
+            self.adb.tap(*before['center'])
+            self.gesture('native-camera-lock', control=before)
+            time.sleep(.2)
+            after = observer.camera_control()
+            self.observations['camera_lock']['after'] = after
+            if after['eid'] != before['eid'] or not after['locked']:
+                raise ClientStageFailure('SETUP', 'FAIL', 'one camera toggle did not lock owned hero; no retry')
+
+    def _observe_post_cast_pursuit(self, observer, enemy_observer, eid, foe, point):
+        """Disclosed target relocation diagnoses pursuit after an ordinary cast.
+
+        This is not ordinary-match coverage or independent gameplay fidelity.
+        Native navigation activation, not correction-only displacement, is
+        required. The0.75-unit ceiling is a diagnostic gap bound, not smoothness.
+        """
+        def require(ok, stage, message):
+            if not ok:raise ClientStageFailure(stage,'FAIL',message)
+        initial=self.qa.snapshot()
+        owner=next(h for h in initial['heroes'] if h['eid']==eid)
+        target=next(h for h in initial['heroes'] if h['eid']==foe)
+        require(owner['alive'] and target['alive'] and owner['target']==foe
+                and observer.selected_target()['target_eid']==foe,
+                'SETUP','post-cast living retained target not qualified')
+        start_position=[owner['x'],owner['y']]
+        for command in ({'command':'status','eid':foe,'type':'STUN','duration':6},
+                        # Pending pre-teleport projectiles must not kill the
+                        # already wounded target and invalidate this probe.
+                        {'command':'resources','eid':foe,'hp':100000},
+                        {'command':'teleport','eid':foe,'x':point[0],'y':point[1]}):
+            receipt=self.qa.submit(command,label='post-cast-pursuit-fixture',timeout=self.timeout)
+            self.prepare('diagnostic-post-cast-pursuit',command=command,receipt=receipt)
+            require(receipt.get('ok'),'SETUP','pursuit target fixture unacknowledged')
+        path=self.out_dir/'post-cast-pursuit.jsonl'
+        self.artifact(path)
+        rows=[]
+        end=time.monotonic()+3
+        with path.open('x',encoding='utf-8') as output:
+            while time.monotonic()<end:
+                before=observer.snapshot()
+                state=self.qa.snapshot()
+                after=observer.snapshot()
+                target_native=enemy_observer.snapshot()
+                owner=next(h for h in state['heroes'] if h['eid']==eid)
+                target=next(h for h in state['heroes'] if h['eid']==foe)
+                server=[owner['x'],owner['y']]
+                client=[[p['position_xyz'][0],p['position_xyz'][2]] for p in (before,after)]
+                model_xyz=[p.get('model',{}).get('translation_xyz') for p in (before,after)]
+                require(all(isinstance(p,list) and len(p)==3 and all(math.isfinite(v) for v in p)
+                            for p in model_xyz),'PRESENTATION','pursuit root-model evidence missing; no logical fallback')
+                row={'wall':time.time(),'state_time':state['time'],'owner':owner,'target':target,
+                     'client_before':before,'client_after':after,'target_native':target_native,
+                     'nearest_bracket_gap':min(math.dist(server,p) for p in client),
+                     'nearest_model_bracket_gap':min(math.dist(server,(p[0],p[2])) for p in model_xyz),
+                     'native_selection':observer.selected_target(),
+                     'native_movement':observer.movement_modifiers()}
+                rows.append(row);output.write(json.dumps(row,separators=(',',':'))+'\n');output.flush()
+                require(not observer.errors and not enemy_observer.errors,'TRIAL_CONTINUITY','pursuit observer failed')
+                time.sleep(.05)
+        moving=[]
+        previous=start_position
+        for row in rows:
+            position=[row['owner']['x'],row['owner']['y']]
+            if math.dist(previous,position)>.02:moving.append(row)
+            previous=position
+        active=[r for r in moving if r['client_before']['navigation_flags']&1 or r['client_after']['navigation_flags']&1]
+        summary={'rows':len(rows),'server_moving_rows':len(moving),'native_active_moving_rows':len(active),
+                 'max_moving_gap':max((r['nearest_bracket_gap'] for r in moving),default=None),
+                 'max_moving_model_gap':max((r['nearest_model_bracket_gap'] for r in moving),default=None),
+                 'start_position':start_position,'last_server_position':previous,'target_position':point,
+                 'scope':'prepared post-cast target relocation; not ordinary match or general smoothness'}
+        self.observations['post_cast_pursuit']=summary
+        require(all(r['owner']['alive'] and r['target']['alive'] and r['owner']['target']==foe for r in rows),
+                'SETUP','pursuit fixture lost its living target/owner intent; cannot qualify this comparison')
+        require(all(r['native_selection']['target_eid']==foe for r in rows),
+                'PRESENTATION','pursuit publication cleared or changed the native selected target')
+        target_xyz=rows[-1]['target_native']['position_xyz'] if rows else []
+        require(len(target_xyz)==3 and math.dist((target_xyz[0],target_xyz[2]),point)<.05,
+                'SETUP','native relocated pursuit target did not reach the declared fixture')
+        require(len(moving)>=4 and math.dist(start_position,previous)>1,'AUTHORITATIVE_EFFECT','pursuit did not move sufficiently to measure')
+        require(len(active)>=2,'PRESENTATION','authoritative pursuit moved but native navigation never activated; correction-only motion is insufficient')
+        require(summary['max_moving_gap']<.75,'PRESENTATION','post-cast native/authoritative pursuit exceeds diagnostic0.75-unit gap bound')
+        require(summary['max_moving_model_gap']<.75,'PRESENTATION','post-cast root-model pursuit exceeds diagnostic0.75-unit gap bound')
+
+    def run_nonvisual_cast(self, slot: str) -> dict:
+        """Ordinary native ability input, with disclosed stationary QA fixture.
+
+        This measures native resources and logical displacement, not model
+        animation or independent CE fidelity. Pair acceptance remains separate.
+        """
+        from Tools.Teardown.observe_client_movement import ClientMovementObserver
+        plan = {'capture_backend': 'none', 'drive_entry': False, 'hero_id': SKYE_HERO_ID}
+        plan.update(self.profile.get('nonvisual_cast') or {})
+        if plan['capture_backend'] != 'none' or plan['drive_entry']:
+            raise ClientStageFailure('SETUP', 'FAIL', 'ability trials require existing WORLD; no image/video entry')
+        eid, wire_slot, hero_id = self._qualify_nonvisual_world(plan)
+        session = self.setup()  # Protocol/QA/provenance only; no capture or UI input.
+        if self.skye()['eid'] != eid:
+            raise ClientStageFailure('SETUP', 'FAIL', 'QA owner differs from wire/bootstrap owner')
+        index = {'A': 0, 'B': 1, 'C': 2}[slot]
+        pursuit_point = plan.get('pursuit_target_position')
+        if pursuit_point is not None and (not isinstance(pursuit_point, list) or len(pursuit_point) != 2
+                or not all(type(v) in (int,float) and math.isfinite(v) for v in pursuit_point)):
+            raise ClientStageFailure('SETUP','FAIL','pursuit_target_position requires two finite coordinates')
+        observer = ClientMovementObserver(self.adb, self.out_dir / 'client-movement.jsonl', eid, period_ms=50,
+                                          model_transform=pursuit_point is not None)
+        enemy_observer = None
+        readings = []
+        path = self.out_dir / 'client-combat-resources.jsonl'
+
+        def require(ok, stage, detail):
+            if not ok:
+                raise ClientStageFailure(stage, 'FAIL', detail)
+
+        def read(phase):
+            before = time.time()
+            value = {'owner': observer.resources(), 'target': enemy_observer.resources()}
+            value['native_selection'] = observer.selected_target()
+            readings.append({'host_wall_before': before, 'host_wall_after': time.time(),
+                             'phase': phase, **value})
+            return value
+
+        def submit(command):
+            receipt = self.qa.submit(command, label='ability-fixture', timeout=self.timeout)
+            self.prepare('diagnostic-ability-fixture', command=command, receipt=receipt)
+            require(receipt.get('ok'), 'SETUP', 'ability fixture preparation not acknowledged')
+
+        try:
+            self.observations['client_runtime'] = observer.start()
+            self.observations['wire_identity'] = {'eid': eid, 'slot': wire_slot, 'hero_id': hero_id,
+                                                  'connection': self.connection}
+            self._guard_nonvisual_movement_ui(observer)
+            self._lock_nonvisual_camera(observer)
+            self.refresh_rows()
+            owner = self.skye()
+            require(owner['alive'] and not owner['statuses'], 'SETUP', 'owner dead or status-obstructed')
+            if owner['ranks'].get(str(index), 0) == 0:
+                require(owner['ability_points'] > 0 and (slot != 'C' or owner['level'] >= 6),
+                        'SETUP', 'no legal native point for requested ability; no forced learning')
+                control = observer.ability_control(index, upgrade=True)
+                require(control['eid'] == eid and control['slot'] == index, 'SETUP', 'upgrade owner/slot mismatch')
+                started = time.time()
+                self.adb.tap(*control['center'])
+                self.gesture('native-ability-upgrade', control=control, wall_before=started)
+                payload = (bytes([index]) + bytes(5)).hex()
+                request = self.tail.wait_for(lambda r: self._on_connection(r) and r.get('direction') == 'c2s'
+                    and r.get('opcode') == 1078 and r.get('payload') == payload,
+                    min(self.timeout, 3), min_time=started)
+                require(request is not None, 'SETUP', 'ordinary upgrade produced no fresh 1078; no retry')
+                self.refresh_rows()
+                require(self.skye()['ranks'].get(str(index), 0) == 1,
+                        'SETUP', 'ordinary upgrade input did not establish rank one')
+                self.observations['ordinary_upgrade'] = request
+            self.refresh_rows()
+            owner = self.skye()
+            require(owner['ability_cooldowns'].get(str(index), 0) == 0, 'SETUP', 'ability on natural cooldown')
+            enemy = self.enemy()
+            require(enemy and enemy['alive'], 'SETUP', 'no living enemy for ability fixture')
+            foe = enemy['eid']
+            # Freeze before placement: a bot tick between mailbox requests
+            # otherwise moves the target before the later stun is applied.
+            submit({'command': 'status', 'eid': foe, 'type': 'STUN', 'duration': 10})
+            for actor, position in ((eid, self.profile['skye_position']), (foe, self.profile['enemy_position'])):
+                submit({'command': 'teleport', 'eid': actor, 'x': position[0], 'y': position[1]})
+                submit({'command': 'resources', 'eid': actor, 'hp': 100000, 'energy': 100000})
+            time.sleep(float(self.profile.get('camera_settle_s', 4)))
+            enemy_observer = ClientMovementObserver(self.adb, self.out_dir / 'target-movement.jsonl', foe, period_ms=50)
+            self.observations['target_runtime'] = enemy_observer.start()
+            state = self.refresh_rows()
+            owner, enemy = self.skye(), self.enemy()
+            require(owner['alive'] and enemy['alive'] and enemy['eid'] == foe,
+                    'SETUP', 'prepared actors changed or died')
+            require(all(math.dist((actor['x'], actor['y']), self.profile[key]) < .03
+                        for actor, key in ((owner, 'skye_position'), (enemy, 'enemy_position'))),
+                    'SETUP', 'stationary actor fixture not established')
+            native_positions = {'owner': observer.snapshot(), 'target': enemy_observer.snapshot()}
+            self.observations['native_fixture_positions'] = native_positions
+            for key, actor in (('owner', owner), ('target', enemy)):
+                xyz = native_positions[key]['position_xyz']
+                require(math.dist((xyz[0], xyz[2]), (actor['x'], actor['y'])) < .05,
+                        'SETUP', f'native {key} position differs from authoritative fixture; no combat input')
+            baseline = read('before-input')
+            require(all(abs(baseline[key]['current']['hp'] - actor['hp']) < .05
+                        for key, actor in (('owner', owner), ('target', enemy))),
+                    'SETUP', 'native HP differs before ability input')
+            require(abs(baseline['owner']['current']['energy'] - owner['energy']) < 2,
+                    'SETUP', 'native energy differs before ability input')
+            require(baseline['target']['current']['barrier'] == 0 and baseline['target']['current']['fortified'] == 0,
+                    'SETUP', 'target resource pools would confound damage check')
+            control = observer.ability_control(index)
+            require(control['eid'] == eid and control['action'] == SKYE_NATIVE_ACTIONS[slot],
+                    'SETUP', 'native cast owner/action mismatch')
+            self.observations['ability_control'] = control
+            self.observations['fixture_manifest'] = {'match_id': state['match_id'], 'tick': state['tick'],
+                'skye': owner, 'enemy': enemy, 'slot': slot, 'connection': self.connection,
+                'scope': 'diagnostic stationary fixture; ordinary learning/casting, not a controlled compare-pair'}
+            self._guard_nonvisual_movement_ui(observer)
+            require(self._foreground_package() == ANDROID_PACKAGE, 'SETUP', 'owned client lost focus')
+            self.stage('SETUP', 'PASS', 'owner, native controls, resources, locked camera and stationary target qualified')
+            aim = {'A': self.profile['enemy_feet_aim'], 'B': self.profile['b_drag_to'],
+                   'C': self.profile['c_drag_to']}[slot]
+            started = time.time()
+            lock_record = None
+            if slot in ('B', 'C') or pursuit_point is not None:
+                self.adb.tap(*self.profile['enemy_body_tap'])
+                self.gesture('native-basic-target', target=foe, wall_before=started)
+                lock_record = self.tail.wait_for(lambda r: self._on_connection(r) and r.get('direction') == 's2c'
+                    and lock_identity(r) == (foe, eid, TARGET_LOCK_KIND), 4, min_time=started)
+                require(lock_record is not None, 'CLIENT_INPUT_OBSERVED',
+                        'fresh matching Target Lock absent; no blind cast or retry')
+            # No QA/readiness/model round trip between fresh lock and cast.
+            swipe_started = time.time()
+            self.adb.swipe(*control['center'], *aim)
+            self.gesture('native-ability-swipe', control=control, to=aim, wall_before=swipe_started)
+            self.stage('UI_COMMAND_SUBMITTED', 'PASS', 'one ordinary swipe from owner-bound native control')
+            cast = self.wait_client_input(action=control['action'], since=swipe_started)
+            self.observations['lock'] = lock_record
+            self.observations['lock_to_input_ms'] = (1000 * (cast['time'] - lock_record['time']) if lock_record else None)
+            self.wait_acknowledgment(action=control['action'], hero_eid=eid, since=cast['time'])
+            self.wait_cooldown_tag(slot=slot, hero_eid=eid, since=cast['time'])
+            deadline = time.monotonic() + {'A': 3.2, 'B': 1.8, 'C': 3.5}[slot]
+            while time.monotonic() < deadline:
+                require(not observer.errors and not enemy_observer.errors, 'TRIAL_CONTINUITY', 'native observer failed')
+                read('ability-window')
+                time.sleep(.05)
+            # Preserve selection/pursuit before the deliberate disengage input
+            # can overwrite it.1045 is an attack start, not a selection ACK.
+            post_cast_state = self.refresh_rows()
+            post_cast_owner = next(h for h in post_cast_state['heroes'] if h['eid']==eid)
+            self.observations['post_ability_selection'] = {
+                'state':post_cast_state,'native':observer.selected_target(),
+                'target_native':enemy_observer.resources(), 'wall':time.time()}
+            if pursuit_point is not None:
+                self._observe_post_cast_pursuit(observer,enemy_observer,eid,foe,pursuit_point)
+            if slot in ('B', 'C'):
+                self.adb.tap(*self.profile['disengage_tap'])
+                self.gesture('disengage-after-effect', xy=self.profile['disengage_tap'])
+            time.sleep(.3)
+            native_before = read('before-final-qa')
+            final = self.refresh_rows()
+            time.sleep(.15)
+            native_after = read('after-final-qa')
+            self.tail.poll()
+            classification = self.classify_damage(hero_eid=eid, enemy_eid=foe,
+                window_start=cast['time'], window_end=time.time())
+            hits = classification['attributed']
+            require(hits, 'AUTHORITATIVE_EFFECT', 'no attributed ability damage on prepared enemy')
+            owner_after = self.skye()
+            target_after = next(h for h in final['heroes'] if h['eid'] == foe)
+            # The optional pursuit fixture can outlast an ordinary cooldown
+            # and regenerate energy. Retain the actual post-ability state,
+            # before that independent diagnostic, for expenditure evidence.
+            require(post_cast_owner['ability_cooldowns'].get(str(index), 0) > 0 and post_cast_owner['energy'] < owner['energy'],
+                    'AUTHORITATIVE_EFFECT', 'acknowledgment without cooldown/energy expenditure')
+            self.stage('AUTHORITATIVE_EFFECT', 'PASS', f'{len(hits)} attributed ability hits; cooldown and energy expenditure')
+            # Natural levels can increase both current and maximum resources
+            # within the window. Native level-up preserves the fraction; an
+            # absolute pre-level HP threshold would misclassify real damage.
+            energy_fraction = lambda r: r['owner']['current']['energy'] / r['owner']['max_energy']
+            hp_fraction = lambda r: r['target']['current']['hp'] / r['target']['max_hp']
+            require(min(map(energy_fraction, readings)) < energy_fraction(baseline) - 20 / baseline['owner']['max_energy'],
+                    'PRESENTATION', 'native energy consumption not observed')
+            require(min(map(hp_fraction, readings)) < hp_fraction(baseline) - 1e-5,
+                    'PRESENTATION', 'native target HP reduction not observed')
+            for key, actor in (('owner', owner_after), ('target', target_after)):
+                for resource in ('hp', 'energy'):
+                    bounds = sorted((native_before[key]['current'][resource], native_after[key]['current'][resource]))
+                    require(bounds[0] - .1 <= actor[resource] <= bounds[1] + .1,
+                            'PRESENTATION', f'native {key} {resource} does not bracket final server resource')
+            endpoint = self.collect_endpoint_linkage(session)
+            self.stage('TRIAL_CONTINUITY', 'PASS', f'same process/match; tick {self._diag_linkage["tick"]} -> {endpoint["tick"]}')
+            self.stage('PRESENTATION', 'PASS', 'native HP/energy effects measured; model animation remains unverified')
+            result = {'slot': slot, 'attributed_damage_events': len(hits),
+                      'total_attributed_delta': sum(h['delta'] for h in hits),
+                      'native_resource_samples': len(readings), 'capture_backend': 'none',
+                      'model_animation': 'UNVERIFIED', 'independent_fidelity': 'UNVERIFIED',
+                      'compare_pair': 'NOT_RUN'}
+        finally:
+            self.observations['client_runtime'] = observer.stop()
+            self.artifact(observer.output)
+            self.artifact(observer.output.with_suffix('.metadata.json'))
+            if enemy_observer is not None:
+                self.observations['target_runtime'] = enemy_observer.stop()
+                self.artifact(enemy_observer.output)
+                self.artifact(enemy_observer.output.with_suffix('.metadata.json'))
+            path.write_text(''.join(json.dumps(r) + '\n' for r in readings), encoding='utf-8')
+            self.artifact(path)
+        require(not observer.errors and not enemy_observer.errors, 'TRIAL_CONTINUITY', 'native observer teardown failed')
+        return self.finish('PASS', observed=result, expected={'ordinary_cast': True, 'native_resources_match': True,
+            'model_animation': 'UNVERIFIED', 'official_parity': 'UNVERIFIED'})
+
+    def run_shop_purchase(self) -> dict:
+        """Ordinary Weapon Blade/Heavy Steel purchase, native inventory + stats.
+
+        No QA preparation, injected orders, image path or automatic entry.
+        Heavy Steel requires exactly one existing Weapon Blade (850 gold
+        upgrade); the base trial requires an empty equipment inventory.
+        """
+        from Tools.Teardown.observe_client_movement import ClientMovementObserver
+        from server import roster
+        plan = {'hero_id': SKYE_HERO_ID, 'capture_backend': 'none',
+                'drive_entry': False, 'item_id': 458}
+        plan.update(self.profile.get('shop_purchase') or {})
+        item = plan['item_id']
+        if (plan['capture_backend'] != 'none' or plan['drive_entry'] or
+                type(item) is not int or item not in (458, 505)):
+            raise ClientStageFailure('SETUP', 'FAIL', 'shop trial requires no capture/entry and qualified item 458/505')
+        eid, _, _ = self._qualify_nonvisual_world(plan)
+        expected_cost, expected_bonus = (300, 10) if item == 458 else (850, 45)
+        observer = ClientMovementObserver(self.adb, self.out_dir / 'client-movement.jsonl', eid, period_ms=50)
+        samples = []
+
+        def require(ok, stage, detail):
+            if not ok:
+                raise ClientStageFailure(stage, 'FAIL', detail)
+
+        def owned(state):
+            rows = [h for h in state.get('heroes', []) if h['eid'] == eid]
+            require(len(rows) == 1 and rows[0]['alive'] and state.get('phase') == 'world'
+                    and not state.get('match_finished'), 'TRIAL_CONTINUITY', 'living owner in active WORLD absent')
+            return rows[0]
+
+        def identity(items):
+            return sorted((i['item'], i['instance']) for i in items)
+
+        def read(phase):
+            before = time.time()
+            value = observer.resources()
+            samples.append({'phase': phase, 'host_wall_before': before, 'host_wall_after': time.time(),
+                            'resources': value, 'inventory': observer.inventory(), 'position': observer.snapshot()})
+            return value
+
+        def tap(control, label):
+            require(control['eid'] == eid and self._foreground_package() == ANDROID_PACKAGE,
+                    'SETUP', 'shop control owner or foreground mismatch')
+            before = time.time()
+            self.adb.tap(*control['center'])
+            self.gesture(label, control=control, wall_before=before)
+            return before
+
+        try:
+            self.observations['client_runtime'] = observer.start()
+            self._guard_nonvisual_movement_ui(observer)
+            state = self.qa.snapshot()
+            initial = owned(state)
+            require([i['item'] for i in initial['inventory']] == ([] if item == 458 else [458]),
+                    'SETUP', 'shop trial equipment precondition does not match')
+            require(initial['gold'] >= expected_cost and initial['target'] is None and
+                    math.dist((initial['x'], initial['y']), roster.HERO_SPAWNS[eid]) < 6,
+                    'SETUP', 'owner must already be idle at the base with sufficient earned gold')
+            before = read('before-shop')
+            xyz = samples[-1]['position']['position_xyz']
+            require(math.dist((xyz[0], xyz[2]), (initial['x'], initial['y'])) < .05,
+                    'SETUP', 'native shop position disagrees with authoritative owner')
+            require(identity(samples[-1]['inventory']['items']) ==
+                    identity(initial['inventory'] + initial['default_items']),
+                    'SETUP', 'native initial inventory disagrees')
+            require(abs(before['weapon_power'] - initial['combat_stats']['weapon_power']) < .03,
+                    'SETUP', 'native initial weapon power disagrees')
+            self.stage('SETUP', 'PASS', 'idle native owner/inventory/stats agree; no diagnostic preparation')
+            tap(observer.shop_control(), 'native-open-shop')
+            time.sleep(.3)
+            tap(observer.shop_item_control(item), 'native-select-shop-item')
+            time.sleep(.3)
+            started = tap(observer.shop_buy_control(item), 'native-shop-buy')
+            self.stage('UI_COMMAND_SUBMITTED', 'PASS', 'ordinary open/select/BUY controls')
+            request = self.tail.wait_for(lambda r: self._on_connection(r) and r.get('direction') == 'c2s'
+                and r.get('opcode') == 1081 and r.get('payload') == roster.build_shop_buy(eid, item).hex(),
+                min(self.timeout, 3), min_time=started)
+            require(request is not None, 'CLIENT_INPUT_OBSERVED', 'no fresh matching shop 1081; no retry')
+            self.observations['shop_input'] = request
+            self.stage('CLIENT_INPUT_OBSERVED', 'PASS', f'fresh owner purchase for item {item}')
+            ack = self.tail.wait_for(lambda r: self._on_connection(r) and r.get('direction') == 's2c'
+                and r.get('opcode') == 1081 and r.get('payload') == request['payload'],
+                min(self.timeout, 2), min_time=request['time'])
+            require(ack is not None, 'SERVER_ACKNOWLEDGED', 'shop input unacknowledged; reason unknown')
+            self.stage('SERVER_ACKNOWLEDGED', 'PASS', 'matching purchase acknowledgement')
+            time.sleep(.3)
+            native_before = read('before-final-qa')
+            final_state = self.qa.snapshot()
+            final = owned(final_state)
+            time.sleep(.15)
+            native_after = read('after-final-qa')
+            require(final_state['match_id'] == state['match_id'] and final_state['tick'] > state['tick'] and
+                    not observer.errors, 'TRIAL_CONTINUITY', 'shop match changed/stopped or observer failed')
+            require(len(final['inventory']) == 1 and final['inventory'][0]['item'] == item,
+                    'AUTHORITATIVE_EFFECT', 'purchase/upgrade inventory outcome wrong')
+            self.tail.poll()
+            window = [r for r in self.tail.records if self._on_connection(r) and r.get('direction') == 's2c'
+                      and request['time'] <= r['time'] <= time.time()]
+            debits = [struct.unpack_from('>f', bytes.fromhex(r['payload']), 4)[0] for r in window
+                      if r['opcode'] == 1053 and r['payload'][:8] == f'{eid:08x}' and
+                      bytes.fromhex(r['payload'])[8] == 6 and struct.unpack_from('>f', bytes.fromhex(r['payload']), 4)[0] < 0]
+            require(debits == [-expected_cost], 'AUTHORITATIVE_EFFECT', 'purchase cost publication wrong')
+            instance = final['inventory'][0]['instance']
+            require(any(r['opcode'] == 1085 and r['payload'] == roster.build_item_inventory(eid, item, instance).hex()
+                        for r in window), 'AUTHORITATIVE_EFFECT', 'new inventory instance not published')
+            if item == 505:
+                consumed = initial['inventory'][0]['instance']
+                require(any(r['opcode'] == 1099 and r['payload'] == roster.build_item_remove(eid, consumed).hex()
+                            for r in window), 'AUTHORITATIVE_EFFECT', 'upgrade component removal missing')
+            self.stage('AUTHORITATIVE_EFFECT', 'PASS', 'exact debit, instance and component-consumption contract')
+            require(identity(samples[-1]['inventory']['items']) == identity(final['inventory'] + final['default_items']) and
+                    all(i['quantity'] == 1 for i in samples[-1]['inventory']['items']),
+                    'PRESENTATION', 'native purchased inventory differs from authoritative state')
+            require(abs(native_after['weapon_power_layers']['bonus'] - expected_bonus) < .01,
+                    'PRESENTATION', 'native item weapon bonus is wrong')
+            bounds = sorted((native_before['weapon_power'], native_after['weapon_power']))
+            require(bounds[0] - .03 <= final['combat_stats']['weapon_power'] <= bounds[1] + .03,
+                    'PRESENTATION', 'native weapon power does not bracket authoritative value')
+            # Gold is published at one-second intervals: bound the pending
+            # passive credit explicitly, not as network/client-consumption time.
+            require(-.1 <= final['gold'] - native_after['current']['gold'] <= 6.1,
+                    'PRESENTATION', 'native gold diverges beyond pending one-second credit')
+            self.stage('PRESENTATION', 'PASS', 'native item IDs/instances, weapon bonus/power and gold agree')
+            self.stage('TRIAL_CONTINUITY', 'PASS', 'same active match and native owner')
+            self.adb.back()
+            result = {'item': item, 'cost': expected_cost, 'final': final,
+                      'native': samples[-1], 'capture_backend': 'none', 'model_effect': 'UNVERIFIED'}
+        finally:
+            self.observations['client_runtime'] = observer.stop()
+            self.artifact(observer.output)
+            self.artifact(observer.output.with_suffix('.metadata.json'))
+            path = self.out_dir / 'client-shop-state.json'
+            path.write_text(json.dumps(samples, indent=2), encoding='utf-8')
+            self.artifact(path)
+        require(not observer.errors, 'TRIAL_CONTINUITY', 'native shop observer teardown failed')
+        return self.finish('PASS', observed=result, expected={'ordinary_input': True, 'native_state_match': True,
+            'official_parity': 'UNVERIFIED'})
+
+    def run_recall_return(self) -> dict:
+        """Ordinary Recall and optional ordinary movement cancellation, no pixels."""
+        from Tools.Teardown.observe_client_movement import ClientMovementObserver
+        from server import ability_wire, buff_wire, roster
+        plan = {'hero_id': SKYE_HERO_ID, 'capture_backend': 'none', 'drive_entry': False,
+                'fixture_position': [-65, 0], 'cancel_after_s': None, 'cancel_tap': [520, 310]}
+        plan.update(self.profile.get('recall_return') or {})
+        cancel = plan['cancel_after_s']
+        if (plan['capture_backend'] != 'none' or plan['drive_entry'] or
+                (cancel is not None and (type(cancel) not in (int, float) or not .5 <= cancel <= 2))):
+            raise ClientStageFailure('SETUP', 'FAIL', 'Recall requires no capture/entry and optional .5..2s cancellation')
+        eid, slot, hero_id = self._qualify_nonvisual_world(plan)
+        action = ability_wire.hero_action_variant(hero_id, 'recall')
+        if action is None or eid not in roster.HERO_SPAWNS:
+            raise ClientStageFailure('SETUP', 'FAIL', 'Recall action/spawn identity not qualified')
+        observer = ClientMovementObserver(self.adb, self.out_dir / 'client-movement.jsonl', eid, period_ms=50)
+        samples = []
+        path = self.out_dir / 'client-recall-resources.jsonl'
+
+        def require(ok, stage, detail):
+            if not ok:
+                raise ClientStageFailure(stage, 'FAIL', detail)
+
+        def owned(state):
+            rows = [h for h in state.get('heroes', []) if h['eid'] == eid]
+            require(len(rows) == 1 and rows[0]['alive'] and state.get('phase') == 'world'
+                    and not state.get('match_finished'), 'TRIAL_CONTINUITY', 'living owner in active WORLD absent')
+            return rows[0]
+
+        def read(phase):
+            before = time.time()
+            value = observer.resources()
+            samples.append({'host_wall_before': before, 'host_wall_after': time.time(),
+                            'phase': phase, 'resources': value, 'position': observer.snapshot()})
+            return value
+
+        try:
+            self.observations['client_runtime'] = observer.start()
+            self._guard_nonvisual_movement_ui(observer)
+            self._lock_nonvisual_camera(observer)
+            initial_state = self.qa.snapshot()
+            initial = owned(initial_state)
+            require(not initial['statuses'] and initial['recall_completes_at'] is None,
+                    'SETUP', 'owner obstructed or already recalling')
+            for command in ({'command': 'teleport', 'eid': eid, 'x': plan['fixture_position'][0],
+                             'y': plan['fixture_position'][1]},
+                            {'command': 'resources', 'eid': eid, 'hp': initial['max_hp'] * .4,
+                             'energy': initial['max_energy'] * .25}):
+                receipt = self.qa.submit(command, label='recall-fixture')
+                self.prepare('diagnostic-recall-fixture', command=command, receipt=receipt)
+                require(receipt.get('ok'), 'SETUP', 'Recall fixture not acknowledged')
+            time.sleep(.3)
+            prepared = owned(self.qa.snapshot())
+            baseline = read('before-input')
+            xyz = samples[-1]['position']['position_xyz']
+            require(math.dist((xyz[0], xyz[2]), plan['fixture_position']) < .05 and
+                    abs(baseline['current']['hp'] - prepared['hp']) < .05 and
+                    abs(baseline['current']['energy'] - prepared['energy']) < 2,
+                    'SETUP', 'native Recall fixture position/resources disagree')
+            self._guard_nonvisual_movement_ui(observer)
+            control = observer.recall_control()
+            require(control['eid'] == eid and self._foreground_package() == ANDROID_PACKAGE,
+                    'SETUP', 'Recall control owner or foreground mismatch')
+            self.observations['recall_control'] = control
+            self.stage('SETUP', 'PASS', 'native owner/control, partial resources and off-fountain position verified')
+            started = time.time()
+            self.adb.tap(*control['center'])
+            self.gesture('native-recall-tap', control=control, wall_before=started)
+            self.stage('UI_COMMAND_SUBMITTED', 'PASS', 'one ordinary Recall button tap')
+            request = self.tail.wait_for(lambda r: self._on_connection(r) and r.get('direction') == 'c2s'
+                and r.get('opcode') == 1041 and r.get('payload') == struct.pack('>IBB', 0xffffffff, action, 0).hex(),
+                min(self.timeout, 3), min_time=started)
+            require(request is not None, 'CLIENT_INPUT_OBSERVED', 'no fresh native Recall 1041; no retry')
+            self.observations['recall_input'] = request
+            self.stage('CLIENT_INPUT_OBSERVED', 'PASS', f'fresh 1041 native action {action}')
+            ack = self.tail.wait_for(lambda r: self._on_connection(r) and r.get('direction') == 's2c'
+                and r.get('opcode') == 1045 and r.get('payload') == ability_wire.build_target_cast(eid, None, action).hex(),
+                min(self.timeout, 2), min_time=request['time'])
+            require(ack is not None, 'SERVER_ACKNOWLEDGED', 'Recall input unacknowledged; reason unknown')
+            channel = owned(self.qa.snapshot())
+            require(channel['recall_completes_at'] is not None, 'SERVER_ACKNOWLEDGED', 'Recall echo without active channel')
+            self.stage('SERVER_ACKNOWLEDGED', 'PASS', 'matching Recall action and active authoritative channel')
+            began = time.monotonic()
+            cancelled = False
+            while time.monotonic() - began < 5.5:
+                require(not observer.errors, 'TRIAL_CONTINUITY', 'native observer failed')
+                read('channel-window')
+                if cancel is not None and not cancelled and time.monotonic() - began >= cancel:
+                    before = time.time()
+                    self.adb.tap(*plan['cancel_tap'])
+                    self.gesture('recall-cancel-walk', xy=plan['cancel_tap'], wall_before=before)
+                    move = self.tail.wait_for(lambda r: self._on_connection(r) and r.get('direction') == 'c2s'
+                        and r.get('opcode') == 1012, min(self.timeout, 2), min_time=before)
+                    require(move is not None, 'CLIENT_INPUT_OBSERVED', 'Recall cancellation tap produced no 1012')
+                    self.observations['cancel_input'] = move
+                    cancelled = True
+                time.sleep(.05)
+            native_before = read('before-final-qa')
+            final_state = self.qa.snapshot()
+            final = owned(final_state)
+            time.sleep(.15)
+            native_after = read('after-final-qa')
+            require(final_state['match_id'] == initial_state['match_id'] and final_state['tick'] > initial_state['tick'],
+                    'TRIAL_CONTINUITY', 'Recall match changed or stopped')
+            require(final['recall_completes_at'] is None, 'AUTHORITATIVE_EFFECT', 'Recall channel did not finish/cancel')
+            self.tail.poll()
+            window = [r for r in self.tail.records if self._on_connection(r) and r.get('direction') == 's2c'
+                      and request['time'] <= r['time'] <= time.time()]
+            adds = [buff_wire.parse_buff_add(bytes.fromhex(r['payload'])) for r in window
+                    if r['opcode'] == 1086 and r['payload'][:8] == f'{eid:08x}']
+            buffs = {b.kind: b.instance_id for b in adds if b.kind in (25, 26) and b.source_eid == eid}
+            require(set(buffs) == {25, 26}, 'AUTHORITATIVE_EFFECT', 'native paired Recall buffs missing')
+            relocations = [r for r in window if r['opcode'] == 1033 and r['payload'][:8] == f'{eid:08x}']
+            spawn = roster.HERO_SPAWNS[eid]
+            if cancel is None:
+                require(len(relocations) == 1 and math.dist((final['x'], final['y']), spawn) < .03,
+                        'AUTHORITATIVE_EFFECT', 'completed Recall lacks relocation/authoritative spawn arrival')
+                require(any(r['opcode'] == 1094 and r['payload'][:16] == struct.pack('>II', eid, buffs[25]).hex()
+                            for r in window), 'AUTHORITATIVE_EFFECT', 'completed Recall trigger missing')
+                require(3.8 <= relocations[0]['time'] - request['time'] <= 4.5,
+                        'AUTHORITATIVE_EFFECT', 'Recall relocation outside measured four-second window')
+                require(final['hp'] > prepared['hp'] + prepared['max_hp'] * .2,
+                        'AUTHORITATIVE_EFFECT', 'Recall resource restoration not established')
+                xyz = samples[-1]['position']['position_xyz']
+                require(math.dist((xyz[0], xyz[2]), spawn) < .05,
+                        'PRESENTATION', 'native client did not reach Recall destination')
+                require(native_after['current']['hp'] / native_after['max_hp'] >
+                        baseline['current']['hp'] / baseline['max_hp'] + .2,
+                        'PRESENTATION', 'native Recall healing not observed')
+            else:
+                require(not relocations and math.dist((final['x'], final['y']), spawn) > 3,
+                        'AUTHORITATIVE_EFFECT', 'cancelled Recall still returned')
+                removed = {struct.unpack_from('>II', bytes.fromhex(r['payload']))[1] for r in window
+                           if r['opcode'] == 1093 and r['payload'][:8] == f'{eid:08x}'}
+                require(set(buffs.values()) <= removed, 'AUTHORITATIVE_EFFECT', 'Recall cancellation buffs missing')
+                require(all(math.dist((s['position']['position_xyz'][0], s['position']['position_xyz'][2]), spawn) > 3
+                            for s in samples), 'PRESENTATION', 'native client returned despite cancellation')
+            for resource in ('hp', 'energy'):
+                bounds = sorted((native_before['current'][resource], native_after['current'][resource]))
+                require(bounds[0] - .1 <= final[resource] <= bounds[1] + .1,
+                        'PRESENTATION', f'native {resource} does not bracket final Recall state')
+            self.stage('AUTHORITATIVE_EFFECT', 'PASS', 'Recall cancelled by ordinary movement' if cancelled else 'four-second return and refill')
+            self.stage('PRESENTATION', 'PASS', 'native logical position and resources agree; model effect unverified')
+            self.stage('TRIAL_CONTINUITY', 'PASS', f'active match advanced {initial_state["tick"]} -> {final_state["tick"]}')
+            result = {'cancelled': cancelled, 'resource_samples': len(samples), 'final': final,
+                      'relocations': relocations, 'capture_backend': 'none', 'model_effect': 'UNVERIFIED'}
+        finally:
+            self.observations['client_runtime'] = observer.stop()
+            self.artifact(observer.output)
+            self.artifact(observer.output.with_suffix('.metadata.json'))
+            path.write_text(''.join(json.dumps(s) + '\n' for s in samples), encoding='utf-8')
+            self.artifact(path)
+        require(not observer.errors, 'TRIAL_CONTINUITY', 'native Recall observer teardown failed')
+        return self.finish('PASS', observed=result, expected={'ordinary_input': True, 'native_state_match': True,
+            'official_parity': 'UNVERIFIED'})
+
+    def run_healing_flask(self) -> dict:
+        """Ordinary native HUD use with disclosed QA preparation, no pixels."""
+        from Tools.Teardown.observe_client_movement import ClientMovementObserver
+        from server import buff_wire, cooldown_wire
+        plan = {'capture_backend': 'none', 'drive_entry': False,
+                'hero_id': SKYE_HERO_ID, 'fixture_position': [-65.0, 0.0],
+                'hp': None, 'energy': 100.0}
+        plan.update(self.profile.get('healing_flask') or {})
+        hits = plan.get('diagnostic_hits', [])
+        if (not isinstance(hits, list) or len(hits) > 3 or
+                any(not isinstance(h, dict) or set(h) != {'after_s', 'amount'} or
+                    not isinstance(h['after_s'], (int, float)) or not .5 <= h['after_s'] <= 3.5 or
+                    not isinstance(h['amount'], (int, float)) or not 0 < h['amount'] <= 300
+                    for h in hits) or
+                any(b['after_s'] - a['after_s'] < .5 for a, b in zip(hits, hits[1:]))):
+            raise ClientStageFailure('SETUP', 'FAIL', 'invalid bounded diagnostic hit schedule')
+        if plan['capture_backend'] != 'none' or plan['drive_entry']:
+            raise ClientStageFailure('SETUP', 'FAIL', 'Flask requires existing WORLD and no image/video path')
+        eid, slot, hero_id = self._qualify_nonvisual_world(plan)
+        observer = ClientMovementObserver(self.adb, self.out_dir / 'client-movement.jsonl', eid,
+                                         **({'period_ms': 50} | (plan.get('runtime_observer') or {})))
+        samples = []
+        resources_path = self.out_dir / 'client-resources.jsonl'
+
+        def read_resources(phase):
+            before = time.time()
+            value = observer.resources()
+            samples.append({'host_wall_before': before, 'host_wall_after': time.time(),
+                            'phase': phase, 'client': value})
+            return value
+
+        def require(condition, stage, detail):
+            if not condition:
+                raise ClientStageFailure(stage, 'FAIL', detail)
+
+        def owned(state):
+            rows = [h for h in state.get('heroes', []) if h['eid'] == eid]
+            require(len(rows) == 1 and rows[0]['hero_id'] == hero_id and rows[0]['alive']
+                    and state.get('phase') == 'world' and not state.get('match_finished'),
+                    'SETUP', 'living owner in active QA WORLD not verified')
+            return rows[0]
+
+        try:
+            self.observations['client_runtime'] = observer.start()
+            self.observations['wire_identity'] = {'eid': eid, 'slot': slot, 'hero_id': hero_id,
+                                                  'connection': self.connection}
+            self._guard_nonvisual_movement_ui(observer)
+            initial_state = self.qa.snapshot()
+            initial = owned(initial_state)
+            sources = [h['eid'] for h in initial_state['heroes']
+                       if h['alive'] and h['team'] != initial['team']]
+            require(not hits or sources, 'SETUP', 'no living enemy source for diagnostic hits')
+            default = [i for i in initial['default_items'] if i['instance'] == 2000 and i['item'] == 457]
+            require(len(default) == 1 and default[0]['remaining'] == 0, 'SETUP',
+                    'owned Healing Flask is absent or not ready; no cooldown bypass')
+            # Reserve the actual 17-pulse heal, not a fixed level-five margin.
+            # This keeps fresh level-one and late-match trials uncapped.
+            total_heal = 17 * (200 + 25 * (initial['level'] - 1)) * .3 / 5
+            fixture_hp = (min(500.0, initial['max_hp'] - total_heal - 30.0)
+                          if plan['hp'] is None else plan['hp'])
+            for command in (
+                    {'command': 'teleport', 'eid': eid, 'x': plan['fixture_position'][0],
+                     'y': plan['fixture_position'][1]},
+                    {'command': 'resources', 'eid': eid, 'hp': fixture_hp, 'energy': plan['energy']}):
+                receipt = self.qa.submit(command, label='flask-prepare')
+                self.prepare('diagnostic-flask-fixture', command=command, receipt=receipt)
+                require(receipt.get('ok'), 'SETUP', 'Flask fixture preparation not acknowledged')
+            time.sleep(.2)
+            prepared = owned(self.qa.snapshot())
+            prepared_heal = 17 * (200 + 25 * (prepared['level'] - 1)) * .3 / 5
+            require(not prepared['statuses'] and 0 < prepared['hp'] < prepared['max_hp'] - prepared_heal
+                    and prepared['energy'] < prepared['max_energy'] * .5, 'SETUP',
+                    'unobstructed uncapped resource fixture not established')
+            baseline = read_resources('before-input')
+            require(abs(baseline['current']['hp'] - prepared['hp']) < .03
+                    and abs(baseline['current']['energy'] - prepared['energy']) < 2,
+                    'SETUP', 'native resources already differ from prepared server state; no item input')
+            require(baseline['current']['barrier'] == 0 and baseline['current']['fortified'] == 0,
+                    'SETUP', 'client resource pools are not initially empty')
+            self._guard_nonvisual_movement_ui(observer)
+            control = observer.default_item_control(2000)
+            self.observations['flask_control'] = control
+            require(control['eid'] == eid and control['instance'] == 2000, 'SETUP', 'native item owner mismatch')
+            require(self._foreground_package() == ANDROID_PACKAGE, 'SETUP', 'owned client lost focus')
+            self.stage('SETUP', 'PASS', 'identity, HUD, ready item, native control and partial resources verified')
+            started = time.time()
+            self.adb.tap(*control['center'])
+            self.gesture('native-flask-tap', control=control, wall_before=started)
+            self.stage('UI_COMMAND_SUBMITTED', 'PASS', 'one ordinary tap at code-derived item touch bounds')
+            payload = struct.pack('>IH', 2000, 0).hex()
+            request = self.tail.wait_for(lambda r: r.get('connection') == self.connection
+                and r.get('direction') == 'c2s' and r.get('opcode') == 1096 and r.get('payload') == payload,
+                timeout=min(self.timeout, 2), min_time=started)
+            require(request is not None, 'CLIENT_INPUT_OBSERVED', 'no fresh owned 1096; no retry')
+            self.stage('CLIENT_INPUT_OBSERVED', 'PASS', 'fresh 1096 instance 2000')
+            window_start = time.monotonic()
+            deadline = window_start + 6.0
+            hit_index = 0
+            hit_observations = []
+            while time.monotonic() < deadline:
+                require(not observer.errors, 'TRIAL_CONTINUITY', repr(observer.errors))
+                read_resources('activation-window')
+                if hit_index < len(hits) and time.monotonic() - window_start >= hits[hit_index]['after_s']:
+                    command = {'command': 'damage', 'source': sources[0], 'target': eid,
+                               'amount': hits[hit_index]['amount'], 'kind': 'true'}
+                    receipt = self.qa.submit(command, label='flask-diagnostic-hit')
+                    self.prepare('diagnostic-damage-not-attack-input', command=command, receipt=receipt)
+                    require(receipt.get('ok'), 'TRIAL_CONTINUITY', 'diagnostic hit not acknowledged')
+                    time.sleep(.1)
+                    hit_observations.append({'command': command, 'receipt': receipt,
+                                             'client': read_resources('after-diagnostic-hit')})
+                    hit_index += 1
+                self.tail.poll()
+                time.sleep(.05)
+            client_before = read_resources('before-final-qa')
+            final_state = self.qa.snapshot()
+            final = owned(final_state)
+            time.sleep(.15)  # Allow receipt-associated publications to reach the client.
+            client_after = read_resources('after-final-qa')
+            self.tail.poll()
+            records = [r for r in self.tail.records if r.get('connection') == self.connection
+                       and r.get('direction') == 's2c' and started <= r['time'] <= time.time()]
+            self.observations['flask_wire_window'] = records
+            require(any(r['opcode'] == 1096 and r['payload'] == payload for r in records),
+                    'SERVER_ACKNOWLEDGED', 'fresh item echo absent (reason unknown)')
+            self.stage('SERVER_ACKNOWLEDGED', 'PASS', 'owner item echo observed; effects checked separately')
+            buffs = [buff_wire.parse_buff_add(bytes.fromhex(r['payload'])) for r in records if r['opcode'] == 1086]
+            timers = [cooldown_wire.parse_timer_tick(bytes.fromhex(r['payload'])) for r in records if r['opcode'] == 1162]
+            heal = []
+            hostile = []
+            energy = []
+            for r in records:
+                p = bytes.fromhex(r['payload'])
+                if r['opcode'] == 1054 and struct.unpack_from('>I', p)[0] == eid:
+                    target, source, delta = struct.unpack_from('>IIf', p)
+                    if delta < 0:
+                        hostile.append(r)
+                    elif source == eid:
+                        heal.append(delta)
+                if r['opcode'] == 1053 and struct.unpack_from('>I', p)[0] == eid and p[8] == 2:
+                    energy.append(struct.unpack_from('>f', p, 4)[0])
+            expected_hits = [-h['amount'] for h in hits]
+            observed_hits = [struct.unpack_from('>f', bytes.fromhex(r['payload']), 8)[0] for r in hostile]
+            require(hit_index == len(hits) and observed_hits == expected_hits
+                    and all(struct.unpack_from('>I', bytes.fromhex(r['payload']), 4)[0] == sources[0]
+                            for r in hostile) and final['level'] == prepared['level'], 'TRIAL_CONTINUITY',
+                    'unexpected damage/level change contaminated the Flask trial')
+            level = prepared['level']
+            expected_heal = (200 + 25 * (level - 1)) * .3 / 5
+            expected_energy = prepared['max_energy'] * .30 * .3 / 5
+            expected_barrier = 115 + 35 * (level - 1)
+            energy_count = sum(abs(x - expected_energy) < 1e-4 for x in energy)
+            require(len([b for b in buffs if b.kind == 259 and b.duration == 5
+                         and b.target_eid == eid and b.source_eid == eid]) == 1
+                    and any(t.eid == eid and t.tag == cooldown_wire.ITEM_TAGS['healing_flask']
+                            and t.duration == 120 and t.remaining == 120 for t in timers)
+                    and len(heal) == 17 and all(abs(x - expected_heal) < 1e-4 for x in heal)
+                    and energy_count == 17, 'AUTHORITATIVE_EFFECT',
+                    f'Flask contract mismatch: heals={heal}, matching energy pulses={energy_count}')
+            self.stage('AUTHORITATIVE_EFFECT', 'PASS', 'buff, cooldown and 17 uncapped heal/energy pulses')
+            peak = max(s['client']['current']['barrier'] for s in samples)
+            require(abs(peak - expected_barrier) < .001 and client_after['current']['barrier'] == 0,
+                    'PRESENTATION', f'native barrier lifetime mismatch: peak {peak}, expected {expected_barrier}')
+            remaining_pool = expected_barrier
+            for hit in hit_observations:
+                remaining_pool = max(0, remaining_pool - hit['command']['amount'])
+                require(abs(hit['client']['current']['barrier'] - remaining_pool) < .001,
+                        'PRESENTATION', 'native shield consumption differs after a controlled hit')
+            for field in ('hp', 'energy'):
+                low = min(client_before['current'][field], client_after['current'][field])
+                high = max(client_before['current'][field], client_after['current'][field])
+                require(low - .03 <= final[field] <= high + .03, 'PRESENTATION',
+                        f'native {field} final bracket {low}..{high} differs from QA {final[field]}')
+                require(client_after['current'][field] > baseline['current'][field], 'PRESENTATION',
+                        f'native {field} did not increase')
+            require(not observer.errors, 'TRIAL_CONTINUITY', repr(observer.errors))
+            self.stage('TRIAL_CONTINUITY', 'PASS', f'{len(samples)} scalar resource reads; no observer errors')
+            self.stage('PRESENTATION', 'PASS', 'native HP/energy agree with server bracket; shield grant/expiry measured')
+            observed = {'initial': initial, 'prepared': prepared, 'final': final,
+                        'client_before_final_qa': client_before, 'client_after_final_qa': client_after,
+                        'native_peak_barrier': peak, 'heal_pulses': len(heal), 'energy_pulses': energy_count,
+                        'diagnostic_hits': hit_observations,
+                        'capture_backend': 'none', 'model_effects': 'UNVERIFIED'}
+        finally:
+            self.observations['client_runtime'] = observer.stop()
+            with resources_path.open('x', encoding='utf-8') as handle:
+                for row in samples:
+                    handle.write(json.dumps(row, separators=(',', ':')) + '\n')
+            self.artifact(resources_path)
+            self.artifact(observer.output)
+            self.artifact(observer.output.with_suffix('.metadata.json'))
+        require(not observer.errors, 'TRIAL_CONTINUITY', repr(observer.errors))
+        return self.finish('PASS', observed=observed, expected={
+            'heal_pulses': 17, 'energy_pulses': 17, 'barrier': expected_barrier,
+            'native_resource_consumption': 'MEASURED', 'official_timing_parity': 'UNVERIFIED'})
+
+    def _run_movement_walk_legacy(self) -> dict:
+        """Scripted Skye walk battery under one host-window capture.
+
+        Drives the Classic entry (unless the profile disables it), proves
+        world entry from a fresh wire connection carrying 1010 bootstrap
+        frames, then executes the profiled walks while capturing the restored
+        LDPlayer window at ~30 FPS. Produces machine-checkable wire windows
+        per walk (analysed separately with the navmesh inspector) plus a
+        human-reviewable capture. Presentation stays UNVERIFIED for human
+        review, exactly like the cast scenarios' captures.
+        """
+        plan = dict(MOVEMENT_WALK_DEFAULTS)
+        plan.update(self.profile.get("movement_walk") or {})
+        backend = plan.get("capture_backend", "adb")
+        if backend not in ("none", "adb", "host"):
+            raise ClientStageFailure("SETUP", "FAIL", "unknown movement capture backend")
+        try:
+            version = self.adb.client_version()
+            resolution = verify_resolution(self.adb, self.profile)
+        except ClientStageFailure:
+            raise
+        self._client_version = version
+        entry_started = time.time()
+        if plan.get("drive_entry", True):
+            self.drive_classic_entry()
+        # Bind the fresh match's wire trace: the newest file the stack opened
+        # at/after entry began. An explicit --wire-trace was already bound.
+        if self.tail is None:
+            bound = None
+            # The window starts here -- the drive itself takes ~60 s and the
+            # match server opens its trace during the draft, before this
+            # point; only the mtime freshness anchor ties to entry_started.
+            deadline = time.time() + 45.0
+            while time.time() < deadline and bound is None:
+                bound = newest_wire_trace(entry_started)
+                if bound is None:
+                    time.sleep(1.0)
+            if bound is None:
+                raise ClientStageFailure(
+                    "SETUP", "FAIL",
+                    "no wire trace appeared under %TEMP%/halcyon_stack after "
+                    "entry — the match server may not have started")
+            self.tail = TraceTail(bound)
+            self.observations["wire_trace_bound"] = bound
+        # World proof WITHOUT the QA mailbox: a connection that appeared (or
+        # woke) after entry began and received s2c 1010 bootstrap frames.
+        deadline = time.time() + max(self.timeout, 60.0)
+        world = None
+        while time.time() < deadline and world is None:
+            self.tail.poll()
+            for record in self.tail.records:
+                if record.get("time", 0) < entry_started - 5.0:
+                    continue
+                if record.get("direction") != "s2c" or record.get("opcode") != OP_ENTITY_FULL_UPDATE:
+                    continue
+                connection = record.get("connection")
+                if connection is not None:
+                    world = {"connection": connection,
+                             "bootstrap_1010_at": record["time"]}
+                    break
+            if world is None:
+                time.sleep(1.0)
+        if world is None:
+            self.stage("SETUP", "FAIL",
+                       "no fresh wire connection received 1010 bootstrap "
+                       "frames after entry — world entry not proven")
+            raise ClientStageFailure(
+                "SETUP", "FAIL",
+                "world entry not proven: no post-entry s2c 1010 in the trace")
+        self.connection = world["connection"]
+        self.stage("SETUP", "PASS",
+                   f"world bootstrap on connection {self.connection}, "
+                   f"resolution={resolution['width']}x{resolution['height']}, "
+                   f"entry_steps={len(self.observations.get('entry', {}).get('steps', []))}")
+        # Final input-path cleanliness gate: the battery is worthless against
+        # a blocking panel or a foreign foreground app, and the
+        # CLIENT_INPUT_OBSERVED wire check can only tell that after the
+        # fact. Fail here, with the screen retained.
+        hijack = self._ensure_game_foreground(step="pre-battery")
+        if hijack is not None:
+            self.observations.setdefault("entry", {}).setdefault(
+                "steps", []).append(hijack)
+        if backend != "none" and self._screen_still():
+            raise ClientStageFailure(
+                "SETUP", "FAIL",
+                "the client surface is frozen (suspended renderer) before "
+                "the walk battery — restart the client and rerun")
+        self._dismiss_entry_dialogs(
+            self.observations.setdefault("entry", {}).setdefault("steps", []))
+        guard_records, blocked = self._dismiss_blocking_panels(rounds=2)
+        if guard_records:
+            self.observations.setdefault("entry", {}).setdefault(
+                "steps", []).extend(guard_records)
+        if blocked:
+            raise ClientStageFailure(
+                "SETUP", "FAIL",
+                "a blocking panel (Settings / Choose a Build) reappeared "
+                "before the walk battery — world input would be blocked")
+        if backend == "host":
+            self.observations.setdefault("prebattery_host_surface", {}).update(
+                self._require_host_surface_matches_guest())
+        walks = plan["walks"]
+        between = float(plan.get("between_walks_s", 7.0))
+        total = sum(len(w["taps"]) * float(w.get("tap_gap_s", 0.0))
+                    for w in walks) + between * (len(walks) - 1)
+        total += float(plan.get("settle_before_first_walk_s", 5.0)) + 4.0
+        capture = ({"started_at": time.time(), "backend": "none"} if backend == "none"
+                   else self.start_capture(window_hint=total + 15.0) if backend == "adb"
+                   else self.start_host_capture(duration=total,
+                                               fps=int(plan.get("capture_fps", 30))))
+        capture_started = capture["started_at"]
+        executed = []
+        try:
+            time.sleep(float(plan.get("settle_before_first_walk_s", 5.0)))
+            for index, walk in enumerate(walks):
+                taps = [list(map(int, tap)) for tap in walk["taps"]]
+                gap = float(walk.get("tap_gap_s", 0.0))
+                tap_records = []
+                for order, (x, y) in enumerate(taps):
+                    self.adb.tap(x, y)
+                    at = time.time()
+                    tap_records.append({
+                        "order": order, "x": x, "y": y,
+                        "wall": at,
+                        "video_offset_s": round(at - capture_started, 3),
+                    })
+                    self.gesture("walk-tap", walk=walk["label"], order=order,
+                                 x=x, y=y, video_offset_s=round(at - capture_started, 3))
+                    if gap and order < len(taps) - 1:
+                        time.sleep(gap)
+                executed.append({"label": walk["label"], "taps": tap_records})
+                if index < len(walks) - 1:
+                    time.sleep(between)
+            time.sleep(4.0)
+        finally:
+            if backend == "none":
+                final = {**capture, "ended_at": time.time(), "note": "Data-only: no recorder started"}
+            elif backend == "adb":
+                self.finalize_capture()
+                final = self.capture or {}
+            else:
+                self.finalize_host_capture()
+                final = getattr(self, "_host_capture", {})
+            capture_key = {"none": "data_window", "adb": "device_capture", "host": "host_capture"}[backend]
+            self.observations[capture_key] = {
+                k: v for k, v in final.items() if k not in ("process", "log_handle")}
+        capture_ok = bool(self.observations[capture_key].get("video_bytes"))
+        # Wire-truth input check: executed taps mean nothing by themselves —
+        # a blocked input path (e.g. the in-match Settings panel,
+        # before-run-04) swallows them silently. Every planned tap must
+        # appear as a c2s 1012 on this connection inside the battery window.
+        self.tail.poll()
+        planned_taps = sum(len(w["taps"]) for w in walks)
+        battery_start = capture_started - 2.0
+        move_intents = [r for r in self.tail.records
+                        if r.get("direction") == "c2s"
+                        and r.get("opcode") == OP_MOVE_CAST
+                        and r.get("connection") == self.connection
+                        and isinstance(r.get("time"), (int, float))
+                        and r["time"] >= battery_start]
+        input_ok = len(move_intents) == planned_taps
+        self.observations["move_intents"] = {
+            "planned_taps": planned_taps,
+            "observed_1012": len(move_intents),
+            "window_start": battery_start,
+            "times": [r["time"] for r in move_intents],
+        }
+        self.stage("CLIENT_INPUT_OBSERVED",
+                   "PASS" if input_ok else "FAIL",
+                   f"{len(move_intents)}/{planned_taps} c2s 1012 move intents "
+                   f"on connection {self.connection} within the battery window")
+        # Static-surface gate: a frozen emulator compositor can keep the
+        # input path and the simulation alive while the captured surface
+        # never changes (before-run-15: 7/7 intents under one static frame
+        # of the Choose-a-Build panel). A capture like that is not rendered
+        # evidence and must not PASS.
+        static = None
+        if capture_ok:
+            try:
+                import imageio.v3 as iio
+                import numpy as np
+                video_path = self.observations[capture_key]["video"]
+                n_frames = 0
+                sampled = []
+                prev = None
+                # Stream device recordings; a full 60 FPS battery can occupy
+                # several GB if decoded into one array.
+                for i, frame in enumerate(iio.imiter(str(video_path))):
+                    n_frames += 1
+                    if i % 30:
+                        continue
+                    small = frame[::8, ::8].mean(axis=2)
+                    if prev is not None:
+                        sampled.append(float(np.abs(small - prev).mean()))
+                    prev = small
+                distinct = sum(d > 0.25 for d in sampled)
+                static = {
+                    "decoder_output_frames": n_frames,
+                    "sampled_pairs": len(sampled),
+                    "distinct_pairs": distinct,
+                    "distinct_share": round(distinct / max(1, len(sampled)), 3),
+                }
+                # imageio may expand variable-rate input to nominal CFR.
+                # Measure native timestamps separately; duplicated decoder
+                # frames cannot establish capture cadence for stutter review.
+                import imageio_ffmpeg
+                probe = subprocess.run(
+                    [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i",
+                     str(video_path), "-vf", "showinfo", "-fps_mode",
+                     "passthrough", "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=120, check=True)
+                timestamps = [float(value) for value in re.findall(
+                    r"\bn:\s*\d+\s+pts:\s*\d+\s+pts_time:([\d.]+)", probe.stderr)]
+                gaps = [b - a for a, b in zip(timestamps, timestamps[1:])]
+                span = timestamps[-1] - timestamps[0] if len(timestamps) > 1 else 0
+                static["native_frames"] = len(timestamps)
+                static["native_fps"] = (len(timestamps) - 1) / span if span > 0 else None
+                static["max_native_frame_gap_s"] = max(gaps) if gaps else None
+                static["cadence_note"] = "Native timestamps, not CFR-expanded decoder frames; smoothness unreviewed"
+            except Exception as exc:                # noqa: BLE001 - diagnostic
+                static = {"error": repr(exc)}
+        self.observations["capture_static_check"] = static
+        capture_live = bool(static) and not static.get("error") \
+            and static.get("distinct_share", 0.0) >= 0.5
+        if static is None:
+            self.stage("PRESENTATION", "UNVERIFIED",
+                       "Data-only run: no video requested; client positions not observed" if backend == "none" else
+                       f"{len(executed)}/{len(walks)} walks executed, capture "
+                       f"{'pulled' if capture_ok else 'MISSING'}; unreviewed")
+        elif static.get("error"):
+            self.stage("PRESENTATION", "UNVERIFIED",
+                       f"capture pulled but the static-surface probe failed: "
+                       f"{static['error']}")
+        elif not capture_live:
+            self.stage("PRESENTATION", "FAIL",
+                       f"{backend} capture is a static surface "
+                       f"({static.get('distinct_pairs')}/"
+                       f"{static.get('sampled_pairs')} sampled pairs distinct) "
+                       f"— not rendered evidence")
+        else:
+            self.stage("PRESENTATION", "UNVERIFIED",
+                       f"{len(executed)}/{len(walks)} walks executed, capture "
+                       f"live ({static.get('distinct_share')} distinct), "
+                       f"native FPS={static.get('native_fps')}; unreviewed")
+        observed = {
+            "walks": executed,
+            "capture_backend": backend,
+            capture_key: self.observations[capture_key],
+            "move_intents": self.observations.get("move_intents", {}),
+            "capture_static_check": static,
+            "wire_trace": str(self.tail.path),
+            "connection": self.connection,
+        }
+        result = self.finish(
+            "PASS" if (input_ok and (backend == "none" or (capture_ok and capture_live))) else "FAIL",
+            observed=observed,
+            expected={
+                "walks_planned": [w["label"] for w in walks],
+                "capture_fps": plan.get("capture_fps", 30) if backend == "host" else None,
+                "planned_taps": planned_taps,
+            })
+        result["movement_plan"] = {
+            "defaults_source": "MOVEMENT_WALK_DEFAULTS",
+            "profile_overrides_applied": bool(self.profile.get("movement_walk")),
+        }
+        path = Path(result["result_path"])
+        path.write_text(json.dumps(result, indent=2, sort_keys=True),
+                        encoding="utf-8")
+        return result
+
     def finish(self, status: str, *, observed: dict, expected: dict) -> dict:
         result = {
             "schema_version": PAIR_SCHEMA_VERSION,
@@ -7307,24 +9397,43 @@ def run_client(scenario: str, args) -> dict:
             raise ClientStageFailure("SETUP", "FAIL",
                                      "--adb-serial is required for client mode")
         qa_dir = getattr(args, "qa_dir", None)
-        if not qa_dir:
+        if not qa_dir and scenario != "movement-walk":
             raise ClientStageFailure("SETUP", "FAIL",
                                      "--qa-dir (the running server's "
                                      "HALCYON_QA_DIR) is required for client mode")
         adb = Adb(serial)
-        qa = QaSession(qa_dir)
-        tail = verify_trace(getattr(args, "wire_trace", None),
-                            timeout=float(getattr(args, "timeout", 30.0) or 30.0))
+        qa = QaSession(qa_dir) if qa_dir else _AbsentQa()
+        explicit_trace = getattr(args, "wire_trace", None)
+        if explicit_trace:
+            tail = verify_trace(explicit_trace,
+                                timeout=float(getattr(args, "timeout", 30.0) or 30.0))
+        elif scenario == "movement-walk":
+            # The nonvisual driver reports the missing explicit WORLD trace
+            # as SETUP failure; it never falls back to image-based entry.
+            tail = None
+        else:
+            raise ClientStageFailure("SETUP", "FAIL", "--wire-trace is required")
         driver = ClientDriver(scenario, adb=adb, qa=qa, tail=tail,
                               connection=getattr(args, "connection", None),
                               profile=profile, out_dir=out_dir,
                               timeout=float(getattr(args, "timeout", 30.0) or 30.0),
                               profile_digest=profile_digest)
         driver.stage("SETUP", "PENDING")
+        if scenario == "movement-walk":
+            return driver.run_movement_walk()
+        if scenario == "classic-match":
+            from Tools.classic_client import ClassicMatchExercise
+            return ClassicMatchExercise(driver).run()
+        if scenario == "healing-flask":
+            return driver.run_healing_flask()
+        if scenario == "recall-return":
+            return driver.run_recall_return()
+        if scenario == "shop-purchase":
+            return driver.run_shop_purchase()
         if scenario == "minion-push":
             return driver.run_minion_push()
         slot = {"skye-a": "A", "skye-b": "B", "skye-c": "C"}[scenario]
-        return driver.run_cast_scenario(slot, requires_lock=slot in ("B", "C"))
+        return driver.run_nonvisual_cast(slot)
     except ClientStageFailure as exc:
         # Retain everything the trial completed: stages, gestures,
         # observations, receipts, artifacts -- only the failing stage is
@@ -7365,6 +9474,8 @@ def run_client(scenario: str, args) -> dict:
     except Exception as exc:                 # noqa: BLE001 -- transport/subprocess/
         # parser/capture infrastructure errors keep the partial state too,
         # with a structured error instead of losing all work.
+        import traceback as _traceback
+        _error_traceback = _traceback.format_exc()
         if driver is not None:
             driver.finalize_capture()
             stages = driver.stages
@@ -7390,7 +9501,9 @@ def run_client(scenario: str, args) -> dict:
         result = {"scenario": scenario, "mode": "client", "status": "ERROR",
                   "stages": stages, "first_failed_stage": "SETUP",
                   "failure_kind": "infrastructure",
-                  "failure_detail": repr(exc), "observed": {}, "expected": {},
+                  "failure_detail": repr(exc),
+                  "failure_traceback": _error_traceback,
+                  "observed": {}, "expected": {},
                   "wall_completed_at": time.time(),
                   "elapsed_s": round(time.time() - started, 3), **extra}
         return _write_client_failure(result, out_dir if "out_dir" in locals()

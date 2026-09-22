@@ -3,6 +3,173 @@
 Updated 2026-09-08. This is subsystem 4 of the operator's solo-sandbox brief.
 It records implemented behavior and remaining fidelity work separately.
 
+## 2026-09-22 Flask implementation and native resource contract
+
+### Native shop instrumentation and bootstrap stat repair
+
+The same run now reads native inventory item/instance IDs and weapon-power
+layers. Ordinary Weapon Blade purchase in `relocation-live/` produced native
+item458/instance2002 and +10 bonus. It also exposed a stale +10% total weapon
+modifier from three archived1052 records at tape8.517s, absent from authoritative
+combat. The fingerprint-qualified live bootstrap now omits those three records;
+the archived file and all unrelated publication remain unchanged. Fresh native
+base72/bonus0/multiplier0 in `shop-live/` verifies the repair, not official
+bot-handicap semantics. The new `shop-purchase` scenario in the existing runner
+requires ordinary input plus exact cost/instance/native-stat agreement; full
+purchase/upgrade trials now pass in `spawn-live/shop-blade-01` and
+`shop-steel-01`:300/850gold debits, native instances2002→2003, consumed component
+removed, bonuses10→45, native/server totals82 at level1 and120.63 at level2.
+Only normal earned gold and ordinary controls were used; no QA preparation.
+
+### Flask
+
+Supersedes the September 20 implementation gap below; historical evidence is
+retained. See [active ten-hour run](classic-ten-hour-run.md) for artifacts/checks.
+No images/video are used. Live client consumption now passes two qualified
+ordinary-input trials; model effects and official scheduling parity remain open.
+
+- Independent 1011/1076 state establishes CE Flask uses at levels 5 and 7,
+  max energy 370/420. Owned metadata and native effect registration agree on
+  duration 5 s, interval 0.3 s, barrier `115+35*(level-1)`, healing coefficient
+  `200+25*(level-1)`, energy fraction 0.30 and cooldown 120 s.
+- Native terminal scheduling explains 17 full heal pulses, not a rounded
+  five-second total; immediate energy plus 16 subsequent pulses also totals 17.
+  First-heal scheduler phase is not proven by packet-arrival intervals alone.
+- Production 1096 now resolves authenticated default ownership and activates
+  Flask via shared ItemManager/StatusManager. Wound, caps, death, expiry,
+  duplicate use, cooldown-ready and reconnect behavior have targeted checks.
+  Vision Totem effects are still unimplemented; ownership echo is not acceptance.
+- Pinned ARM64 ELF resource anchors: 1053 handler `82a024`, 1054 apply `c01624`,
+  damage consumer `caa5a0`; entity stats pointer `+40`, current pools `+308`
+  (HP), `+310` (energy), `+318` (barrier), `+31c` (fortified).
+  Native 1054 consumes pools before HP. Therefore grants/expiry use 1053 type
+  4/5, but absorption uses the **pre-pool damage** in 1054, including fully
+  absorbed hits. Publishing only HP damage desynchronizes native resources.
+- Native Flask registration `c305c0`, heal callback `c3053c`, periodic terminal
+  callback `c48a94` are concrete supporting anchors, not copied payloads.
+- Existing runner now includes `healing-flask`; all seven headless scenarios
+  pass exact independent-process comparisons. **100 focused subsystem tests**
+  and **24 runner tests** pass. These do not establish client consumption or
+  official timing parity. The live gate uses actual native resources and ordinary
+  UI item input, with diagnostic preparation disclosed separately.
+- `flask-live/trial-01`: 115 native samples, level-five barrier 255→0 at
+  expiry, 17 heal/energy pulses and final native HP 805.99994 vs server 806.
+  `level-live/trial-03-hits`: level-two barrier 150→50→0 for disclosed
+  diagnostic hits 100/200; actual HP losses 0/150, final native/server HP
+  both 579.5, all 17 heal/energy pulses. The item itself used ordinary 1096.
+  An intervening failed trial exposed the separately fixed wounded-level-up
+  bug; it remains a FAIL in retained evidence. The uncapped fixture now
+  derives its health margin from the actual level-dependent healing total.
+
+## 2026-09-20 Healing Flask contract pilot
+
+**Evidence tooling delivered; Flask gameplay and rendered acceptance remain open.**
+This pass changes the existing passive inspector, not the live simulation or the
+unfinished Skye fixes. It establishes a repeatable input-to-output investigation
+before choosing unproven mechanics. No failed IDLE job was resubmitted.
+
+Reproduce the numeric contract (choose a new external output filename each run):
+
+```powershell
+.venv/Scripts/python.exe -B Tools/Teardown/inspect_item_input.py Local/research/vg_max/vg5_final.pcap --match 045f86d4-7ef2-4125-a835-e70a96288c88 --port 7034 --eid 1500 --contract --output "$env:LOCALAPPDATA/halcyon-evidence/flask-contract-NEW.json"
+```
+
+The parent output directory must already exist. The inspector refuses checkout
+output paths and overwriting evidence. Without `--contract`, the original
+item-use report remains available. `--item` selects another native item;
+`--window` bounds the post-input observation interval. Reports retain capture
+and inspector hashes, match/port, C2S and S2C row identities, a one-second
+baseline, resource deltas, source-labelled combat deltas, other buffs and timers.
+Equal-time events retain stream order. Capture arrival times are **not** sim ticks;
+the existing decoder resynchronization/flow-selection limits are disclosed.
+
+External evidence directory for this run:
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/flask-contract-120e99a12d344ca49832b47d3bc08841/`
+
+- `native-contract.json`: numeric observations from the owned passive capture;
+  no packet payloads exported. Source client build is not established by this
+  capture reader and is explicitly `UNKNOWN_FROM_THIS_CAPTURE`.
+- `local-dispatch-diagnosis.json`: immediate production `_apply_event` diagnosis
+  using the existing session fixture and explicit economy ownership. Initial
+  missing-economy setup failed with `KeyError`; the corrected setup is disclosed.
+  This is not a complete gameplay scenario or a rendered-client test.
+- `local-dispatch-positive-control.json`: the same fixture with owned Sprint
+  Boots emits `1096`, `1162`, `1086` and starts its 150-second cooldown,
+  distinguishing the Flask-specific gap from an inactive input handler.
+- `starting-worktree.diff`: existing tracked edits before this pilot, retained
+  externally. Existing candidate Skye changes were not replaced.
+
+### Observations, not inferred mechanics
+
+| Observable | First use | Second use |
+|---|---:|---:|
+| Input time, seconds from capture origin | 281.153880 | 484.615350 |
+| Owned inventory instance / native item | 2000 / 457 | 2000 / 457 |
+| Server echo time | 281.368732 | 484.813800 |
+| Native buff kind / duration | 259 / 5 s | 259 / 5 s |
+| Buff instance | 10056 | 15288 |
+| Initial `1053` resource-type-4 delta | +255 | +325 |
+| Positive self-sourced `1054` events in six-second window | 17 × 18 | 17 × 21 |
+| Sum of those positive events | 306 | 357 |
+| Additional positive `1053` energy pulse value | ~6.66 | ~7.56 |
+
+Ordinary health/energy regeneration and incoming damage occur in both windows.
+The second window also contains a type-4 delta of approximately -205.54765 near
+the five-second boundary. Positive self-heal event spacing is approximately
+0.3 seconds, with shorter edge intervals. These are wire observations, not proof
+of exact scheduler phase, uncapped healing budget, shield absorption, or rendering.
+No complete initial HP/energy/level state has been reconstructed here.
+
+### Concrete local gap
+
+`item_input.resolve_owned_item(player, 2000)` correctly resolves Flask ownership.
+However, `SnapshotStream._apply_event` handles `1096` using only
+`resolve_inventory_slot`, which returns no equipment slot for default item 2000.
+It returns before echo/activation. With owned Flask, HP 500 and energy 100, the
+isolated immediate-handler check produced no frames and left HP, energy and
+cooldown unchanged. `ItemManager.activate` also has no Flask mechanic. Fixing
+ownership routing alone would not implement the ability.
+
+**Correction to the September 9 narrative below:** input and bootstrap ownership
+do not establish consumption. The claim that the Flask's consumption was
+server-authoritative is unsupported by that record and contradicted by this
+current production-handler check. The printed `000007d0` value is instance 2000,
+not 2003; the Boots prose/hex discrepancy also needs the original trace before
+being used as acceptance evidence. Historical timings remain provenance only.
+
+### Next bounded experiments and integration contract
+
+1. **State reconstruction first:** recover independent level, max energy and
+   current HP/energy around both uses from existing supported snapshot readers.
+   Only then distinguish coefficient `level` versus `level - 1`, caps and the
+   apparent 17-pulse edge behavior. Do not infer the level from the desired formula.
+2. **Presentation contract:** on the owned local CE client, test type-4 delta
+   and buff 259 together, then controlled single-component omissions from the
+   same complete spawn/ownership baseline. Keep source/time/dependency identity,
+   original evidence and recordings. The report is not a replay: do not inject
+   its selected events as though they were a dependency-complete match stream.
+3. **Production mechanics:** route authenticated default ownership explicitly;
+   use existing `ItemManager`, shared barrier/status lifecycle and
+   `SnapshotStream.advance_simulation`, including wound/caps, expiry, death,
+   cooldown, reconnect and duplicate-use cases. Do not start cooldown on a failed
+   operation or confuse echo with acceptance. No inferred rule is enabled here.
+4. **Acceptance:** add a named Flask case to the existing `Tools/run_scenarios.py`
+   workflow when its rule/initial-state contract is supported; exact two-process
+   determinism and scripted ordinary UI use are separate gates. Human visual
+   acceptance and independently measured gameplay fidelity remain separate again.
+
+This approach generalizes to Fountain, Reflex and hero effects through the same
+input/ownership, buff, resource and lifecycle primitives; it does not reduce the
+full PvP target. Delegate offline contract analysis by disjoint subsystem/file
+scope, with one runtime owner. Stop an experiment at a classified unknown rather
+than retrying arbitrary packets or adding another parallel scenario engine.
+
+Verification: `python -B -m unittest server.test.test_item_input` passed **12
+tests**, including two real Flask windows and synthetic controls for unrelated
+entities, pre-input regeneration, same-time ordering, missing echo/ownership and
+invalid windows. Tests do not assert visual acceptance or freeze the local bug
+as desired behavior.
+
 ## Implemented
 
 `server/economy.py` accepts purchases only for a living hero at its own fountain
