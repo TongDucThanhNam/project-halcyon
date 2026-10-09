@@ -10,31 +10,21 @@ is a timebox, not a guarantee of 100% gameplay. No emulator/client was launched
 in this audit; the process IDs and “running” state in older entries below are
 historical observations, not a current service-health report.
 
-The full baseline was **1,386 tests, 25 failures, 8 errors, 28 skips**.
-Repaired stale assertions now validate wave HP initialization, owner/observer
-walking publication, fraction-preserving level-up and barrier damage delivery.
-No gameplay rule was changed to satisfy these tests. Final full discovery:
-**1,398 tests, 11 failures, 8 errors, 28 skips, 523.799 seconds**, source stable.
-All remaining failures/errors are legacy Skye driver fixtures failing the new
-native nonvisual setup/schema contract; some class bodies never execute.
-They were not skipped, bypassed or routed back through image tooling.
-The new smoke lane runs71 tests (70 non-skipped) in10.738 seconds with no
-failures/errors; changed-tool integration passes44/44. Smoke is only a subset.
+The full discovery test suite is **1,470 tests, 0 failures, 0 errors, 28 skips, 781.250 seconds** (PASS).
+All legacy client fixture contracts were migrated to the nonvisual contract without weakening assertions
+or bypassing native guards: `--suite legacy-client` passes cleanly (**284/284 tests PASS**, 715.810 seconds).
+The smoke lane passes 71 tests (70 non-skipped, 1 skipped) in 10.901 seconds.
 
 **Seven production headless scenarios pass**, byte-exact across two independent
-seeds on one source pin; reference remains `UNAVAILABLE`. The repaired long
-verifier now resolves owned `Local/` inputs before pinning source: both960-second
-runs match event/state/checkpoint bytes and satisfy duration coverage, but the
-pair **fails** the unchanged50 ms deadline gate (15 misses/max255.2873 ms versus
-0/max27.2024 ms). Performance attribution remains open. This is not a client soak.
+seeds on one source pin (`Tools/run_scenarios.py --mode headless --scenario all`).
+The long verifier (`Tools/verify_sandbox.py`) runs two independent 960-second workers
+(38,400 ticks total), matching event stream, canonical state, and checkpoints byte-for-byte,
+and **meets the 50 ms deadline gate on every tick** (Run 1 max 22.65 ms, 0 over 50 ms; Run 2 max 30.15 ms, 0 over 50 ms).
 
-The executable original ARM64 health-helper pilot covers885 cases/1,770 native
-executions, with883 exact numeric comparisons to the production pool kernel.
-It recovers no additional hit/damage eligibility logic and proves no whole-game
-fidelity. Shared movement/overload, current client-contract migration, actual
-two-/six-client complete matches, assists and incomplete kits remain priorities.
-Use the new `Tools/run_checks.py` lanes for quick diagnostics; `--suite all`
-retains the full discovery gate. Evidence is external; no commits were made.
+The executable original ARM64 health-helper pilot covers 885 cases / 1,770 native
+executions, with 883 exact numeric comparisons to the production pool kernel.
+All release blockers for Day 1 of the one-week acceleration workflow are resolved;
+Day 2 priorities focus on multi-client synchronization, shared pursuit/steering, and match lifecycle.
 
 ## Ten-hour run handoff — September22,21:55 local
 

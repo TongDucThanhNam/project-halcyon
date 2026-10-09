@@ -6733,6 +6733,125 @@ class ClientDriver:
 
     # -- scenario flows -----------------------------------------------------
 
+    def _prepare_declared_fixture(self, slot: str) -> dict:
+        """Declared fixture: restore the comparable HP/EP values through
+        legal QA resources (receipts retained), then freeze the manifest
+        that both executions of a comparable pair must share."""
+        declared = self.profile.get("declared_fixture", {})
+        skye_row = self.skye()
+        enemy_row = self.enemy()
+
+        def declare_resource(label, eid, field, policy, exact,
+                             current_value, maximum):
+            """One declared resource request with its receipt.
+
+            full   -> deliberately oversized request; the server clamps
+                      to the actor cap and the clamped actual is recorded
+            exact  -> the declared value itself; requests outside the
+                      actor's legal maximum are rejected BEFORE sending
+            """
+            if policy == "full":
+                requested = 100000.0          # documented full request
+            elif policy == "exact":
+                if exact is None:
+                    raise ClientStageFailure(
+                        "SETUP", "FAIL",
+                        f"{label} exact policy without a declared value")
+                if not math.isfinite(exact) or exact < 0 or \
+                        (maximum is not None and exact > maximum):
+                    raise ClientStageFailure(
+                        "SETUP", "FAIL",
+                        f"{label} exact request {exact} is outside the "
+                        f"actor's legal maximum {maximum}")
+                requested = exact
+            else:
+                raise ClientStageFailure(
+                    "SETUP", "FAIL",
+                    f"{label} resource policy {policy!r} is not "
+                    "full/exact")
+            result = self.qa.submit(
+                {"command": "resources", "eid": eid, field: requested},
+                label=f"declare-{label}", timeout=self.timeout)
+            if result.get("pending") or not result.get("ok"):
+                raise ClientStageFailure(
+                    "SETUP", "FAIL",
+                    f"{label} resource restore rejected: "
+                    f"{result.get('error', result.get('message', 'pending'))}")
+            actual = (result.get("result") or {}).get(field)
+            self.prepare("declared-resource", resource=label, field=field,
+                         requested=requested, actual=actual,
+                         policy=policy)
+            return actual
+
+        energy_policy = declared.get("skye_energy_policy", "full")
+        declare_resource("skye-energy", skye_row.get("eid"), "energy",
+                         energy_policy,
+                         declared.get("skye_energy_exact"),
+                         skye_row.get("energy"), skye_row.get("max_energy"))
+        skye_hp_policy = declared.get("skye_hp_policy", "full")
+        declare_resource("skye-hp", skye_row.get("eid"), "hp",
+                         skye_hp_policy, declared.get("skye_hp_exact"),
+                         skye_row.get("hp"), skye_row.get("max_hp"))
+        if enemy_row is not None:
+            enemy_hp_policy = declared.get("enemy_hp_policy", "full")
+            declare_resource("enemy-hp", enemy_row.get("eid"), "hp",
+                             enemy_hp_policy,
+                             declared.get("enemy_hp_exact"),
+                             enemy_row.get("hp"), enemy_row.get("max_hp"))
+
+        snapshot = self.refresh_rows()
+        skye_row = self.skye() or {}
+        enemy_row = self._enemy if self._enemy is not None else {}
+        skye_fields = ("team", "hero_id", "eid", "level", "ranks",
+                       "ability_points", "hp", "max_hp", "energy",
+                       "max_energy", "inventory", "default_items",
+                       "statuses", "alive", "x", "y")
+        enemy_fields = ("team", "hero_id", "eid", "level", "ranks",
+                        "ability_points", "hp", "max_hp", "energy",
+                        "max_energy", "inventory", "default_items",
+                        "statuses", "alive", "x", "y")
+        manifest = {
+            "match_id": snapshot.get("match_id"),
+            "tick": snapshot.get("tick"),
+            "slot": slot,
+            "skye": {k: skye_row.get(k) for k in skye_fields},
+            "enemy": ({k: enemy_row.get(k) for k in enemy_fields}
+                      if enemy_row else None),
+            "positions": {"skye": self.profile["skye_position"],
+                          "enemy": self.profile["enemy_position"]},
+            "placement_tolerance": self.profile.get(
+                "placement_tolerance",
+                DEFAULT_PROFILE.get("placement_tolerance", 1.5)),
+            "connection": self.connection,
+            "declared_fixture": declared,
+            "cooldowns": skye_row.get("ability_cooldowns") or {},
+            "profile_digest": self.profile_digest,
+            "provenance": {
+                "source_startup_digest": self._source_digest,
+                "source_current_digest": self._source_current,
+                "tape_loaded": self._tape_loaded,
+                "tape_file_identity": self._tape_file,
+                "env_config": self._env_config,
+                "client_version": self._client_version,
+                "qa_dir": self.qa.qa_dir,
+            },
+        }
+        self.observations["fixture_manifest"] = manifest
+        # The declared contract gates every input gesture: measured state
+        # must satisfy it AFTER all legal preparation, BEFORE input.
+        contract = build_fixture_contract(self.profile, slot)
+        # Carried BEFORE validation so a refused trial still serializes
+        # the contract it was refused against (the failure record and
+        # both record kinds read this attribute).
+        self.fixture_contract = contract
+        failures = validate_fixture(manifest, contract)
+        if failures:
+            raise ClientStageFailure(
+                "SETUP", "FAIL",
+                "declared fixture contract violated before input: "
+                + "; ".join(failures))
+        return manifest
+
     def run_cast_scenario(self, slot: str, *, requires_lock: bool) -> dict:
         """Shared A/B/C flow: capture first, preparation, gesture, wire
         stages, presentation. The lock-to-cast script stays timing-critical:
@@ -6760,134 +6879,7 @@ class ClientDriver:
                                          "no living enemy hero for the duel")
             enemy_eid = enemy.get("eid")
 
-            # Declared fixture: restore the comparable HP/EP values through
-            # legal QA resources (receipts retained), then freeze the manifest
-            # that both executions of a comparable pair must share.
-            declared = self.profile.get("declared_fixture", {})
-            skye_row = self.skye()
-            enemy_row = self.enemy()
-
-            def declare_resource(label, eid, field, policy, exact,
-                                 current_value, maximum):
-                """One declared resource request with its receipt.
-
-                full   -> deliberately oversized request; the server clamps
-                          to the actor cap and the clamped actual is recorded
-                exact  -> the declared value itself; requests outside the
-                          actor's legal maximum are rejected BEFORE sending
-                """
-                if policy == "full":
-                    requested = 100000.0          # documented full request
-                elif policy == "exact":
-                    if exact is None:
-                        raise ClientStageFailure(
-                            "SETUP", "FAIL",
-                            f"{label} exact policy without a declared value")
-                    if not math.isfinite(exact) or exact < 0 or \
-                            (maximum is not None and exact > maximum):
-                        raise ClientStageFailure(
-                            "SETUP", "FAIL",
-                            f"{label} exact request {exact} is outside the "
-                            f"actor's legal maximum {maximum}")
-                    requested = exact
-                else:
-                    raise ClientStageFailure(
-                        "SETUP", "FAIL",
-                        f"{label} resource policy {policy!r} is not "
-                        "full/exact")
-                result = self.qa.submit(
-                    {"command": "resources", "eid": eid, field: requested},
-                    label=f"declare-{label}", timeout=self.timeout)
-                if result.get("pending") or not result.get("ok"):
-                    raise ClientStageFailure(
-                        "SETUP", "FAIL",
-                        f"{label} resource restore rejected: "
-                        f"{result.get('error', result.get('message', 'pending'))}")
-                actual = (result.get("result") or {}).get(field)
-                self.prepare("declared-resource", resource=label, field=field,
-                             requested=requested, actual=actual,
-                             policy=policy)
-                return actual
-
-            energy_policy = declared.get("skye_energy_policy", "full")
-            declare_resource("skye-energy", skye_row.get("eid"), "energy",
-                             energy_policy,
-                             declared.get("skye_energy_exact"),
-                             skye_row.get("energy"), skye_row.get("max_energy"))
-            skye_hp_policy = declared.get("skye_hp_policy", "full")
-            declare_resource("skye-hp", skye_row.get("eid"), "hp",
-                             skye_hp_policy, declared.get("skye_hp_exact"),
-                             skye_row.get("hp"), skye_row.get("max_hp"))
-            if enemy_row is not None:
-                enemy_hp_policy = declared.get("enemy_hp_policy", "full")
-                declare_resource("enemy-hp", enemy_row.get("eid"), "hp",
-                                 enemy_hp_policy,
-                                 declared.get("enemy_hp_exact"),
-                                 enemy_row.get("hp"), enemy_row.get("max_hp"))
-
-            snapshot = self.refresh_rows()
-            # REQUIRED identity/state fields for every controlled fixture
-            # actor. The QA snapshot exposes team/inventory/default_items/
-            # statuses for heroes (both Skye and the enemy hero); emitting
-            # the same shape for both actors means the validator can check
-            # the same fields on both, and a missing field is always a
-            # structured failure rather than a silent default. The QA
-            # snapshot exposes BOTH heroes (Skye and the enemy hero) with
-            # the same field set (see server/sandbox_qa.py:snapshot),
-            # so the writer publishes the same identity/state fields for
-            # both actors. Only the energy pool of a NON-hero enemy would
-            # be inapplicable; in the current scenarios the enemy is
-            # always a hero with the same QA-exposed shape as Skye.
-            skye_row = self.skye() or {}
-            enemy_row = self._enemy if self._enemy is not None else {}
-            skye_fields = ("team", "hero_id", "eid", "level", "ranks",
-                           "ability_points", "hp", "max_hp", "energy",
-                           "max_energy", "inventory", "default_items",
-                           "statuses", "alive", "x", "y")
-            enemy_fields = ("team", "hero_id", "eid", "level", "ranks",
-                            "ability_points", "hp", "max_hp", "energy",
-                            "max_energy", "inventory", "default_items",
-                            "statuses", "alive", "x", "y")
-            manifest = {
-                "match_id": snapshot.get("match_id"),
-                "tick": snapshot.get("tick"),
-                "slot": slot,
-                "skye": {k: skye_row.get(k) for k in skye_fields},
-                "enemy": ({k: enemy_row.get(k) for k in enemy_fields}
-                          if enemy_row else None),
-                "positions": {"skye": self.profile["skye_position"],
-                              "enemy": self.profile["enemy_position"]},
-                "placement_tolerance": self.profile.get(
-                    "placement_tolerance",
-                    DEFAULT_PROFILE.get("placement_tolerance", 1.5)),
-                "connection": self.connection,
-                "declared_fixture": declared,
-                "cooldowns": skye_row.get("ability_cooldowns") or {},
-                "profile_digest": self.profile_digest,
-                "provenance": {
-                    "source_startup_digest": self._source_digest,
-                    "source_current_digest": self._source_current,
-                    "tape_loaded": self._tape_loaded,
-                    "tape_file_identity": self._tape_file,
-                    "env_config": self._env_config,
-                    "client_version": self._client_version,
-                    "qa_dir": self.qa.qa_dir,
-                },
-            }
-            self.observations["fixture_manifest"] = manifest
-            # The declared contract gates every input gesture: measured state
-            # must satisfy it AFTER all legal preparation, BEFORE input.
-            contract = build_fixture_contract(self.profile, slot)
-            # Carried BEFORE validation so a refused trial still serializes
-            # the contract it was refused against (the failure record and
-            # both record kinds read this attribute).
-            self.fixture_contract = contract
-            failures = validate_fixture(manifest, contract)
-            if failures:
-                raise ClientStageFailure(
-                    "SETUP", "FAIL",
-                    "declared fixture contract violated before input: "
-                    + "; ".join(failures))
+            manifest = self._prepare_declared_fixture(slot)
 
             # Pre-cast resource baseline (read-only), after all preparation.
             before = self.qa.snapshot(timeout=self.timeout)
@@ -8349,7 +8341,7 @@ class ClientDriver:
         require(summary['max_moving_gap']<.75,'PRESENTATION','post-cast native/authoritative pursuit exceeds diagnostic0.75-unit gap bound')
         require(summary['max_moving_model_gap']<.75,'PRESENTATION','post-cast root-model pursuit exceeds diagnostic0.75-unit gap bound')
 
-    def run_nonvisual_cast(self, slot: str) -> dict:
+    def run_nonvisual_cast(self, slot: str, *, controlled: bool = False) -> dict:
         """Ordinary native ability input, with disclosed stationary QA fixture.
 
         This measures native resources and logical displacement, not model
@@ -8424,12 +8416,14 @@ class ClientDriver:
             enemy = self.enemy()
             require(enemy and enemy['alive'], 'SETUP', 'no living enemy for ability fixture')
             foe = enemy['eid']
-            # Freeze before placement: a bot tick between mailbox requests
-            # otherwise moves the target before the later stun is applied.
-            submit({'command': 'status', 'eid': foe, 'type': 'STUN', 'duration': 10})
             for actor, position in ((eid, self.profile['skye_position']), (foe, self.profile['enemy_position'])):
                 submit({'command': 'teleport', 'eid': actor, 'x': position[0], 'y': position[1]})
-                submit({'command': 'resources', 'eid': actor, 'hp': 100000, 'energy': 100000})
+                if not controlled:
+                    submit({'command': 'resources', 'eid': actor, 'hp': 100000, 'energy': 100000})
+            if controlled:
+                manifest = self._prepare_declared_fixture(slot)
+            else:
+                manifest = {}
             time.sleep(float(self.profile.get('camera_settle_s', 4)))
             enemy_observer = ClientMovementObserver(self.adb, self.out_dir / 'target-movement.jsonl', foe, period_ms=50)
             self.observations['target_runtime'] = enemy_observer.start()
@@ -8458,9 +8452,15 @@ class ClientDriver:
             require(control['eid'] == eid and control['action'] == SKYE_NATIVE_ACTIONS[slot],
                     'SETUP', 'native cast owner/action mismatch')
             self.observations['ability_control'] = control
-            self.observations['fixture_manifest'] = {'match_id': state['match_id'], 'tick': state['tick'],
-                'skye': owner, 'enemy': enemy, 'slot': slot, 'connection': self.connection,
-                'scope': 'diagnostic stationary fixture; ordinary learning/casting, not a controlled compare-pair'}
+            if controlled:
+                manifest.update({'match_id': state['match_id'], 'tick': state['tick'],
+                    'skye': owner, 'enemy': enemy, 'slot': slot, 'connection': self.connection,
+                    'scope': 'nonvisual controlled fixture'})
+            else:
+                manifest = {'match_id': state['match_id'], 'tick': state['tick'],
+                    'skye': owner, 'enemy': enemy, 'slot': slot, 'connection': self.connection,
+                    'scope': 'diagnostic stationary fixture; ordinary learning/casting, not a controlled compare-pair'}
+            self.observations['fixture_manifest'] = manifest
             self._guard_nonvisual_movement_ui(observer)
             require(self._foreground_package() == ANDROID_PACKAGE, 'SETUP', 'owned client lost focus')
             self.stage('SETUP', 'PASS', 'owner, native controls, resources, locked camera and stationary target qualified')
@@ -8481,10 +8481,12 @@ class ClientDriver:
             self.gesture('native-ability-swipe', control=control, to=aim, wall_before=swipe_started)
             self.stage('UI_COMMAND_SUBMITTED', 'PASS', 'one ordinary swipe from owner-bound native control')
             cast = self.wait_client_input(action=control['action'], since=swipe_started)
-            self.observations['lock'] = lock_record
-            self.observations['lock_to_input_ms'] = (1000 * (cast['time'] - lock_record['time']) if lock_record else None)
+            if lock_record is not None:
+                self.observations['lock'] = lock_record
+                self.observations['lock_to_input_ms'] = round(1000 * (cast['time'] - lock_record['time']), 1)
             self.wait_acknowledgment(action=control['action'], hero_eid=eid, since=cast['time'])
             self.wait_cooldown_tag(slot=slot, hero_eid=eid, since=cast['time'])
+            self.stage('SERVER_ACKNOWLEDGED', 'PASS', f'matching acknowledgment and {slot} cooldown tag observed')
             deadline = time.monotonic() + {'A': 3.2, 'B': 1.8, 'C': 3.5}[slot]
             while time.monotonic() < deadline:
                 require(not observer.errors and not enemy_observer.errors, 'TRIAL_CONTINUITY', 'native observer failed')
@@ -8517,8 +8519,33 @@ class ClientDriver:
             # The optional pursuit fixture can outlast an ordinary cooldown
             # and regenerate energy. Retain the actual post-ability state,
             # before that independent diagnostic, for expenditure evidence.
-            require(post_cast_owner['ability_cooldowns'].get(str(index), 0) > 0 and post_cast_owner['energy'] < owner['energy'],
+            energy_paid = post_cast_owner['energy'] < owner['energy']
+            cooldown_running = post_cast_owner['ability_cooldowns'].get(str(index), 0) > 0
+            require(cooldown_running and energy_paid,
                     'AUTHORITATIVE_EFFECT', 'acknowledgment without cooldown/energy expenditure')
+            self.observations["resources"] = {
+                "energy_before": owner['energy'],
+                "energy_after": post_cast_owner['energy'],
+                "energy_paid": energy_paid,
+                "cooldown_running": cooldown_running,
+            }
+            outcome_total = round(sum(h["delta"] for h in hits), OUTCOME_TOTAL_DECIMALS)
+            self.observations["outcome"] = {
+                "attributed_events": len(hits),
+                "outcome_total": outcome_total,
+            }
+            if slot == "C":
+                volleys = [record for record in self.tail.records
+                           if self._on_connection(record)
+                           and volley_owner(record) is not None
+                           and volley_owner(record) == eid
+                           and record.get("time", 0) >= cast["time"]]
+                self.observations["volley_actors"] = len(volleys)
+                self.observations["volley_publications"] = [
+                    {"time": record.get("time"),
+                     "connection": record.get("connection"),
+                     "payload": record.get("payload", "")}
+                    for record in volleys]
             self.stage('AUTHORITATIVE_EFFECT', 'PASS', f'{len(hits)} attributed ability hits; cooldown and energy expenditure')
             # Natural levels can increase both current and maximum resources
             # within the window. Native level-up preserves the fraction; an
@@ -8541,7 +8568,11 @@ class ClientDriver:
                       'total_attributed_delta': sum(h['delta'] for h in hits),
                       'native_resource_samples': len(readings), 'capture_backend': 'none',
                       'model_animation': 'UNVERIFIED', 'independent_fidelity': 'UNVERIFIED',
-                      'compare_pair': 'NOT_RUN'}
+                      'compare_pair': 'NOT_RUN',
+                      'energy_paid': energy_paid,
+                      'cooldown_running': cooldown_running,
+                      'fixture_manifest': self.observations.get('fixture_manifest'),
+                      'cooldown_tag_observed': self.observations.get('cooldown_tag')}
         finally:
             self.observations['client_runtime'] = observer.stop()
             self.artifact(observer.output)
@@ -9433,7 +9464,7 @@ def run_client(scenario: str, args) -> dict:
         if scenario == "minion-push":
             return driver.run_minion_push()
         slot = {"skye-a": "A", "skye-b": "B", "skye-c": "C"}[scenario]
-        return driver.run_nonvisual_cast(slot)
+        return driver.run_nonvisual_cast(slot, controlled=True)
     except ClientStageFailure as exc:
         # Retain everything the trial completed: stages, gestures,
         # observations, receipts, artifacts -- only the failing stage is

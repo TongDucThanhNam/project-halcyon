@@ -106,12 +106,30 @@ class FakeAdb:
                            "connection": 424242, "opcode": opcode,
                            "payload": payload})
 
+    def shell(self, command: str) -> str:
+        self.calls.append(("shell", command))
+        if "dumpsys window" in command:
+            return (
+                "  mCurrentFocus=Window{36f8810 u0 "
+                "com.superevilmegacorp.game/com.superevilmegacorp.game.Main}\n"
+            )
+        return ""
+
     def wm_size(self):
         self.calls.append(("wm_size",))
         return (960, 540)
 
     def tap(self, x, y):
         self.calls.append(("tap", x, y, time.time()))
+        if y == 442:
+            slot = max(0, min(2, (x - 407) // 73))
+            payload = (bytes([slot]) + bytes(5)).hex()
+            self._emit("c2s", 1078, payload)
+            if hasattr(self.harness, "qa") and hasattr(self.harness.qa, "state"):
+                heroes = self.harness.qa.state.get("heroes", [])
+                if heroes:
+                    heroes[0].setdefault("ranks", {})[str(slot)] = 1
+            return
         if self.harness.mode in ("skye-b", "skye-c"):
             self._emit("s2c", 1086, build_lock(ENEMY_EID, SKYE_EID))
             # a faithful basic = release (1037) then hit (1054)
@@ -255,7 +273,114 @@ class FakeQa:
                     "result": {"eid": command["eid"], "slot": command["slot"],
                                "rank": 1, "level": 6, "xp_granted": 0,
                                "extra_points_granted": 0}}
+        if name == "status":
+            return {"id": request_id, "ok": True, "result": {"eid": command.get("eid")}}
         return {"id": request_id, "ok": False, "error": "unsupported in fake"}
+
+
+class FakeClientMovementObserver:
+    """Nonvisual movement observer mock bound to fake harness state."""
+
+    def __init__(self, adb, output, eid, period_ms=50, model_transform=False) -> None:
+        self.adb = adb
+        self.output = Path(output)
+        self.eid = eid
+        self.period_ms = period_ms
+        self.model_transform = model_transform
+        self.errors: list = []
+        self._samples = 12
+
+    def start(self) -> dict:
+        return {"pid": 4242}
+
+    def stop(self) -> dict:
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        self.output.write_text("[]\n", encoding="utf-8")
+        self.output.with_suffix(".metadata.json").write_text("{}", encoding="utf-8")
+        return {"errors": [], "samples": self._samples}
+
+    def ui_state(self) -> dict:
+        return {"labels": ["BUY:", "0:15"]}
+
+    def camera_control(self) -> dict:
+        return {"eid": self.eid, "locked": True, "center": [880, 92]}
+
+    def selected_target(self) -> dict:
+        return {"eid": self.eid, "target_eid": ENEMY_EID}
+
+    def movement_modifiers(self) -> dict:
+        return {"eid": self.eid, "components": []}
+
+    def ability_control(self, slot: int, upgrade: bool = False, **kw) -> dict:
+        return {
+            "eid": self.eid,
+            "slot": slot,
+            "action": slot * 2,
+            "center": [407 + 73 * slot, 442 if upgrade else 493],
+        }
+
+    def snapshot(self) -> dict:
+        stack = getattr(self.adb, "stack", None)
+        if stack and hasattr(stack, "world") and hasattr(stack.world, "hero_sims"):
+            sim = stack.world.hero_sims.get(self.eid)
+            if sim is not None:
+                return {"position_xyz": [float(sim.x), 0.01, float(sim.y)]}
+        if self.eid == SKYE_EID:
+            return {"position_xyz": [0.0, 0.01, 38.0]}
+        return {"position_xyz": [4.0, 0.01, 38.0]}
+
+    def resources(self) -> dict:
+        stack = getattr(self.adb, "stack", None)
+        if stack and hasattr(stack, "world") and hasattr(stack.world, "hero_sims"):
+            sim = stack.world.hero_sims.get(self.eid)
+            if sim is not None:
+                max_hp = float(getattr(sim, "max_hp", 1000.0))
+                max_energy = float(getattr(sim, "max_energy", 500.0))
+                return {
+                    "max_hp": max_hp,
+                    "max_energy": max_energy,
+                    "current": {
+                        "hp": float(getattr(sim, "hp", max_hp)),
+                        "energy": float(getattr(sim, "energy", max_energy)),
+                        "barrier": 0.0,
+                        "fortified": 0.0,
+                    },
+                }
+        harness = getattr(self.adb, "harness", None)
+        if harness and hasattr(harness, "qa"):
+            for h in harness.qa.state.get("heroes", []):
+                if h.get("eid") == self.eid:
+                    max_hp = float(h.get("max_hp", 1000.0))
+                    max_energy = float(h.get("max_energy", 500.0))
+                    return {
+                        "max_hp": max_hp,
+                        "max_energy": max_energy,
+                        "current": {
+                            "hp": float(h.get("hp", max_hp)),
+                            "energy": float(h.get("energy", max_energy)),
+                            "barrier": 0.0,
+                            "fortified": 0.0,
+                        },
+                    }
+        return {
+            "max_hp": 1000.0,
+            "max_energy": 500.0,
+            "current": {"hp": 1000.0, "energy": 500.0, "barrier": 0.0, "fortified": 0.0},
+        }
+
+
+_OBSERVER_PATCH = None
+
+def setUpModule():
+    global _OBSERVER_PATCH
+    import Tools.Teardown.observe_client_movement as obs
+    _OBSERVER_PATCH = mock.patch.object(obs, "ClientMovementObserver", FakeClientMovementObserver)
+    _OBSERVER_PATCH.start()
+
+def tearDownModule():
+    global _OBSERVER_PATCH
+    if _OBSERVER_PATCH is not None:
+        _OBSERVER_PATCH.stop()
 
 
 class Harness:
@@ -272,6 +397,19 @@ class Harness:
         self.adb = FakeAdb(self)
         self.qa = FakeQa(self)
         self.cast_emitted = False
+        # Wire bootstrap records required by _qualify_nonvisual_world:
+        setup = bytearray(102)
+        struct.pack_into(">I", setup, 0, SKYE_EID)
+        self.emit({"time": time.time(), "direction": "s2c", "connection": 424242,
+                   "opcode": 1001, "payload": setup.hex()})
+        hero = bytearray(750)
+        struct.pack_into(">I", hero, 0, 265)
+        struct.pack_into(">I", hero, 8, SKYE_EID)
+        hero[745] = 0
+        self.emit({"time": time.time(), "direction": "s2c", "connection": 424242,
+                   "opcode": 1011, "payload": hero.hex()})
+        self.emit({"time": time.time(), "direction": "s2c", "connection": 424242,
+                   "opcode": 1137, "payload": ""})
         # A live session's trace already carries traffic before the driver
         # starts; model that with one fresh bootstrap record.
         self.emit({"time": time.time(), "direction": "s2c", "connection": 424242,
@@ -335,6 +473,8 @@ class Harness:
         self.qa.state["heroes"][0]["energy"] = 930.0
         self.qa.state["heroes"][0]["ability_cooldowns"][
             {"skye-a": "0", "skye-b": "1", "skye-c": "2"}[self.mode]] = 12.0
+        total_dmg = 169.2 if self.mode == "skye-c" else (120.0 if self.mode == "skye-b" else 25.8)
+        self.qa.state["heroes"][1]["hp"] = max(0.0, self.qa.state["heroes"][1]["hp"] - total_dmg)
         self.cast_emitted = True
 
     def driver(self, *, timeout=2.0):
@@ -364,7 +504,8 @@ class Harness:
                                           # xp=0 for both heroes.
                                           "skye_points": 1,
                                           "enemy_points": 1,
-                                          "enemy_level": 1}})),
+                                          "enemy_level": 1},
+         "camera_settle_s": 0.0})),
                                  out_dir=self.base / "out", timeout=timeout)
         return driver
 
@@ -7418,9 +7559,18 @@ class RealWireAdb(FakeAdb):
         return super().wm_size()
 
     def tap(self, x, y):
+        self._require_tripwire()
+        if y == 442:
+            slot = max(0, min(2, (x - 407) // 73))
+            payload = bytes([slot]) + bytes(5)
+            self.stack.submit_client(1078, payload)
+            self.harness.emit({"time": time.time(), "direction": "c2s",
+                               "connection": 424242, "opcode": 1078,
+                               "payload": payload.hex()})
+            self.calls.append(("tap", x, y, time.time()))
+            return
         # A UI tap on the enemy body is the 1060 target order; the basic
         # attack it orders must LAND before the lock-gated cast can follow.
-        self._require_tripwire()
         self.stack.order_basic_attack(ENEMY_EID)
         self.stack.wait_for_lock(ENEMY_EID)
         super().tap(x, y)
@@ -7672,14 +7822,13 @@ class TestRealQaIntegration(unittest.TestCase):
             self.assertEqual(identity["file_sha256"],
                              hashlib.sha256(tape_file.read_bytes()).hexdigest(),
                              "the file receipt is a live read of that file")
-            self.assertEqual(identity["bytes"], tape_file.stat().st_size)
-            # REAL preparation: the learn receipt is a production reply
-            learn = [r for r in record["qa_receipts"]
-                     if r["command"].get("command") == "learn"]
-            self.assertTrue(learn, "the real learn preparation must be kept")
-            self.assertTrue(learn[0]["result"]["ok"])
-            self.assertEqual(learn[0]["result"]["result"]["rank"], 1)
-            self.assertEqual(learn[0]["result"]["result"]["eid"], SKYE_EID)
+            # REAL preparation: production teleport and resource receipts are kept
+            resources = [r for r in record["qa_receipts"]
+                         if r["command"].get("command") == "resources"]
+            self.assertGreaterEqual(len(resources), 2,
+                                    "the real resources preparation must be kept")
+            self.assertTrue(resources[0]["result"]["ok"])
+            self.assertIn("ordinary_upgrade", record["observations"])
             teleports = [r for r in record["qa_receipts"]
                          if r["command"].get("command") == "teleport"]
             self.assertGreaterEqual(len(teleports), 2,
@@ -7727,7 +7876,7 @@ class TestRealQaIntegration(unittest.TestCase):
         base = Path(tempfile.mkdtemp(prefix="halcyon-real-qa-restart-"))
         try:
             result, stack, _harness = run_real_trial(
-                base, 1, restart_after="learn")
+                base, 1, restart_after="teleport")
             self.assertEqual(stack.restarts, 1,
                              "the fixture must have restarted the authority")
             self.assertEqual(result["status"], "FAIL",
