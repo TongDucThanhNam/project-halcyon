@@ -296,6 +296,7 @@ class TestSourcePinning(unittest.TestCase):
         self.assertIn("Tools/run_scenarios.py", manifest)
         self.assertIn("Tools/scenario_client.py", manifest)
         self.assertIn("Tools/verify_sandbox.py", manifest)
+        self.assertIn("Tools/verification_support.py", manifest)
         self.assertIn("server/match_server.py", manifest)
         self.assertIn("server/platform/local_stack.py",manifest)
         self.assertIn("Tools/Teardown/detour_route_oracle.cpp",manifest)

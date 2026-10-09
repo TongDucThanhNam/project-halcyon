@@ -82,16 +82,17 @@ class TestMonsterCombatAndBounty(unittest.TestCase):
         self.assertNotIn(wire.OP.DESTROY, opcodes)
         self.assertNotIn(wire.OP.DESPAWN, opcodes)
         # The 70 XP bounty crosses the native first requirement of 68. The
-        # fixture gains one 70-HP level increase as well as one Treant heal.
+        # fixture gains 70 max HP; native level-up preserves the healed HP
+        # fraction, not a flat +70 current HP (measured September 22).
         player_econ = self.econ.get_or_create(1500)
         self.assertEqual(economy.XP_LEVEL_THRESHOLDS[1], 68.0)
         self.assertEqual((player_econ.level, self.hero.level), (2, 2))
         self.assertEqual(player_econ.ability_points, 2)
         self.assertEqual(self.hero.max_hp, 800.0 + 70.0)
-        self.assertEqual(self.hero.hp, 500.0 + 220.0 + 70.0)
+        self.assertEqual(self.hero.hp, (500.0 + 220.0) / 800.0 * 870.0)
 
         # Native1076 already grows client HP. Only the +220 heal belongs in
-        # additive1053 HP traffic; publishing +70 again would double growth.
+        # additive1053 HP traffic; publishing level growth again doubles it.
         hp_frames = [(op, p) for op, p in frames
                      if op == wire.OP.ENTITY_STAT and p[8] == roster.STAT_HEALTH]
         self.assertEqual(hp_frames, [(wire.OP.ENTITY_STAT,
@@ -110,7 +111,7 @@ class TestMonsterCombatAndBounty(unittest.TestCase):
             treant.eid, 800.0, self.hero, now=10.1,
             economy_mgr=self.econ, all_heroes=self.heroes)
         self.assertEqual(repeated, [])
-        self.assertEqual((self.hero.hp, self.hero.max_hp, self.hero.level), (790.0, 870.0, 2))
+        self.assertEqual((self.hero.hp, self.hero.max_hp, self.hero.level), (783.0, 870.0, 2))
         self.assertEqual((player_econ.gold, player_econ.xp), (init_gold + 65.0, 70.0))
         removal = self.jm.step(0.05, 14.0, {})
         self.assertEqual([op for op, _ in removal], [wire.OP.DESTROY, wire.OP.DESPAWN])

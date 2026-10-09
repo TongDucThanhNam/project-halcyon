@@ -119,6 +119,7 @@ in the leaf; this entry point holds routes and brief status only.
 | Current Tier 1 solo sandbox implementation and acceptance | `Docs/Plan/solo-sandbox.md` | `solo-sandbox-acceptance-status.md` and the subsystem leaf linked for the scenario |
 | Repeatable Skye/minion scenario verification and reference comparisons | `Docs/Plan/solo-sandbox-scenarios.md` (shipped pilot: `Tools/run_scenarios.py` headless scenarios, two-process exact repeatability, client driver, reference interface) | `solo-sandbox-acceptance-status.md` for active gate status and the relevant subsystem leaf for the scenario under test |
 | Scalable nonvisual validation, independent CE evidence and offline client comparison | `Docs/Plan/differential-validation.md` | `solo-sandbox-navigation.md` for measured movement cases; existing scenario/reference interface remains the execution path |
+| Audited fast development loop, native CPU qualification and one-week execution priorities | `Docs/Plan/one-week-acceleration.md` | Relevant subsystem leaf only; full mission and release gates remain unchanged |
 | After Phase 0: closing T1 (matchmaking schema) and opening the T3 thin slice; RE-asset→server mapping, determinism decisions, open gaps | `Docs/Plan/next-steps.md` | the Teardown leaves it cites per row |
 
 When no row matches, stay with this file and the source. Do not load docs "just
@@ -244,6 +245,12 @@ to prepare a new run; allocate unique output directories. The existing boundary 
 assets/payloads in the repo remains unchanged.
 
 ## Current phase
+
+The **2026-10-04 audit and active execution workflow** is
+`Docs/Plan/one-week-acceleration.md`: one owner, no delegation; CPU/native-first
+inner loop with targeted nonvisual client evidence only when needed. Full
+faithful PvP remains the target, not a one-week completion claim. Current full
+test and deadline failures are explicit release blockers, not waived gates.
 
 Phase 0 is **closed** (2026-09-05; `Docs/Plan/phase0.md`). The current
 concise progress report is **`Docs/Plan/current-status.md`**; the detailed

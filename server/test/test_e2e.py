@@ -170,8 +170,8 @@ class TestGatewayFlow(unittest.TestCase):
         """No-tape world with the hero-1010 sim slice enabled (the
         HALCYON_HERO_1010 path; here via a missing tape file — same live
         layer): join → lock → dump → no tape, then the fake client
-        receives 1116 pings + 1010 hero full updates and the 1012 → 1016/1070
-        movement stays position-consistent with the 1010s."""
+        receives 1116 pings + 1010 hero full updates; accepted1016 movement
+        reaches its1010 endpoint without normal owner1070 corrections."""
         old_period = roster.HERO_1010_PERIOD
         old_countdown = match_server.LOCK_COUNTDOWN
         old_flag = os.environ.get("HALCYON_HERO_1010")
@@ -323,11 +323,10 @@ class TestGatewayFlow(unittest.TestCase):
             self.assertEqual(op, wire.OP.MOVE_TO)
             op, _ = read_world(_collect, timeout=5.0)
             self.assertEqual(op, wire.OP.ENTITY_FULL_UPDATE)
-            self.assertTrue(positions, "no 1070 frames after 1012")
-            self.assertEqual(positions[0], (roster.SPAWN_X, roster.SPAWN_Y))
-            self.assertEqual(positions[-1], target)
-            walked = [roster.SPAWN_X] + [px for px, _ in positions]
-            self.assertEqual(walked, sorted(walked))          # monotone approach
+            self.assertEqual(positions, [], "normal owner walking must not be re-corrected")
+            hero = self.gw.matches[-1].session.hero_sims[1500]
+            self.assertEqual(struct.pack('>ff', hero.x, hero.y), struct.pack('>ff', *target))
+            self.assertFalse(hero.is_moving)
             # the exact-target 1010 (arrival pinned the pair) closed the loop;
             # its tick index depends on how many 0.3 s periods the 0.4 s walk
             # spanned — only monotonicity is deterministic here
@@ -546,7 +545,7 @@ class TestGatewayFlow(unittest.TestCase):
             op, payload = self._read_message(client)
             self.assertEqual((op, payload), (wire.OP.HERO_READY, ready))
 
-            # 9b. movement slice: c2s 1012 → 1070 stream for eid 1500 from
+            # 9b. movement slice: c2s1012 -> accepted1016 for eid1500 from
             #     the corpus spawn toward the target; arrival ends the stream
             #     (2 u at the measured 5 u/s ≈ 0.4 s of travel)
             target = (roster.SPAWN_X + 2.0, roster.SPAWN_Y)
@@ -585,12 +584,10 @@ class TestGatewayFlow(unittest.TestCase):
                 else:
                     self.assertEqual(op, wire.OP.SLOT_FLAGS_PING)
             self.assertEqual(len(move_targets), 1)
-            self.assertTrue(seen, "no 1070 position frames after 1012")
-            self.assertEqual(seen[0], (roster.SPAWN_X, roster.SPAWN_Y))
-            self.assertEqual(seen[-1], target)
-            walked = [roster.SPAWN_X] + [x for x, _ in seen]
-            self.assertEqual(walked, sorted(walked))           # monotone approach
-            self.assertGreaterEqual(len(seen), 2)
+            self.assertEqual(seen, [], "normal owner walking must not be re-corrected")
+            hero = gw.matches[-1].session.hero_sims[1500]
+            self.assertEqual(struct.pack('>ff', hero.x, hero.y), struct.pack('>ff', *target))
+            self.assertFalse(hero.is_moving)
         finally:
             match_server.LOCK_COUNTDOWN = old_countdown
 
@@ -669,7 +666,7 @@ class TestKeyAutoDetection(unittest.TestCase):
 class TestWaveE2E(unittest.TestCase):
     """T3 slice 2: the no-tape world spawns the measured lane-minion wave —
     10 minions (5 right/left pairs) with the corpus spawn sequence
-    1010 → 1016 → 1070(B) → 1070(A) → 1067(00) → 1067(0f), then walking
+    1010 → 1052/1053 HP → 1016 → 1070(B) → 1070(A) → 1067(00) → 1067(0f), then walking
     1070s. HALCYON_NO_WAVE=1 must silence the whole layer. Corpus timing is
     unit-pinned in test_wave; here the schedule constants are shrunk so the
     socket flow runs in seconds."""
@@ -789,12 +786,13 @@ class TestWaveE2E(unittest.TestCase):
         allowed = {wire.OP.SLOT_FLAGS_PING, wire.OP.ENTITY_FULL_UPDATE,
                    wire.OP.POSITION, wire.OP.ENTITY_STATE, wire.OP.ENTITY_FLOAT,
                    wire.OP.TARGET_ACQUIRE, wire.OP.COMBAT_DELTA,
-                   wire.OP.DESTROY, wire.OP.DESPAWN, 1037}
+                   wire.OP.DESTROY, wire.OP.DESPAWN, 1037, 1052, 1053}
         out = []
         shop_frames = _NativeShopFrames(self)
         self._wave_teams = {}
         wave_archetypes = {}
         wave_slots = {}
+        maximum_published, health_filled = set(), set()
         attacks_started = set()
         projectiles_released = set()
         projectile_ids = set()
@@ -808,7 +806,20 @@ class TestWaveE2E(unittest.TestCase):
                 break
             if shop_frames.consume(op, payload):
                 continue
-            if op == wire.OP.ENTITY_STAT:
+            eid = struct.unpack_from('>I', payload)[0] if len(payload) >= 4 else None
+            if op == 1052:
+                self.assertIn(eid, self._wave_teams)
+                self.assertNotIn(eid, maximum_published)
+                hp = 450.0 if wave_archetypes[eid] == 366 else 350.0
+                self.assertEqual(payload, struct.pack('>IIfBBB7x', eid, 0xffffffff, hp, 0, 0, 1))
+                maximum_published.add(eid)
+            if op == wire.OP.ENTITY_STAT and eid in self._wave_teams:
+                self.assertIn(eid, maximum_published)
+                self.assertNotIn(eid, health_filled)
+                hp = 450.0 if wave_archetypes[eid] == 366 else 350.0
+                self.assertEqual(payload, struct.pack('>IfBBB3x', eid, hp, 0, 0, 1))
+                health_filled.add(eid)
+            elif op == wire.OP.ENTITY_STAT:
                 # The live economy runs alongside lane actors. Validate its
                 # measured resource channels before collecting the wave layer.
                 self.assertEqual(len(payload), 14)
@@ -816,6 +827,9 @@ class TestWaveE2E(unittest.TestCase):
                 self.assertAlmostEqual(struct.unpack_from(">f", payload, 4)[0],
                                        6.0 if payload[8] == roster.STAT_GOLD else 1.0)
                 continue
+            if op == wire.OP.MOVE_TO:
+                self.assertIn(payload[0], wave_slots)
+                self.assertIn(wave_slots[payload[0]], health_filled)
             if op == wire.OP.ENTITY_FULL_UPDATE:
                 self.assertEqual(len(payload), roster.ENTITY_FULL_UPDATE_PAYLOAD_SIZE)
                 archetype, actor_class, eid = struct.unpack_from(">III", payload)
@@ -875,6 +889,8 @@ class TestWaveE2E(unittest.TestCase):
             self.assertIn(op, allowed)
             if op != wire.OP.SLOT_FLAGS_PING:
                 out.append((op, payload))
+        self.assertEqual(maximum_published, set(self._wave_teams))
+        self.assertEqual(health_filled, set(self._wave_teams))
         return out
 
     def test_wave_spawn_sequence_and_movement(self):
@@ -886,10 +902,10 @@ class TestWaveE2E(unittest.TestCase):
         ops = [op for op, _ in frames]
 
         # first pair: the corpus burst order
-        self.assertEqual(ops[:10],
-                         [wire.OP.ENTITY_FULL_UPDATE, wire.OP.ENTITY_FLOAT,
+        self.assertEqual(ops[:14],
+                         [wire.OP.ENTITY_FULL_UPDATE, 1052, 1053, wire.OP.ENTITY_FLOAT,
                           wire.OP.POSITION, wire.OP.ENTITY_FULL_UPDATE,
-                          wire.OP.ENTITY_FLOAT, wire.OP.POSITION,
+                          1052, 1053, wire.OP.ENTITY_FLOAT, wire.OP.POSITION,
                           wire.OP.POSITION, wire.OP.POSITION,
                           wire.OP.ENTITY_STATE, wire.OP.ENTITY_STATE])
         spawn0 = frames[0][1]
@@ -899,7 +915,7 @@ class TestWaveE2E(unittest.TestCase):
                          roster.LANE_MINION_CLASS)
         self.assertEqual(struct.unpack_from(">I", spawn0, 8)[0], 4610)
         self.assertEqual(spawn0[116], (self._last_join_1010_seq + 1) & 255)
-        spawn1 = frames[3][1]
+        spawn1 = frames[5][1]
         self.assertEqual(struct.unpack_from(">I", spawn1, 8)[0], 4611)
         self.assertEqual(spawn1[116], (spawn0[116] + 1) & 255)
         # 10 minions, eids sequential, spawners = wave-1 measured set

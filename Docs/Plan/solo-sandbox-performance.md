@@ -1,5 +1,24 @@
 # Production sandbox performance and determinism verification
 
+## Current audit checkpoint — 2026-10-04
+
+The original-`Local/` input paths now survive the verifier's external source
+pin. Both repaired default960-second workers complete with identical stream,
+state and checkpoints, stable sources and full workload coverage. **The pair
+fails its unchanged 50 ms deadline gate:** run1 has15 misses/max255.2873 ms;
+run2 has0/max27.2024 ms. The differing timing is not yet attributed. Do not
+substitute the clean second run for a passing pair.
+
+The current default uses the native baked navigation asset resolved by
+`server.navigation.DEFAULT_CLASSIC_NAVMESH`, not the historical A001 default
+described below. Real inputs stay outside the source-only pin. Complete
+worker stdout/stderr and input/feature configuration are retained externally.
+See [the audit and next profiling priority](one-week-acceleration.md).
+This fixed-step simulation is not a real-duration client soak, and its current
+workload has zero hero deaths/respawns and no match finish. Lifecycle/client
+acceptance therefore needs separate scenarios. All older figures below belong
+to their dated source revisions.
+
 **Status after the operator's Skye failure:** the 758-test/960-second figures
 below describe the previous source revision. Skye skills, targeted projectile
 creation and minion movement have since changed. Their new verification is

@@ -55,6 +55,13 @@ dead end without changing a current Veilbound decision.
 
 ## Binary reverse engineering — no anchors
 
+**Scope correction, 2026-10-04:** the conclusion below describes the original
+unanchored search, not a ban on all later binary work. A fingerprinted,
+already-recovered 180-byte ARM64 health helper now runs on CPU against the real
+production pool kernel; see [the bounded native pilot](../Plan/one-week-acceleration.md#what-the-native-pilot-does-exactly).
+This new concrete anchor does not reopen blind hooks, broad heap scans,
+whole-binary decompilation or the stopped codec guesses.
+
 `lib/arm64-v8a/libGameKindred.so`, 45 MB:
 
 - No `.symtab`. Fully stripped.

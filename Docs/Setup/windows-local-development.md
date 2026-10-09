@@ -8,6 +8,13 @@ Halcyon is an experimental server. Reproducing this environment does not close
 gameplay acceptance, PvP acceptance, or independently measured official fidelity.
 Read [current status](../Plan/current-status.md) before choosing development work.
 
+**2026-10-04 workflow update:** normal implementation/RE starts with the
+[CPU-first audited loop](../Plan/one-week-acceleration.md), not an emulator.
+Use the source and owned-input setup below, then `Tools/setup_local.py --check
+--profile headless`. LDPlayer sections are needed only for that specific
+client environment; headless tests and the original ARM64 helper do not need it.
+Physical ARM64 client migration remains separately unqualified.
+
 ## 1. What a new developer needs
 
 There are two parts to the working project:
@@ -443,6 +450,23 @@ Record the client/source version, match identity and fresh evidence location.
 
 ## 10. Verification and continued development
 
+For the fast inner loop and complete diagnostics, use the venv explicitly:
+
+```powershell
+.venv/Scripts/python.exe -B Tools/run_checks.py --suite smoke
+# Select movement/combat/transport/client/workflow or precise --tests IDs.
+.venv/Scripts/python.exe -B Tools/run_checks.py --suite all
+# Optional original ARM64 component, without Android:
+.venv/Scripts/python.exe -m pip install -r requirements-native.txt
+.venv/Scripts/python.exe -B Tools/Teardown/verify_native_health.py --grid
+```
+
+Each run creates unique external evidence and retains full logs, per-test
+timings, failures and skip reasons. A subset PASS is not a full test PASS.
+The [audit workflow](../Plan/one-week-acceleration.md) records currently red
+legacy-client and performance gates; do not use historical green counts.
+The native pilot covers one pool-splitting component, not whole-game fidelity.
+
 Create a unique external evidence directory:
 
 ```powershell
@@ -458,7 +482,7 @@ python -B Tools/run_scenarios.py --mode headless --scenario all --output "$run\h
 ```
 
 Require exit 0, inspect skip reasons, then inspect `headless/summary.json`.
-The six scenarios must pass both seeded processes with exact events/states/
+The seven scenarios must pass both seeded processes with exact events/states/
 checkpoints and `workspace_matches_snapshot: true`. `reference: UNAVAILABLE`
 means no independently measured reference fixture was supplied. Passing tests
 does not imply rendered acceptance or official parity.

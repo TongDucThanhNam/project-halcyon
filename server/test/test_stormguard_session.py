@@ -84,8 +84,15 @@ class StormguardSessionTests(unittest.TestCase):
         before = defender.hp
         frames = world._deal_damage(attacker, defender, 100, 'weapon', 0.01)
         self.assertEqual(defender.hp, before)
-        self.assertEqual([op for op, _ in frames], [wire.OP.TARGET_ACQUIRE])
+        # Native1054 consumes the incoming damage from its barrier too; it
+        # must not disappear merely because authoritative HP stayed equal.
+        self.assertEqual([op for op, _ in frames], [wire.OP.TARGET_ACQUIRE, 1053, 1054])
         self.assertEqual(struct.unpack_from('>IIB', frames[0][1]), (1500, 1500, 4))
+        self.assertEqual(struct.unpack_from('>IfB', frames[1][1]), (1500, 1000, 4))
+        self.assertEqual(struct.unpack_from('>II', frames[2][1]), (1500, 1517))
+        capped = 808 * .075 / (1 + defender.armor / 100)
+        self.assertAlmostEqual(struct.unpack_from('>f', frames[2][1], 8)[0], -capped, places=4)
+        self.assertAlmostEqual(world.status_manager.get_barrier(1500, .01), 1000 - capped)
         before_attacker = attacker.hp
         world.advance_simulation()
         self.assertLess(attacker.hp, before_attacker)

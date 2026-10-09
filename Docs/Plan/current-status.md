@@ -1,5 +1,41 @@
 # Current implementation and validation status
 
+## Audit and execution workflow — 2026-10-04
+
+**Acceptance remains OPEN; no complete faithful-gameplay or PvP claim.**
+The active operating plan is [the one-week acceleration workflow](one-week-acceleration.md):
+one owner/no delegation, CPU/native-first RE, focused production regression,
+targeted nonvisual client evidence, then full freeze/release gates. Seven days
+is a timebox, not a guarantee of 100% gameplay. No emulator/client was launched
+in this audit; the process IDs and “running” state in older entries below are
+historical observations, not a current service-health report.
+
+The full baseline was **1,386 tests, 25 failures, 8 errors, 28 skips**.
+Repaired stale assertions now validate wave HP initialization, owner/observer
+walking publication, fraction-preserving level-up and barrier damage delivery.
+No gameplay rule was changed to satisfy these tests. Final full discovery:
+**1,398 tests, 11 failures, 8 errors, 28 skips, 523.799 seconds**, source stable.
+All remaining failures/errors are legacy Skye driver fixtures failing the new
+native nonvisual setup/schema contract; some class bodies never execute.
+They were not skipped, bypassed or routed back through image tooling.
+The new smoke lane runs71 tests (70 non-skipped) in10.738 seconds with no
+failures/errors; changed-tool integration passes44/44. Smoke is only a subset.
+
+**Seven production headless scenarios pass**, byte-exact across two independent
+seeds on one source pin; reference remains `UNAVAILABLE`. The repaired long
+verifier now resolves owned `Local/` inputs before pinning source: both960-second
+runs match event/state/checkpoint bytes and satisfy duration coverage, but the
+pair **fails** the unchanged50 ms deadline gate (15 misses/max255.2873 ms versus
+0/max27.2024 ms). Performance attribution remains open. This is not a client soak.
+
+The executable original ARM64 health-helper pilot covers885 cases/1,770 native
+executions, with883 exact numeric comparisons to the production pool kernel.
+It recovers no additional hit/damage eligibility logic and proves no whole-game
+fidelity. Shared movement/overload, current client-contract migration, actual
+two-/six-client complete matches, assists and incomplete kits remain priorities.
+Use the new `Tools/run_checks.py` lanes for quick diagnostics; `--suite all`
+retains the full discovery gate. Evidence is external; no commits were made.
+
 ## Ten-hour run handoff — September22,21:55 local
 
 **The requested complete, bug-free official-like match was not achieved.**

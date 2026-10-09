@@ -38,7 +38,13 @@ class TestActorSlots(unittest.TestCase):
         hero = HeroMovement()
         for index in range(300):
             frames = director._spawn_pair(index, 0)
-            for spawn, move in ((frames[0][1], frames[1][1]), (frames[3][1], frames[4][1])):
+            # Spawn now publishes native max/current HP before its move.
+            spawns = [body for op, body in frames if op == 1010]
+            moves = [body for op, body in frames if op == 1016]
+            self.assertEqual((len(spawns), len(moves)), (2, 2))
+            self.assertEqual([op for op, _ in frames[:10]],
+                             [1010, 1052, 1053, 1016, 1070] * 2)
+            for spawn, move in zip(spawns, moves):
                 eid = struct.unpack_from('>I', spawn, 8)[0]
                 self.assertEqual(spawn[116], slots.by_eid[eid])
                 self.assertEqual(move[0], spawn[116])

@@ -95,7 +95,6 @@ import json
 import math
 import os
 from pathlib import Path
-import stat
 import struct
 import subprocess
 import sys
@@ -105,6 +104,9 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from Tools.verification_support import (
+    OutputPathError, output_directory, owned_input_environment, runtime_switches,
+)
 
 TICK_SECONDS = 0.05
 SEEDS = (11, 7919)
@@ -115,12 +117,12 @@ ISOLATED_ENVIRONMENT = (
     "HALCYON_HERO_SPAWN_Y", "HALCYON_TEAM_ALLOCATION", "HALCYON_EXPERIMENTAL_CAPTURE",
     "HALCYON_SUPPRESS_PERIODIC_1070_SEC", "HALCYON_SUPPRESS_PERIODIC_1070_MOVE",
 )
-REPARSE_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 # Authored modules pinned for the two-process repeatability runs. The pinned
 # runtime imports only snapshot files (script path and sys.path both resolve
 # inside the snapshot) and the worker asserts that before simulating.
 PINNED_TOOLS = ("Tools/run_scenarios.py", "Tools/scenario_client.py",
+                "Tools/verification_support.py",
                 "Tools/verify_sandbox.py", "Tools/classic_client.py",
                 "Tools/sandbox_qa.py", "Tools/input_bridge.py", "Tools/android_input_health.py",
                 "Tools/build_input_bridge.py", "Tools/android/HalcyonInput.java",
@@ -154,10 +156,6 @@ class StageFailure(Exception):
         self.stage = stage
         self.detail = detail
         super().__init__(f"[{stage}] {detail}")
-
-
-class OutputPathError(ValueError):
-    """Refused output destination (inside repo, link traversal, overwrite)."""
 
 
 class ReferenceFixtureError(ValueError):
@@ -221,15 +219,6 @@ def pin_sources(directory: Path) -> tuple[Path, dict[str, str]]:
 # Output destination validation (before any simulation or live input)
 # ---------------------------------------------------------------------------
 
-def _reject_link_traversal(path: Path) -> None:
-    for parent in (path, *path.parents):
-        if parent.exists() or parent.is_symlink():
-            attributes = parent.lstat()
-            if parent.is_symlink() or getattr(attributes, "st_file_attributes", 0) & REPARSE_ATTRIBUTE:
-                raise OutputPathError(
-                    f"output path must not traverse a symlink or junction: {parent}")
-
-
 def resolve_output_dir(explicit: str | None, *, allow_existing_empty: bool = True) -> Path:
     """Validate and create the run directory before any simulation starts.
 
@@ -237,27 +226,8 @@ def resolve_output_dir(explicit: str | None, *, allow_existing_empty: bool = Tru
     symlink/junction, and an explicitly requested non-empty directory is never
     overwritten. Existing files anywhere on the path are preserved.
     """
-    repository = ROOT.resolve()
-    if explicit:
-        base = Path(os.path.abspath(explicit))
-    else:
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        parent = Path(tempfile.gettempdir())
-        base = parent / f"halcyon-scenario-pilot-{stamp}"
-        if base.exists():
-            base = Path(tempfile.mkdtemp(prefix=f"halcyon-scenario-pilot-{stamp}-"))
-    _reject_link_traversal(base)
-    resolved = base.resolve()
-    if resolved == repository or repository in resolved.parents:
-        raise OutputPathError(f"output directory must stay outside the repository: {resolved}")
-    if resolved.exists():
-        if any(resolved.iterdir()):
-            raise OutputPathError(f"refusing to write into non-empty directory: {resolved}")
-        if not allow_existing_empty:
-            raise OutputPathError(f"output directory already exists: {resolved}")
-    else:
-        resolved.mkdir(parents=True)
-    return resolved
+    return output_directory(explicit, root=ROOT, prefix="halcyon-scenario-pilot-",
+                            allow_existing_empty=allow_existing_empty)
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +456,7 @@ def _base_result(scenario_id: str, seed: int, out_dir: Path, navmesh_path: Path,
                         "vertices": len(mesh.vertices), "triangles": len(mesh.triangles),
                         "metadata":getattr(mesh,'source_metadata',{})},
             "tick_seconds": TICK_SECONDS,
+            "runtime_switches": runtime_switches(),
         },
         "source_manifest_sha256": manifest_digest(source_manifest()),
         "intents": [],
@@ -1651,19 +1622,12 @@ def run_headless(names: list[str], out_dir: Path, navmesh_path: Path,
         env = dict(os.environ)
         # Workers execute a source-only snapshot outside the checkout. Resolve
         # owned inputs here so Local/ is not mistaken for a snapshot-relative path.
-        from server import entity_spawn, paths
-        env["HALCYON_LOCAL_ROOT"] = str(paths.local_root().resolve())
-        env["HALCYON_STACK_DIR"] = str(paths.stack_dir().resolve())
-        env["HALCYON_SPAWN_CORPUS"] = os.pathsep.join(
-            str(Path(path).resolve()) for path in entity_spawn._source_paths())
-        env["HALCYON_SKYE_VOLLEY_CORPUS"] = str(Path(
-            os.environ.get("HALCYON_SKYE_VOLLEY_CORPUS") or
-            paths.runtime_corpus_dir()).resolve())
+        env.update(owned_input_environment())
         for name in ISOLATED_ENVIRONMENT:
             env.pop(name, None)
         env["HALCYON_NO_TAPE"] = "1"
         env["PYTHONHASHSEED"] = str(seed)
-        command = [sys.executable, str(snapshot / "Tools" / "run_scenarios.py"),
+        command = [sys.executable, "-B", str(snapshot / "Tools" / "run_scenarios.py"),
                    "--worker", "--seed", str(seed),
                    "--scenario", ",".join(names),
                    "--output", str(run_dir),
@@ -1686,6 +1650,7 @@ def run_headless(names: list[str], out_dir: Path, navmesh_path: Path,
         "source_snapshot": str(snapshot),
         "source_pin_sha256": pinned_digest,
         "workspace_matches_snapshot": source_manifest() == pinned,
+        "runtime_switches": runtime_switches(),
         "processes": {str(seed): processes[seed] for seed in SEEDS},
         "scenarios": {},
         "reference": {"status": "UNAVAILABLE",

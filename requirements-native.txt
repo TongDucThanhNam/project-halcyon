@@ -1,0 +1,2 @@
+# Optional CPU-only native component qualification; no Android/LDPlayer dependency.
+unicorn==2.1.4

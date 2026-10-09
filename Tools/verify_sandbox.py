@@ -31,6 +31,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from Tools.verification_support import output_directory, owned_input_environment, runtime_switches
 MINIMUM_SECONDS = 16 * 60
 TICK_SECONDS = 0.05
 ASPIRATIONAL_MS = 2.0
@@ -50,6 +51,7 @@ def digest_file(path: Path) -> str:
 def source_manifest() -> dict[str, str]:
     paths = sorted((ROOT / "server").glob("*.py")) + [Path(__file__).resolve()]
     paths.append(ROOT/'Tools/Teardown/detour_route_oracle.cpp')
+    paths.append(ROOT/'Tools/verification_support.py')
     return {str(path.relative_to(ROOT)).replace("\\", "/"): digest_file(path) for path in paths}
 
 
@@ -513,6 +515,7 @@ def run_worker(args) -> dict:
               "profiled": profile is not None, "source_manifest": manifest,
               "source_pin_sha256": hashlib.sha256(json_bytes(manifest)).hexdigest(),
               "isolated_environment": list(ISOLATED_ENVIRONMENT),
+              "runtime_switches": runtime_switches(),
               "qa_disabled": world.qa is None, "world_tape_disabled": not world.tape_frames,
               "source_unchanged_during_run": source_unchanged,
               "tick_cost": percentiles(costs), "simulation_only_cost": percentiles(sim_costs),
@@ -543,27 +546,40 @@ def identical_files(left: Path, right: Path) -> bool:
 
 
 def orchestrate(args) -> int:
-    output = (args.output or Path(tempfile.mkdtemp(prefix="halcyon-sandbox-verify-"))).resolve()
-    output.mkdir(parents=True, exist_ok=True)
+    from server import navigation
+    output = output_directory(args.output, root=ROOT, prefix="halcyon-sandbox-verify-")
+    # A source-only pin has no Local/. Resolve private inputs in the original
+    # checkout once, then pass absolute paths; never copy payloads into the pin.
+    input_environment = owned_input_environment()
+    navmesh = Path(args.navmesh or os.environ.get("HALCYON_NAVMESH") or
+                   navigation.DEFAULT_CLASSIC_NAVMESH).resolve()
     snapshot, pinned_manifest = pin_sources(output)
     results = []
     for index, seed in enumerate((11, 7919), 1):
         directory = output / f"run-{index}"
         env = dict(os.environ)
+        env.update(input_environment)
         for name in ISOLATED_ENVIRONMENT:
             env.pop(name, None)
         env["HALCYON_NO_TAPE"] = "1"
         env["PYTHONHASHSEED"] = str(seed)
-        command = [sys.executable, str(snapshot / "Tools" / "verify_sandbox.py"), "--worker",
-                   "--seconds", str(args.seconds), "--output", str(directory)]
-        if args.navmesh:
-            command.extend(("--navmesh", args.navmesh))
+        command = [sys.executable, "-B", str(snapshot / "Tools" / "verify_sandbox.py"), "--worker",
+                   "--seconds", str(args.seconds), "--output", str(directory),
+                   "--navmesh", str(navmesh)]
         if args.profile_from is not None:
             command.extend(("--profile-from", str(args.profile_from),
                             "--profile-seconds", str(args.profile_seconds)))
         print(f"Starting independent process {index}, PYTHONHASHSEED={seed}", flush=True)
-        completed = subprocess.run(command, env=env, cwd=ROOT)
+        completed = subprocess.run(command, env=env, cwd=ROOT, capture_output=True, text=True)
+        (output / f"worker-{index}-stdout.log").write_text(completed.stdout, encoding="utf-8")
+        (output / f"worker-{index}-stderr.log").write_text(completed.stderr, encoding="utf-8")
         if completed.returncode:
+            print(completed.stdout, end="")
+            print(completed.stderr, end="", file=sys.stderr)
+            (output / "summary.json").write_bytes(json_bytes({
+                "status": "ERROR", "failed_worker": index, "returncode": completed.returncode,
+                "source_snapshot": str(snapshot), "input_environment": input_environment,
+                "navmesh": str(navmesh), "output_directory": str(output)}))
             print(f"Worker {index} failed; artifacts: {directory}", flush=True)
             return completed.returncode
         results.append(json.loads((directory / "result.json").read_text()))
@@ -577,6 +593,8 @@ def orchestrate(args) -> int:
                "workspace_matches_snapshot": source_manifest() == pinned_manifest,
                "full_duration_coverage": all(result["full_duration_coverage"] for result in results),
                "deadline_met_every_tick": all(result["deadline_met_every_tick"] for result in results),
+               "input_environment": input_environment,
+               "runtime_switches": runtime_switches(),
                "runs": results, "output_directory": str(output)}
     (output / "summary.json").write_bytes(json_bytes(summary))
     print(json.dumps({key: value for key, value in summary.items() if key != "runs"}, indent=2))
@@ -604,7 +622,10 @@ def main() -> int:
         result = run_worker(args)
         print(f"Completed {result['seconds']:.1f}s: {result['tick_cost']}", flush=True)
         return 0
-    return orchestrate(args)
+    try:
+        return orchestrate(args)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":
