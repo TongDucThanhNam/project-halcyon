@@ -432,6 +432,20 @@ clears reverse mappings. Reapply `guest_setup` after either.
 
 ## 9. Launch and verify the rendered client
 
+For the guarded nonvisual entry workflow, a single cold launch may be followed
+by **exactly one** in-guest HOME→owned-activity reactivation when native
+`Resume - Post` is absent. Retain the same PID throughout and require >=3
+ready samples afterward; changed PID or missing readiness is SETUP, not a
+reason to repeat the cold start or waive guards. Never activate the host window.
+
+**Secondary Windows virtual desktop: not yet qualified.** The October10 rev8
+preflight found only the operator's active desktop; the prescribed desktop2
+GUID was absent in registry and read-only COM enumeration. No emulator was
+started and no desktop was created/switched/removed. Do not treat a hidden or
+cloaked window as an accepted input target without the required measurement.
+There is no qualified secondary-desktop driver option or measured procedure
+yet. See [evidence and exact boundary](../Plan/solo-sandbox-scenarios.md#rev8-secondary-desktop-preflight-blocked-target-desktop-absent).
+
 After routing passes:
 
 ```powershell

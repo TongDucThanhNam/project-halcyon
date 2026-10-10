@@ -2,7 +2,98 @@
 
 ## Entry checkpoint — 2026-10-10
 
-**Current rev5: Live2 ordinary SETUP/BLOCKED; accepted rev4 Live1 retained.**
+**Session hand-off (operator ended the day after rev8).** Committed state:
+desktop-independent entry (no host activation; owned window only needs to be
+non-minimized), framework quiet-window and CPU-qualified verifier guards, the
+read-only `DRAFT_WAIT` classifier, and the corrected single same-PID guest
+HOME→owned-activity recovery after cold launch. Pre-commit checks: smoke
+PASS/1 reviewed skip and client PASS, plus the rev7 full-discovery, headless and
+verifier results below (source manifests unchanged since then). Next session,
+in order:
+1. Live2 with the corrected cold-launch recovery on the current desktop
+   (LDPlayer windows non-minimized; operator keeps working), then Live3.
+2. Secondary virtual desktop measurement only when a desktop2 target exists:
+   either the operator creates and keeps it, or the operator authorizes the
+   worker to create it without switching. Rev8's helper provenance is retained.
+3. Day 7 (six actual clients) stays deferred by the operator.
+
+**Current rev8: BLOCKED (REPLAN), secondary desktop absent.** Registry and
+read-only COM enumeration on build26200.9457 both report only desktop1
+`3dd72074-ede1-4370-8bcb-5677601417c1`; the specified secondary target
+`4bf7a1f3-20bb-45ad-a0c8-88bcd27801e2` is missing. Active desktop is unchanged.
+Measurement NOT QUALIFIED at SETUP preflight; window movement support and
+client behavior remain untested, not proved unsupported. No emulator/stack/
+Frida startup, desktop/window mutation or secondary-driver option. Live2/Live3
+remain UNRUN. See [rev8 evidence and corrected cold-launch recovery](solo-sandbox-scenarios.md#rev8-secondary-desktop-preflight-blocked-target-desktop-absent).
+
+**Earlier rev7: Live2 SETUP/BLOCKED before input; Live3 UNRUN.** The entry
+path no longer activates or requires host foreground: it qualifies the owned
+window's executable/PID and non-minimized state, permits one nonactivating
+restore, and retains shared input ownership plus every guest/native guard.
+Rev6's read-only DRAFT_WAIT work is preserved.
+
+Both emulators booted without observed foreground takeover. Android frameworks
+qualified 63.390/62.113-second quiet windows with boot_completed=1. A's one
+60-second-timeout `am start` returned in0.295 seconds. Of47 pre-attach samples,
+44 had its activity resumed (PID4297), but none had native `Resume - Post`;
+initialization remains UNKNOWN. No Frida attach or gesture occurred. B's game
+was not launched because A never reached the draft hold. Background PLAY
+consumption, reciprocal client liveness, dual HUD and Live3 remain UNRUN—not
+failed input or a gameplay regression. No REPLAN trigger was observed.
+
+Both full guest baselines are restored, emulators/stack stopped, Frida never
+started, and four owned hashes unchanged. Client187, workflow44, transport39
+and platform36 PASS; smoke73 PASS/1 reviewed skip; full discovery1538 PASS/28
+reviewed skips. Seven exact headless pairs PASS, independent reference
+UNAVAILABLE. The once-only default verifier also PASS: exact2×960 s,
+38,400 ticks, maxima21.1525/33.1944 ms and zero ticks over50 ms. Its pre-run CPU
+guard qualified60.735 seconds <=20% after about7.1 minutes/77 samples, within
+the30-minute bound. All final unit/simulation manifests match current source.
+The earlier rev6 FAIL remains historical; no threshold, priority or measurement
+method changed. Other workloads were neither stopped nor blamed.
+See [rev7 procedure/evidence](solo-sandbox-scenarios.md#current-rev7-desktop-independent-entry-pre-attach-native-readiness-blocks-live2)
+and [rev7 checks](one-week-acceleration.md#shared-desktop-execution--2026-10-10-rev7).
+Rev8 clarifies that exactly one same-PID guest HOME→owned-activity return is
+allowed after the cold launch when native Resume is absent; retain >=3 ready
+samples and stop on PID change or missing readiness. Rev7 did not attempt it.
+Accepted rev4
+Live1 remains historical; full client/fidelity acceptance is still open.
+No images/video, gameplay-rule changes or commits.
+
+### Earlier rev6 idle-desktop rerun
+
+**Earlier rev6: Live2 SETUP/BLOCKED; Live3 UNRUN; deadline gate FAIL.** Starting from
+`8f5fdd6` with the desktop idle, A reached the Skye draft hold through eight
+qualified inputs and explicit guest→connection→EID binding. B's initial
+activity launch timed out; its Android SystemUI/Phone/GMS/ExtServices had
+framework ANRs, with no game PID, Frida attach or input. No foreground-loss
+failure occurred. A's admission guard timed out without LOCK IN; later server
+pick-timeout finalization is not accepted admission. Both-client HUD, opposite-
+team admission, reciprocal liveness and Live3 remain unverified.
+
+An evidence-required read-only `DRAFT_WAIT` classifier handles the first
+attempt's waiting-roster state; it authorizes no gesture and preserves two
+settled ordinary DRAFT reads plus all existing control guards. Client175 PASS.
+Partial background evidence:192 B-foreground samples found A unpaused and
+initialized, with642 bound server1113 records; heartbeat/ack and reciprocal B
+measurement remain unavailable. The next prerequisite is healthy LDPlayer1
+framework startup, not another desktop-focus bypass.
+
+Both guest baselines are restored; emulators, Frida and stack stopped; four
+owned runtime hashes unchanged. Unit gates pass: client175, workflow40,
+transport39, platform36; smoke73/1 reviewed skip; full discovery1522/28 reviewed
+skips. Seven exact headless pairs pass. The once-only verifier matches both
+960-second runs exactly, but **15 ticks exceed50 ms**: maxima167.8896/31.7241 ms.
+Pre-run CPU40/34/54% means idle-host qualification was not achieved. The maximum
+row is host/scheduler-stall **inferred**, not a proved cause or a waived deadline.
+No threshold change or rerun. See [rev6 evidence and limits](solo-sandbox-scenarios.md#earlier-rev6-a-reaches-the-draft-hold-b-framework-startup-blocks-live2)
+and [rev6 checks](one-week-acceleration.md#idle-desktop-rerun--2026-10-10-rev6).
+Accepted rev4 Live1 remains historical; full gameplay acceptance stays open.
+No images/video, gameplay-rule changes or commits.
+
+### Earlier rev5 host-input result
+
+**Earlier rev5: Live2 ordinary SETUP/BLOCKED; accepted rev4 Live1 retained.**
 Dispatch `run-1791609724221-29dd246d` implements shared host-input ownership
 receipts, pre/post-gesture focus checks and measured pre-attach readiness.
 A passed the readiness guard and sent one qualified PLAY, then Chrome gained
@@ -19,7 +110,7 @@ PASS, all38,400 ticks below50 ms (max27.3683/49.9362 ms). Current source matches
 all final unit manifests and both simulation pins; independent reference remains
 UNAVAILABLE. Offline checks do not close the live acceptance gaps.
 Both emulators, Frida and stack stopped; A's full guest baseline restored and
-four owned runtime inputs unchanged. See [rev5 evidence and scope](solo-sandbox-scenarios.md#current-rev5-ownership-guarded-external-foreground-loss-blocks-live2)
+four owned runtime inputs unchanged. See [rev5 evidence and scope](solo-sandbox-scenarios.md#earlier-rev5-ownership-guarded-external-foreground-loss-blocks-live2)
 and [current check table](one-week-acceleration.md#host-input-ownership-execution--2026-10-10-rev5).
 No image/video work, gameplay changes or commits.
 

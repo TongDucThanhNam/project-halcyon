@@ -13,7 +13,7 @@ import time
 import uuid
 
 from Tools import native_ui
-from Tools.android_input_health import (activate_owned_ldplayer, require_owned_foreground,
+from Tools.android_input_health import (qualify_owned_ldplayer, require_owned_window,
                                        wait_launch_ready, wait_native_input_ready)
 from Tools.Teardown.observe_client_movement import ClientMovementObserver
 
@@ -84,7 +84,7 @@ def admission_roster(rows, guests, after):
 
 @contextmanager
 def input_lease(path, timeout, *, owner=None, record=lambda **row: None):
-    """Serialize two owned windows' focus + qualified gestures, not game time."""
+    """Serialize qualified gestures for owned clients, not game time."""
     import msvcrt
     path = Path(path).resolve()
     token = uuid.uuid4().hex
@@ -253,14 +253,14 @@ class NonvisualEntry:
             with input_lease(self.plan['input_lock'], self.timeout, owner=self.d.adb.serial,
                              record=lambda **row: self.record('INPUT_LEASE', **row)) as check:
                 host = self.plan.get('host_window')
-                activation = None
-                if host:
-                    activation = activate_owned_ldplayer(host['executable'], process_id=host['pid'])
-                    self.record('HOST_FOCUS', receipt=activation)
+                if not host:
+                    raise ValueError('entry: path-qualified host window/PID required')
+                window = qualify_owned_ldplayer(host['executable'], process_id=host['pid'])
+                self.record('HOST_WINDOW', receipt=window)
                 def verify():
                     check()
-                    if activation:
-                        self.record('HOST_FOCUS_CHECK', receipt=require_owned_foreground(activation))
+                    self._last_host_window = require_owned_window(window)
+                    self.record('HOST_WINDOW_CHECK', receipt=self._last_host_window)
                 self._input_check = verify
                 yield
                 verify()
@@ -326,14 +326,18 @@ class NonvisualEntry:
                 if self.admission_guests is None or admission_roster(
                         self.d.tail.records, self.admission_guests, self.after) is None:
                     raise ValueError('admission: peer left or selection disappeared before LOCK IN')
-            if time.monotonic()-state['host_read_started'] > 1.5:
-                raise ValueError(f'{stage}: stale control pair immediately before input')
             if check := getattr(self, '_input_check', None):
                 check()
+            if time.monotonic()-state['host_read_started'] > 1.5:
+                raise ValueError(f'{stage}: stale control pair immediately before input')
+            host = getattr(self, '_last_host_window', None)
+            if label == 'PLAY' and self.plan.get('require_background_play'):
+                if not host or host['after_foreground']['hwnd'] == host['hwnd']:
+                    raise ValueError('PLAY: nonforeground proof requires another host foreground; no input')
             before = time.time()
             self.d.gesture('entry-scroll' if scroll else 'entry-control', receipt=receipt,
-                           health=health, wall_before=before)
-            self.record(stage, input_receipt=receipt, health=health, wall_before=before)
+                           health=health, host_window=host, wall_before=before)
+            self.record(stage, input_receipt=receipt, health=health, host_window=host, wall_before=before)
             if scroll:
                 self.d.adb.swipe(*start, *end, duration_ms=500)
             else:
@@ -462,7 +466,17 @@ class NonvisualEntry:
             for label, stage, target in (('PLAY', 'MENU', 'MODE'), ('SOLO BOTS', 'MODE', 'MAP'),
                                          ('3V3', 'MAP', 'DIFFICULTY')):
                 self.act(label, stage)
-                self.wait_screen(target, stage)
+                try:
+                    transition = self.wait_screen(target, stage)
+                except ValueError as exc:
+                    if label == 'PLAY' and self.plan.get('require_background_play'):
+                        self.record('BACKGROUND_PLAY_PROOF', consumed=None,
+                                    status='UNACKNOWLEDGED', reason=str(exc))
+                        raise ValueError('REPLAN nonforeground PLAY consumption unverified: '+str(exc)) from exc
+                    raise
+                if label == 'PLAY' and self.plan.get('require_background_play'):
+                    self.record('BACKGROUND_PLAY_PROOF', consumed=True, native=transition,
+                                server_acceptance='pending ordinary joinLobby after mode/map/difficulty')
             before, _ = self.act('VERY EASY', 'DIFFICULTY')
             def joined():
                 rows = [r for r in self.rpc_rows() if r.get('t', 0) >= before and r.get('method') == 'joinLobby'
@@ -474,12 +488,14 @@ class NonvisualEntry:
             self.record('JOIN_LOBBY', server_acceptance=rows)
             if any(r.get('response', {}).get('code') != 0 for r in rows):
                 raise ValueError('joinLobby: observed non-success reply; retained response, no retry')
+            if self.plan.get('require_background_play'):
+                self.record('BACKGROUND_ENTRY_SERVER_ACCEPTANCE', server_acceptance=rows)
             draft = self.wait('gateway: guest->draft connection->owner', self.bind)
             self.record('DRAFT_OPEN', server_acceptance=self.wait('1001/1108/1113 draft opener',
                 lambda: self.server_ops([1001, 1108, 1113], before)))
             # Retained live-07: the queue panels retire to MENU after the
             # bound server opener, before draft attaches. No MENU input here.
-            self.wait_screen('DRAFT', 'DIFFICULTY', transitions=('MENU', 'MENU_TRANSITION'))
+            self.wait_screen('DRAFT', 'DIFFICULTY', transitions=('MENU', 'MENU_TRANSITION', 'DRAFT_WAIT'))
             self.select()
             if self.draft_observation_reads:
                 self.observe_draft_only()

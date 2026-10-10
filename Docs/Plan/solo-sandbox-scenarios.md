@@ -2,7 +2,238 @@
 
 ## Opt-in nonvisual entry — 2026-10-10
 
-### Current rev5: ownership guarded; external foreground loss blocks Live2
+### Rev8: secondary-desktop preflight blocked; target desktop absent
+
+Dispatch `run-1791620143357-c48265d8`: **BLOCKED (REPLAN)** before emulator
+startup. Measurement verdict **NOT QUALIFIED (SETUP prerequisite absent)**,
+not an unsupported-COM or input-delivery finding. On Windows 11 build
+26200.9457, both the registry and read-only internal COM enumeration report
+exactly one desktop: `3dd72074-ede1-4370-8bcb-5677601417c1`, also the active
+desktop before/after the query. The prescribed target
+`4bf7a1f3-20bb-45ad-a0c8-88bcd27801e2` is absent. No desktop was created,
+removed or switched; no window was moved/activated. The operator must supply
+an existing secondary target before this locked measurement can proceed.
+
+Evidence **X** =
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791620143357-c48265d8/`:
+`registry-before.json`, `com-readonly.txt`, `helper-provenance.json`, and
+`preflight-result.json`. External MScholtes VirtualDesktop1.21 source is pinned
+to commit `a725cbd3cdb9e977678eeaf034a7cc96d2e74bc6`; the provenance records
+SHA-256, interface GUIDs and the read-only wrapper. Enumeration works; window
+movement compatibility is untested. No helper becomes a project dependency.
+Window desktop/cloaking/iconic/visibility, 120-second guest/heartbeat sampling,
+background PLAY, draft/WORLD/walk and Live2/Live3 are all UNRUN. No opt-in
+secondary-desktop driver option is added without a qualified measurement.
+
+**Cold-launch correction (binding from rev8).** One cold `am start` with a
+60-second timeout does not prohibit the documented recovery. If native
+`Resume - Post` is absent, perform exactly one in-guest Android HOME then
+owned-activity reactivation via ADB, retaining the same game PID throughout.
+Then require the existing >=3 ready samples, including initialization and
+native Resume. PID change or still-absent readiness is SETUP; stop that client.
+This authorizes no host activation, repeated cold start or guard waiver.
+Rev7's no-recovery stop below is historical under its original wording.
+
+Affected checks on unchanged implementation: `.venv/Scripts/python.exe -B
+Tools/run_checks.py --suite client --output <X/checks-client>`:187 PASS;
+`--suite workflow --output <X/checks-workflow>`:44 PASS, no skips/failures.
+Both source checks match. `git diff --check` passes with only Git's existing
+LF→CRLF notices. Full discovery/headless/deadline gates were not repeated for
+this documentation-only, stopped preflight; rev7's results remain historical.
+Emulators/stack/Frida were not started; four owned hashes still match baseline.
+No commit, image/video work, or operator-process intervention.
+
+### Current rev7: desktop-independent entry; pre-attach native readiness blocks Live2
+
+Dispatch `run-1791617397628-ef2869d3` continues the uncommitted rev6 work from
+`8f5fdd6`. **Live2 ordinary SETUP/BLOCKED, not REPLAN; Live3 UNRUN.**
+The operator is using the desktop. Host foreground is never acquired or
+required by the gesture path, and other workloads are left alone.
+Evidence **X** =
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791617397628-ef2869d3/`.
+
+**Revised input contract.** A mandatory path-qualified `host_window` PID/hwnd
+must exist and not be minimized. One `ShowWindow(SW_SHOWNOACTIVATE)` may restore
+it per input lease; subsequent minimization/window change fails SETUP with no
+further input. No SetForegroundWindow, BringWindowToTop, AttachThreadInput,
+window positioning or focus action. Receipts retain foreground hwnd/PID/class/
+executable only as information. Both drivers still share the exclusive input
+lease; no lease is held across admission/loading/countdown. All guest Java
+focus, unpaused/initialized/enabled, native Resume, complete-tree/control-pair,
+freshness, identity, native transition and server acceptance guards remain.
+`require_background_play: true` on this live profile requires the first PLAY
+while the owned window is not host foreground, records the native MODE
+transition explicitly, then separately records the later joinLobby acceptance.
+PLAY has no separate menu RPC: do not invent one. Failure to establish the
+qualified tap's transition stops for REPLAN without input repetition; its
+consumption remains UNACKNOWLEDGED/unknown, not a proved rejection cause.
+
+**Startup and measured blocker.** Both emulators booted before either game
+launch, using Windows startup show mode4 (nonactivating), not window activation.
+Host PIDs27780/13864; the25 foreground-change/initial records contain neither.
+Each framework retained untruncated logcat snapshots and required
+`sys.boot_completed=1`, then >=60 seconds with no new `ANR in` or `Force stopping`
+within600 seconds. A:14 samples,63.3896-second quiet interval; B:14 samples,
+62.1132-second quiet interval. Historical boot/media and our one baseline
+force-stop records were retained, not cleared or ignored as new events.
+`framework-{A,B}-result.json` and their JSONL series retain exact logs/bounds.
+A's immediate prelaunch logcat check found no new such event.
+
+A's single `am start ...NuoActivityLauncher` used a60-second transport timeout;
+its receipt was persisted **before** invoking it. Host interval
+1791617928.311064..1791617928.605997 (0.2949 seconds), guest launch anchor
+1791617921.4649844. It returned Starting Intent. PID4297 appeared;44 of47
+pre-attach observations had NuoActivityGame RESUMED. The initialized-only
+native `Resume - Post` anchor never appeared during the60-second bounded wait.
+`onResume`, renderer init-start and scaleContent logs are retained but do not
+prove that guard. Initialization is UNKNOWN, not false. No crash, ANR or
+Frida-caused failure is established by this result. No repeat launch, HOME/
+return cycle, attach, native tree read or gesture was attempted.
+
+B's Android framework passed, but **B game launch UNRUN**: A did not reach the
+required draft hold. No actual-match guest/connection/EID binding, HUD or
+reciprocal Java/native/heartbeat measurement occurred. Nonforeground PLAY
+consumption and Live3 movement isolation/remote observation are UNRUN. This is
+not an unconsumed qualified tap and does not trigger that REPLAN decision.
+There are no traversal maxima for this run; earlier native-read measurements
+remain historical. `live-summary.json`, `cold-launch-A.json`,
+`readiness-A{,-result}.json[l]`, `foreground-changes.jsonl`, and
+`pre-cleanup-{A,B}.json` retain the exact boundary and raw structured evidence.
+
+At rev7 the single-am-start wording prevented the prior same-PID HOME→return
+recovery. Rev8 explicitly corrects that wording: one guest-only recovery is
+allowed after the cold launch, with unchanged PID and >=3 ready samples as
+specified above. No idle desktop or host activation is requested.
+
+**Cleanup/checks.** Both full guest IPv4/IPv6, hosts/CA sources/targets/mounts
+and reverse maps equal baseline; existing Android-managed rules are preserved.
+B's newly staged CA-transfer copy was preserved under this run's unique suffix,
+not discarded. Owned stack launcher26068 and its verified child32012 stopped;
+both emulators stopped; Frida never started/attached. Four owned runtime hashes
+match. External runtime copies alone were edited. Client187, workflow44,
+transport39 and platform36 PASS; smoke73 PASS/1 reviewed skip. Full discovery
+1538 PASS/28 reviewed skips (same27 absent owned inputs/one Windows privilege
+case as rev6); seven exact headless pairs PASS, reference UNAVAILABLE. All six
+final unit manifests and both simulation pins match current source. The default
+verifier ran once only after77 CPU samples established60.734976 seconds <=20%
+within about425 seconds of the1800-second bound. **Verifier PASS:** exact
+stream/state/checkpoints over2×960 s/38,400 ticks, maxima21.1525/33.1944 ms,
+zero ticks over50 ms. Full attribution and qualification records are retained:
+`tick-attribution.json`, `host-cpu-qualification-result.json`,
+`final-source-review.json`, and the
+[commands/results](one-week-acceleration.md#shared-desktop-execution--2026-10-10-rev7).
+The earlier rev6 deadline FAIL remains historical, not erased. No threshold,
+priority or measurement method changed. Thread CPU is quantized; recorded
+CPU_WORK classifications are not exact causal profiles. Other host workloads
+are not a failure or a reason to stop operator processes.
+No images/video, gameplay changes, proprietary additions or commits. Passing
+offline checks never substitutes for client acceptance or independent fidelity.
+
+### Earlier rev6: A reaches the draft hold; B framework startup blocks Live2
+
+Dispatch `run-1791614100226-840afe49`, starting from clean `8f5fdd6`.
+**Live2 ordinary SETUP/BLOCKED; Live3 UNRUN; verifier deadline FAIL.**
+Accepted rev4 Live1 is retained.
+The operator's idle-desktop prerequisite was supplied. Neither attempt lost
+host foreground during a gesture. No foreground guard or leaf rule changed.
+
+Here **W** is
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791614100226-840afe49/`;
+**W2** is `W/attempt-02/`. Both use fresh external runtime copies and source
+pins, never edits to owned `answers.json`.
+
+**Attempt1 and evidence-required repair.** A sent four qualified menu gestures
+and bound its guest/draft connection. The next complete native tree had
+`Waiting for Players...`, `SEC`, hero categories and `LOCK IN`, but not
+`Lock in a hero!`; the unchanged classifier correctly stopped as UNKNOWN.
+Five later passive complete reads reached ordinary DRAFT without further input.
+`read-only-transition-replay.json` retains that progression: waiting1150 visited /
+702 active /38.104599 ms; subsequent DRAFT1196/670, maximum43.765141 ms.
+`Tools/native_ui.py` now recognizes only this bounded **read-only DRAFT_WAIT**
+shape: unique required waiting/roster labels, known hero labels, no unknown or
+conflicting labels. It refuses every control receipt in that state. Entry may
+await it only after explicit identity binding and the1001/1108/1113 opener;
+two settled ordinary DRAFT reads and all existing control guards are still
+required before input. No new executable path or gameplay change.
+Tests cover timeout, missing/duplicate/conflicting labels, zero-input refusal
+and the two-read transition. The new timeout test initially recursed through
+its mocked boundary; capturing the original bound method fixed the fixture,
+without changing its required SETUP/no-input assertions. Client175 PASS.
+
+**Attempt2.** A passed three pre-attach ready samples after its single measured
+HOME→owned-activity reactivation (same PID3914; initial60-second series lacked
+Resume). It sent eight receipted gestures: four menu inputs, three measured
+hero-list scrolls, Skye selection. Explicit binding: device `emulator-5554`,
+listener9443, guest `a8006997-b05f-5d1c-9d2c-fd4ffbbd13f0`, identity
+`devtag:8c30e46cce91`, connection2061308134224, EID1500/slot0/team1.
+Skye selection was server-echoed at the pre-lock hold. This attempt did not
+encounter DRAFT_WAIT; the new branch is replay/mock-qualified, not separately
+live-transition accepted. Stage maxima (visited/active/ms): MENU169/86/14.344196,
+MODE414/257/26.020864, MAP271/156/15.173121, DIFFICULTY319/191/31.192471,
+DRAFT1196/670/77.948013. See `W2/entry-summary.json` and entry receipts.
+
+Only then was B booted. `W2/before-B-start.json` records host free memory
+9,409,360 KiB (8.97 GiB), A's guest process list and both emulator host records;
+B was off before that point. B guest routing passed, but its first ordinary
+`am start ...NuoActivityLauncher` timed out after15 seconds. No game PID was
+observed, no B Frida daemon/attach or gesture occurred. Logcat shows repeated
+Android framework ANRs: SystemUI TIME_TICK at guest1791614721.056 and
+1791614731.832, Phone/MmsService, GMS/FitnessSyncAdapterService and
+ExtServices/CacheQuotaServiceImpl. This is pre-game framework startup failure,
+not evidence of a gameplay regression or Frida attach failure. No low-memory
+cause is established; a later host sample still had7,585,900 KiB (7.23 GiB) free.
+See `launch-timeout-diagnostics.json`, raw `launch-timeout-B-logcat.bin`,
+`B-pending-launch-diagnostic.json` and `memory-after-B-timeout.json` in W2.
+The external launch helper wrote its cold-launch receipt only after `am start`
+returned; that timeout therefore left B's immediate pre-launch timestamp
+unretained. This is an explicit receipt gap, never waived readiness.
+No repeated force-stop/cold-start cycle or window workaround was attempted.
+
+A's admission wait independently ended SETUP at host1791614839.269813 after
+its180-second cap, with **no LOCK IN gesture or c2s1123**. The attempted cleanup
+cancellation found the driver already finished; it did not interrupt the hold.
+Later server pick-timeout finalization emitted1006/1132 at1791614955, after
+that failure; it is not ordinary admission evidence. No1134/1137/1011 WORLD
+handoff or HUD qualification occurred. Dual opposite-team binding/HUD and all
+Live3 movement-isolation/remote-native observations remain UNRUN.
+
+**Partial background observation, not reciprocal acceptance.** While B's host
+window owned foreground,192 passive samples over223.713 seconds found A
+initialized=true, paused=false, window_focus=true, focused=false, native
+Resume - Post latest. Its bound connection continued642 server1113 records.
+`W2/background-summary.json` retains these counts and limits. The existing
+wire trace excludes keepalive; per-connection background heartbeats/acks were
+not measured. B never had a game connection, so the reciprocal measurement is
+unavailable; neither client was WORLD-qualified for owner scalars. No measured
+background suspension/connection-loss REPLAN condition was triggered.
+The smallest next prerequisite is healthy LDPlayer1 Android framework startup,
+then a fresh guarded Live2 run with reciprocal liveness instrumentation.
+
+**Cleanup and gates.** Full IPv4/IPv6, hosts, CA files/mounts and reverse maps
+match both guest baselines. B's cleanup skipped an unnecessary force-stop only
+after an empty pidof/exit1 proved the game absent; routing comparisons were not
+relaxed. Existing Android-managed rules were preserved. Both emulators, A's
+Frida and stack are stopped; B never ran Frida. Four owned runtime hashes match
+(`W/owned-after-live.json`, `W/processes-after-live.json`, W2 restoration checks).
+Final unit gates: client175, workflow40, transport39, platform36 PASS;
+smoke73 PASS/1 reviewed skip; full discovery1522 PASS/28 reviewed skips. Those
+28 match rev5 (27 absent owned inputs, one Windows symlink-privilege case).
+Seven headless pairs are exact, reference UNAVAILABLE. Final manifests match.
+The single default verifier invocation produced exact stream/state/checkpoints
+for two960-second/19,200-tick runs, on the same simulation source as rev5.
+**Deadline FAIL:** maxima167.8896/31.7241 ms, respectively15/0 ticks over50 ms.
+Pre-verifier total CPU samples40/34/54% also mean the requested idle-host
+condition was not achieved, despite stopped emulators and completed suites.
+No second invocation, threshold change or scheduler-based waiver. Full40
+retained slow-tick rows and clock limits are in `W/tick-attribution.json`;
+[maximum-row attribution and commands](one-week-acceleration.md#idle-desktop-rerun--2026-10-10-rev6).
+Post-freeze `owned-after-freeze.json`, `final-source-review.json`,
+`emulators-after-freeze.txt` and `live-processes-after-freeze.json` retain the
+final source/input/cleanup checks. Both live setup and deadline remain blockers.
+No images/video, gameplay changes or commits. Local checks never substitute
+for client acceptance or independent gameplay fidelity.
+
+### Earlier rev5: ownership guarded; external foreground loss blocks Live2
 
 Dispatch `run-1791609724221-29dd246d` preserves accepted rev4 Live1 and its
 strict-leaf UNCLASSIFIED rule. **Live2 SETUP/BLOCKED, not REPLAN; Live3 UNRUN.**
@@ -372,7 +603,10 @@ that launch; required by the rev5 pre-attach guard), `rpc_journal`, the fresh ru
 `device_tag` and `listener_port`, `java_bridge` (external retained
 `frida-java-bridge` 7.0.13 package directory), and an external shared
 `input_lock`. `runtime_observer.endpoint` selects the owned Frida endpoint;
-`host_window` names the owned LDPlayer executable and exact host `pid`.
+`host_window` is mandatory and names the owned LDPlayer executable and exact
+host `pid`. Rev7 checks existence/non-minimization without activating it; the
+host foreground owner is informational. `require_background_play: true`
+requests the explicitly receipted nonforeground first-input proof.
 `entry_only: true` ends after WORLD/HUD qualification; it does not claim
 movement or full-match acceptance. Otherwise the requested existing exercise
 follows. Use an external runtime copy, never modify the owned answers in place.
@@ -384,8 +618,9 @@ read checks tree consistency immediately before each gesture. Hero scrolling
 derives its region from the target control's clip and requires measured progress;
 stale/duplicate/unknown controls, lost focus or absent transitions fail SETUP
 without repeating an input. Initial cold native initialization is **not** a
-`Resume - Post` receipt. A measured ordinary activity reactivation can establish
-that lifecycle signal; absence remains a setup unknown, never assumed ready.
+`Resume - Post` receipt. Earlier runs used a measured activity reactivation to establish that signal.
+Rev7 permits one cold `am start` only, so that recovery is not silently repeated;
+absence remains a setup unknown, never assumed ready.
 
 `peers` lists the second explicit `{device_tag, listener_port}` (optionally
 `guest_id`). Each driver holds before LOCK IN until both identified guests are

@@ -107,6 +107,25 @@ class NativeReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'hero callback'):
             ui.control_receipt(tree('Skye', 'DRAFT'), 'Skye', 'DRAFT', hero_id=925)
 
+    def test_waiting_roster_is_read_only_and_rejects_unknown_or_missing_labels(self):
+        state = tree('LOCK IN', 'DRAFT')
+        state['labels'] = sorted(ui.DRAFT_WAIT_MARKERS) + ['Skye', 'Amael', 'Amael']
+        self.assertEqual(ui.screen(state), 'DRAFT_WAIT')
+        for expected in ('DRAFT', 'DRAFT_WAIT'):
+            with self.assertRaisesRegex(ValueError, 'read-only transition'):
+                ui.control_receipt(state, 'LOCK IN', expected)
+        for added in ('Unidentified dialog', 'Lock in a hero!', 'LOCKED IN', 'Settings',
+                      'Waiting for Players...', 'PLAY', 'VERY EASY'):
+            with self.subTest(added=added):
+                changed = copy.deepcopy(state)
+                changed['labels'].append(added)
+                self.assertEqual(ui.screen(changed), 'UNKNOWN')
+        for missing in ui.DRAFT_WAIT_MARKERS - {'Waiting for Players...'}:
+            with self.subTest(missing=missing):
+                changed = copy.deepcopy(state)
+                changed['labels'].remove(missing)
+                self.assertEqual(ui.screen(changed), 'UNKNOWN')
+
     def test_read_gaps_are_bounded_without_input(self):
         observer, gaps = Mock(), []
         observer.ui_state.side_effect = RuntimeError('native UI root changed')
@@ -246,6 +265,10 @@ class EntryInputTests(unittest.TestCase):
         self.enterContext(patch.object(entry, 'wait_native_input_ready', return_value={'ready': True}))
         self.launch_ready = self.enterContext(patch.object(entry, 'wait_launch_ready', return_value={'ready': True}))
         self.e.plan['launch_guest_wall'] = 5
+        self.e.plan['host_window'] = {'executable': 'owned', 'pid': 1}
+        self.enterContext(patch.object(entry, 'qualify_owned_ldplayer', return_value={'hwnd': 1, 'pid': 1}))
+        self.enterContext(patch.object(entry, 'require_owned_window', return_value={
+            'hwnd': 1, 'pid': 1, 'after_foreground': {'hwnd': 2, 'pid': 2}}))
         self.state = tree()
         self.e.read = Mock(side_effect=lambda: {**copy.deepcopy(self.state), 'host_read_started': time.monotonic()})
 
@@ -284,12 +307,12 @@ class EntryInputTests(unittest.TestCase):
         self.observer.start.assert_not_called()
         self.e.java.start.assert_not_called()
 
-    def test_peer_steals_foreground_before_gesture_latches_setup(self):
+    def test_unrestorable_minimized_window_before_gesture_latches_setup(self):
         self.e.input_window = entry.NonvisualEntry.input_window.__get__(self.e)
         self.e.plan['host_window'] = {'executable': 'owned', 'pid': 1}
-        with patch.object(entry, 'activate_owned_ldplayer', return_value={'hwnd': 1, 'pid': 1}), \
-                patch.object(entry, 'require_owned_foreground', side_effect=ValueError('host foreground ownership lost')):
-            self.assert_no_input(lambda: self.e.act('PLAY', 'MENU'), 'host foreground ownership lost')
+        with patch.object(entry, 'qualify_owned_ldplayer', return_value={'hwnd': 1, 'pid': 1}), \
+                patch.object(entry, 'require_owned_window', side_effect=ValueError('owned window minimized or absent')):
+            self.assert_no_input(lambda: self.e.act('PLAY', 'MENU'), 'owned window minimized or absent')
             self.assert_no_input(lambda: self.e.act('PLAY', 'MENU'), 'prior input ownership failure')
         events = [r for r in self.e.events if r['stage'] == 'INPUT_LEASE']
         self.assertEqual([r['event'] for r in events], ['acquire', 'release'])
@@ -307,13 +330,33 @@ class EntryInputTests(unittest.TestCase):
             self.e.admission()
         self.assertTrue(other_can_own())
 
-    def test_post_gesture_foreground_theft_stops_without_second_input(self):
+    def test_other_host_foreground_allows_qualified_guest_input(self):
+        self.e.input_window = entry.NonvisualEntry.input_window.__get__(self.e)
+        self.e.plan['require_background_play'] = True
+        self.e.act('PLAY', 'MENU')
+        self.d.adb.swipe.assert_called_once()
+        host = self.d.gestures[0]['host_window']
+        self.assertNotEqual(host['hwnd'], host['after_foreground']['hwnd'])
+
+    def test_background_proof_never_manufactures_foreground_change(self):
+        self.e.input_window = entry.NonvisualEntry.input_window.__get__(self.e)
+        self.e.plan['require_background_play'] = True
+        with patch.object(entry, 'require_owned_window', return_value={
+                'hwnd': 1, 'pid': 1, 'after_foreground': {'hwnd': 1}}):
+            self.assert_no_input(lambda: self.e.act('PLAY', 'MENU'), 'nonforeground proof')
+
+    def test_missing_host_window_fails_before_input(self):
+        self.e.input_window = entry.NonvisualEntry.input_window.__get__(self.e)
+        del self.e.plan['host_window']
+        self.assert_no_input(lambda: self.e.act('PLAY', 'MENU'), 'host window/PID required')
+
+    def test_window_disappears_after_gesture_stops_without_second_input(self):
         self.e.input_window = entry.NonvisualEntry.input_window.__get__(self.e)
         self.e.plan['host_window'] = {'executable': 'owned', 'pid': 1}
-        with patch.object(entry, 'activate_owned_ldplayer', return_value={'hwnd': 1, 'pid': 1}), \
-                patch.object(entry, 'require_owned_foreground', side_effect=[{'qualified': True},
-                    ValueError('host foreground ownership lost')]):
-            self.assert_setup_failure(lambda: self.e.act('PLAY', 'MENU'), 'host foreground ownership lost')
+        with patch.object(entry, 'qualify_owned_ldplayer', return_value={'hwnd': 1, 'pid': 1}), \
+                patch.object(entry, 'require_owned_window', side_effect=[{'qualified': True},
+                    ValueError('owned window minimized or absent')]):
+            self.assert_setup_failure(lambda: self.e.act('PLAY', 'MENU'), 'owned window minimized or absent')
             self.assert_setup_failure(lambda: self.e.act('PLAY', 'MENU'), 'prior input ownership failure')
         self.d.adb.swipe.assert_called_once()
 
@@ -438,6 +481,26 @@ class EntryInputTests(unittest.TestCase):
         self.assertEqual(self.e.read.call_count, 2)
         self.d.adb.swipe.assert_not_called()
 
+    def test_waiting_roster_must_reach_two_draft_reads_without_input(self):
+        waiting = tree('LOCK IN', 'DRAFT')
+        waiting['labels'] = sorted(ui.DRAFT_WAIT_MARKERS) + ['Skye']
+        draft = tree('LOCK IN', 'DRAFT')
+        self.e.read.side_effect = [waiting, draft, draft]
+        self.e.timeout = 1
+        with patch.object(entry.time, 'sleep'):
+            self.assertEqual(self.e.wait_screen('DRAFT', 'DIFFICULTY',
+                transitions=('DRAFT_WAIT',)), draft)
+        self.assertEqual(self.e.read.call_count, 3)
+        self.d.adb.swipe.assert_not_called()
+
+    def test_waiting_roster_times_out_and_is_not_a_general_transition(self):
+        self.state = tree('LOCK IN', 'DRAFT')
+        self.state['labels'] = sorted(ui.DRAFT_WAIT_MARKERS) + ['Skye']
+        wait_screen = self.e.wait_screen
+        self.assert_no_input(lambda: wait_screen('DRAFT', 'DIFFICULTY',
+            transitions=('DRAFT_WAIT',)), 'bounded wait')
+        self.assert_no_input(lambda: wait_screen('MODE', 'MENU'), 'unexpected native screen')
+
     def test_descendant_must_settle_before_receipt_and_not_at_final_boundary(self):
         a = tree()
         child = copy.deepcopy(a['nodes'][1])
@@ -556,13 +619,31 @@ class EntryInputTests(unittest.TestCase):
     def test_positive_mocked_path_all_stages_preserves_receipts_and_owner(self):
         self.run_mocked_path()
 
+    def test_background_play_records_native_consumption_then_server_acceptance(self):
+        self.run_mocked_path(background=True)
+        proof = next(r for r in self.e.events if r['stage'] == 'BACKGROUND_PLAY_PROOF')
+        self.assertTrue(proof['consumed'])
+        acceptance = next(r for r in self.e.events if r['stage'] == 'BACKGROUND_ENTRY_SERVER_ACCEPTANCE')
+        self.assertEqual(acceptance['server_acceptance'][0]['method'], 'joinLobby')
+        self.assertLess(proof['at'], acceptance['at'])
+
+    def test_background_play_missing_transition_is_replan_without_repeat(self):
+        self.run_mocked_path(background=True, missing='MODE')
+        proof = next(r for r in self.e.events if r['stage'] == 'BACKGROUND_PLAY_PROOF')
+        self.assertIsNone(proof['consumed'])
+        self.assertEqual(proof['status'], 'UNACKNOWLEDGED')
+        self.d.adb.swipe.assert_called_once()
+
     def test_missing_lock_acceptance_or_native_transition_is_setup_without_repeat(self):
         for missing in (1123, 1119, 'LOCKED'):
             with self.subTest(missing=missing):
                 self.setUp()
                 self.run_mocked_path(missing=missing)
 
-    def run_mocked_path(self, missing=None):
+    def run_mocked_path(self, missing=None, background=False):
+        if background:
+            self.e.input_window = entry.NonvisualEntry.input_window.__get__(self.e)
+            self.e.plan['require_background_play'] = True
         now = time.time()
         device = self.e.device
         rpc_rows = [{'t': now, 'method': 'startSessionForPlayer', **device,
@@ -583,6 +664,8 @@ class EntryInputTests(unittest.TestCase):
             label, stage = transitions[len(actions)]
             actions.append(self.d.gestures[-1]['receipt']['label'])
             self.state = tree(label, stage)
+            if len(actions) == 1 and missing == 'MODE':
+                self.state = tree('PLAY', 'MENU')
             if len(actions) == 4:
                 rpc_rows.append({'t': time.time(), 'method': 'joinLobby', **device,
                     'guest_id': 'guest-a', 'response': {'code': 0, 'returnValue': {'state': 'pending_auto'}}})
@@ -616,9 +699,14 @@ class EntryInputTests(unittest.TestCase):
             if missing is None:
                 self.e.run()
             else:
-                with self.assertRaisesRegex(sc.ClientStageFailure, 'missing transition/signal.*no input retry') as failure:
+                reason = ('REPLAN nonforeground PLAY consumption unverified' if missing == 'MODE'
+                          else 'missing transition/signal.*no input retry')
+                with self.assertRaisesRegex(sc.ClientStageFailure, reason) as failure:
                     self.e.run()
                 self.assertEqual(failure.exception.stage, 'SETUP')
+                if missing == 'MODE':
+                    self.assertEqual(actions, ['PLAY'])
+                    return
                 self.assertEqual(actions.count('LOCK IN'), 1)
                 self.assertEqual(self.d.adb.swipe.call_count, 6)
                 return
@@ -635,7 +723,7 @@ class EntryInputTests(unittest.TestCase):
 
 
 class HostLeaseTests(unittest.TestCase):
-    def test_two_drivers_never_overlap_activation_to_gesture_and_record_waiter(self):
+    def test_two_drivers_never_overlap_window_check_to_gesture_and_record_waiter(self):
         from concurrent.futures import ThreadPoolExecutor
         from types import SimpleNamespace
         import threading
@@ -643,10 +731,10 @@ class HostLeaseTests(unittest.TestCase):
             path = str(Path(directory)/'input.lock')
             active, trace, receipts = [], [], []
             first_entered = threading.Event()
-            def activate(_executable, *, process_id):
+            def qualify(_executable, *, process_id):
                 self.assertEqual(active, [])
                 active.append(process_id)
-                trace.append(('activate', process_id))
+                trace.append(('qualify', process_id))
                 return {'pid': process_id, 'hwnd': process_id}
             def drive(pid):
                 e = entry.NonvisualEntry.__new__(entry.NonvisualEntry)
@@ -668,13 +756,13 @@ class HostLeaseTests(unittest.TestCase):
                     self.assertEqual(active, [pid])
                     trace.append(('gesture', pid))
                     active.clear()
-            with patch.object(entry, 'activate_owned_ldplayer', side_effect=activate), \
-                    patch.object(entry, 'require_owned_foreground', return_value={'qualified': True}), \
+            with patch.object(entry, 'qualify_owned_ldplayer', side_effect=qualify), \
+                    patch.object(entry, 'require_owned_window', return_value={'qualified': True}), \
                     ThreadPoolExecutor(2) as pool:
                 futures = [pool.submit(drive, pid) for pid in (1, 2)]
                 for future in futures:
                     future.result(timeout=5)
-            self.assertEqual(trace, [('activate', 1), ('gesture', 1), ('activate', 2), ('gesture', 2)])
+            self.assertEqual(trace, [('qualify', 1), ('gesture', 1), ('qualify', 2), ('gesture', 2)])
             leases = [r for r in receipts if r['stage'] == 'INPUT_LEASE']
             for driver in ('1', '2'):
                 own = [r for r in leases if r['driver'] == driver]

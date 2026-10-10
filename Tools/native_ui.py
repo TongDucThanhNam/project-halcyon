@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import time
 
+from server.hero_catalog import HERO_CATALOG_1107_NAMES, HERO_INTERNAL_ALIASES
+
 
 def fresh_ui_state(observer, on_gap, *, bracket=False):
     """Retry reads only, never inputs; same bounds as the Classic reader."""
@@ -32,9 +34,13 @@ def tree_signature(state):
 
 
 SCREEN_MARKERS = {'CONNECTING', 'PLAY', 'SOLO BOTS', '3V3', 'VERY EASY',
-                  'Lock in a hero!', 'LOCKED IN', 'Choose a Build',
+                  'Waiting for Players...', 'Lock in a hero!', 'LOCKED IN', 'Choose a Build',
                   'BACKPACK (DRAG TO RE-ORDER)', 'BUY:', 'Settings'}
 BLOCKER_MARKERS = {'Settings', 'Choose a Build', 'BACKPACK (DRAG TO RE-ORDER)'}
+DRAFT_WAIT_MARKERS = {'SEC', 'Waiting for Players...', 'CAPTAINS', 'JUNGLERS', 'LANERS',
+                      'DIFFICULTY', 'LOCK IN', 'Info', 'Skins', 'EXIT MATCH'}
+DRAFT_HERO_LABELS = ({name for name in HERO_CATALOG_1107_NAMES if '_Skin_' not in name}
+                     | set(HERO_INTERNAL_ALIASES) | {'San Feng'})
 
 
 def screen_context(state):
@@ -197,6 +203,14 @@ def screen(state):
         return 'LOADING'
     if 'Settings' in labels:
         return 'UNKNOWN'
+    # Rev6 retained complete tree after identity-bound 1001/1108/1113:
+    # waiting roster -> five later ordinary DRAFT reads, with no intervening
+    # input. This is only a bounded read-only transition, never a draft control.
+    if 'Waiting for Players...' in labels:
+        if (all(labels.count(s) == 1 for s in DRAFT_WAIT_MARKERS)
+                and set(labels) <= DRAFT_WAIT_MARKERS | DRAFT_HERO_LABELS):
+            return 'DRAFT_WAIT'
+        return 'UNKNOWN'
     # Two complete live post-VERY-EASY reads (2026-10-10) show these retiring
     # mode cards while the accepted join attaches draft. This is not MENU and
     # never permits PLAY; only the server-bound draft transition may await it.
@@ -216,6 +230,8 @@ def screen(state):
 
 def control_receipt(state, label, expected_stage, *, hero_id=None, allow_offscreen=False):
     """Unique active text -> click ancestor -> code-qualified clipped rectangle."""
+    if screen(state) == 'DRAFT_WAIT':
+        raise ValueError('DRAFT_WAIT: read-only transition; no control receipt')
     if screen(state) != expected_stage:
         raise ValueError(f'{expected_stage}: unexpected native screen {screen(state)}')
     age = time.monotonic() - state['host_read_started']

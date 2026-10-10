@@ -16,6 +16,184 @@ does **not** close the full mission; every unsupported kit/mechanic stays on
 the fidelity backlog. If any release gate is red, Day 7 reports an incomplete
 candidate, not a renamed success.
 
+## Secondary-desktop preflight — 2026-10-10 rev8
+
+Dispatch `run-1791620143357-c48265d8` stops **BLOCKED (REPLAN)**: the prescribed
+desktop2 GUID is absent in both registry and read-only COM enumeration;
+desktop1 remains active. No emulator or local stack was started, and no
+desktop/window mutation occurred. Verdict NOT QUALIFIED at SETUP preflight,
+not a conclusion that Windows cannot move the owned window. An existing
+operator-supplied secondary target is the smallest missing prerequisite.
+The 120-second client measurement, gestures, WORLD walk, Live2/Live3 and
+conditional driver option are UNRUN. Existing rev7 offline results below are
+historical; this documentation-only round does not alter their tested code.
+The cold-launch contract now explicitly allows one same-PID guest HOME→return
+recovery, followed by >=3 ready samples, without host activation.
+See [rev8 evidence and boundaries](solo-sandbox-scenarios.md#rev8-secondary-desktop-preflight-blocked-target-desktop-absent).
+Affected client187 and workflow44 checks PASS on unchanged implementation;
+full/headless/deadline gates are not repeated for this documentation-only
+preflight. Both emulator instances remain stopped; four owned hashes match.
+
+## Shared-desktop execution — 2026-10-10 rev7
+
+**Live2 SETUP/BLOCKED before Frida/input; Live3 UNRUN.** Dispatch
+`run-1791617397628-ef2869d3` preserves the rev6 worktree. No host foreground
+activation, window movement or operator-process intervention is allowed.
+`qualify_owned_ldplayer` replaces the activation helper; executable/PID/hwnd
+must match and the window must not be minimized. Only one
+`ShowWindow(SW_SHOWNOACTIVATE)` restore per input lease is permitted. A foreign
+foreground is informational, not a failure. Guest Java focus/unpaused/
+initialized state, native Resume, fresh selected-control/ancestry pairs,
+transition/acceptance checks and the shared input lock remain mandatory.
+
+Both emulators launched with nonactivating startup settings; the foreground
+watch observed25 changes/initial owners and never either owned emulator.
+Both frameworks met boot_completed=1 plus a >=60-second no-new-ANR/no-new-
+Force-stopping window, within the600-second bound. A's one cold launch returned,
+but47 samples supplied no native Resume - Post; initialization stayed UNKNOWN.
+B's framework qualified, but its game launch was UNRUN because A never reached
+draft. Zero Frida attaches/gestures: nonforeground PLAY consumption is UNRUN,
+not inferred from host/guest focus. No background-suspension or unconsumed-tap
+REPLAN condition was observed. See [measurements and limits](solo-sandbox-scenarios.md#current-rev7-desktop-independent-entry-pre-attach-native-readiness-blocks-live2).
+
+Here **X** =
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791617397628-ef2869d3/`.
+The emulators and owned stack are stopped; Frida was never started. Both full
+guest baseline comparisons and four owned runtime hashes match.
+
+| Command (`.venv/Scripts/python.exe -B`; unit rows use `Tools/run_checks.py`) | Result |
+|---|---|
+| `--suite client --output <X/client-02>` | 187 PASS |
+| `--tests server.test.test_verification_support --output <X/host-readiness-01>` | 11 PASS |
+| `--suite workflow --output <X/final-workflow>` | 44 PASS |
+| `--suite transport --output <X/final-transport>` | 39 PASS |
+| `--suite smoke --output <X/final-smoke>` | 73 PASS /1 reviewed missing-owned-input skip |
+| `--tests server.test.test_multiclient server.test.test_platform_fsm server.test.test_platform_identity --output <X/final-platform>` | 36 PASS |
+| `--suite all --output <X/final-all>` | 1538 PASS /28 reviewed skips (1566 run) |
+| `Tools/run_scenarios.py --mode headless --scenario all --output <X/final-headless>` | 7 exact independent pairs PASS; reference UNAVAILABLE |
+| `Tools/verify_sandbox.py --output <X/final-verify>` | PASS: exact2×960 s; all38,400 ticks <50 ms |
+
+Full discovery's28 skips match rev6:27 missing owned inputs and one Windows
+symlink-privilege case, normalizing only the random test-directory name. All
+seven headless pairs match event/state/checkpoint bytes. Independent reference
+remains UNAVAILABLE. All six final unit manifests (255 files each), the
+headless source pin and both verifier source manifests match current source.
+The earlier focused host-readiness checks are also covered by final workflow44.
+
+Final checks run sequentially after emulator shutdown, with copied owned
+`HALCYON_STACK_DIR=<X/test-runtime>` and pinned native dependencies. The legacy
+lane is covered by full discovery, not separately repeated. The verifier starts
+only after sampled total CPU stays <=20% for60 seconds; wait <=1800 seconds,
+otherwise UNRUN(unqualified host), preserving rev6's FAIL. Its50 ms threshold,
+process priority and timing/CPU measurement method remain unchanged.
+
+**Current verifier PASS after qualified pre-run CPU.** The poll collected77
+samples over about425 seconds. The final12 samples were
+`9,7,3,9,13,11,14,3,4,8,19,11` percent, qualifying60.734976 seconds <=20%.
+Only then did the one default verifier invocation start. Both960-second runs
+have19,200 ticks, exact stream/state/checkpoints, full-duration coverage and
+zero ticks over50 ms. Historical rev6's non-qualified-host FAIL is retained,
+not erased or attributed to another process. No operator process was stopped.
+
+| Maximum tick row | Simulation time | Wall / thread CPU (ms) | Dominant wall phase | Recorded classification |
+|---|---|---|---|---|
+| seed11, tick19031 | 951.60 s | 21.1525 /31.25 | wave19.0716 ms | CPU_WORK |
+| seed7919, tick17366 | 868.35 s | 33.1944 /31.25 | wave28.9917 ms | CPU_WORK |
+
+Thread CPU is Windows-quantized, including samples above wall time; the
+classification and phase names are diagnostic labels, not precise causal
+profiles. `tick-attribution.json` retains all20 slow rows per run and the full
+phase/CPU clock limitations. `host-cpu-qualification{,-result}.json[l]` retains
+the bounded wait and qualification; both worker stderr logs are empty.
+`final-source-review.json` retains manifest checks, skip review and unchanged
+owned hashes. Live preparation's lifecycle/window helpers match final source;
+the later entry receipt/freshness self-review edits were only mock-tested,
+since this live run never attached or invoked the entry driver.
+
+
+Self-review keeps unknown consumption UNKNOWN, not an explicit rejection;
+background PLAY's native MODE proof is recorded separately from the later
+ordinary joinLobby acceptance. A missing transition stops for REPLAN without
+repeating PLAY. The receipt-age check now follows the host path/PID recheck,
+so that check cannot hide a stale native receipt. Tests also assert no calls to
+activation/movement APIs, unrestorable/minimized and missing/wrong windows,
+foreign foreground acceptance, shared input serialization, framework resets on
+new ANR/force-stop, and bounded CPU qualification including sampler failures.
+No gameplay/server implementation changed. No commit or image/video work.
+
+## Idle-desktop rerun — 2026-10-10 rev6
+
+**Live2 SETUP/BLOCKED; Live3 UNRUN; verifier deadline FAIL.**
+Accepted rev4 Live1 is retained.
+Dispatch `run-1791614100226-840afe49` starts at committed `8f5fdd6`.
+A's first attempt stopped on an unrecognized waiting-roster transition. Passive
+reads supplied a narrow read-only `DRAFT_WAIT` classification; it grants no
+control receipt and is awaited only after the bound server draft opener.
+The second attempt reached server-echoed Skye selection and held before LOCK IN.
+Only then was B booted; its activity-start transport timed out amid Android
+framework ANRs, before any game PID/Frida attach/gesture. A's180-second
+admission guard expired with no LOCK IN. Later server pick-timeout1006/1132
+is not acceptance. No foreground-loss failure or background REPLAN trigger.
+See [bindings, timing, partial background evidence and cleanup](solo-sandbox-scenarios.md#earlier-rev6-a-reaches-the-draft-hold-b-framework-startup-blocks-live2).
+
+Here **W** =
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791614100226-840afe49/`.
+Both emulators, stack and Frida are stopped; both full guest baseline comparisons
+and four owned runtime hashes pass. No gameplay/server implementation changed.
+Only `Tools/native_ui.py`, `Tools/nonvisual_entry.py`, their entry tests and these
+three status leaves changed. No commits or image/video work.
+
+| Command (`python -B`; unit rows use `Tools/run_checks.py`) | Result |
+|---|---|
+| `--suite client --output <W/client-02>` | 175 PASS |
+| `--suite smoke --output <W/final-smoke>` | 73 PASS /1 reviewed missing-owned-capture skip |
+| `--suite workflow --output <W/final-workflow-02>` | 40 PASS |
+| `--suite transport --output <W/final-transport>` | 39 PASS |
+| `--tests server.test.test_multiclient server.test.test_platform_fsm server.test.test_platform_identity --output <W/final-platform>` | 36 PASS |
+| `--suite all --output <W/final-all-02>` | 1522 PASS /28 reviewed skips (1550 run) |
+| `Tools/run_scenarios.py --mode headless --scenario all --output <W/final-headless-02>` | 7 exact independent pairs PASS; reference UNAVAILABLE |
+| `Tools/verify_sandbox.py --output <W/final-verify-02>` | Exact2×960 s; deadline FAIL (15 ticks >50 ms); idle-host condition unqualified |
+
+Workflow/freeze use `.venv/Scripts/python.exe` with pinned Unicorn2.1.4;
+`HALCYON_STACK_DIR=<W/test-runtime>` uses copied owned inputs. The first workflow
+used system Python and skipped the unavailable optional native dependency;
+the associated incomplete full run was stopped, not accepted. No skip was
+waived: workflow and full discovery are rerun in the qualified environment.
+The earlier unit-fixture recursion was repaired by capturing the original
+bound method before patching; SETUP/zero-input assertions remain intact.
+The legacy lane is included in full discovery, not separately repeated.
+
+All six final unit manifests match current source (255 files each). The28
+reviewed skips match rev5:27 missing owned inputs and one Windows symlink
+privilege case, normalizing only the random test-directory name. Seven
+headless pairs are byte-exact. The one default verifier invocation matches
+stream/state/checkpoints across38,400 ticks with full-duration coverage and
+unchanged simulation source versus rev5. **Its deadline gate fails:** run1 has
+15 ticks over50 ms; run2 has0. No threshold change, waiver or rerun.
+
+| Maximum tick row | Simulation time | Wall / thread CPU (ms) | Dominant wall phase | Classification |
+|---|---|---|---|---|
+| seed11, tick5672 | 283.65 s | 167.8896 /15.625 | wave125.9492 ms; heroes_effects41.8735 ms | HOST_OR_SCHEDULER_STALL_INFERRED |
+| seed7919, tick19136 | 956.85 s | 31.7241 /15.625 | wave28.6405 ms | MIXED_OR_CPU_CLOCK_QUANTIZED |
+
+Pre-verifier total CPU samples were40/34/54%, after the10-second pause and with
+both emulators stopped: the requested **idle-host condition was not achieved**.
+A during-run process sample also records a busy separate Bun process, with no
+this-run/client-bridge/project command marker; it was not stopped. These are
+load observations, not proof of the cause of any tick. Windows thread CPU is
+quantized; phase names identify measured intervals, not a function-level cause.
+`tick-attribution.json` retains all20 slow rows per run, complete phase/CPU
+fields, source equality and clock limitations. `host-before-verifier.json`,
+`host-during-verifier-cpu.json` and `high-cpu-process-provenance.json` retain the
+host observations. A genuinely idle-host deadline qualification remains open.
+
+`final-source-review.json` confirms all final unit manifests and both simulation
+pins match current source. All four owned hashes remain unchanged after freeze;
+`emulators-after-freeze.txt` / `live-processes-after-freeze.json` confirm stopped
+runtime. No commit. Next prerequisites: healthy LDPlayer1 Android startup for
+Live2, and a quiet host interval before the next timing rerun.
+Independent reference remains UNAVAILABLE; client/fidelity boundaries remain.
+
 ## Host-input ownership execution — 2026-10-10 rev5
 
 **Accepted Live1 retained; Live2 ordinary SETUP/BLOCKED; Live3 UNRUN.**
@@ -34,7 +212,7 @@ lease. No guessed controls, second PLAY, force-stop cycles or focus bypass.
 A never reached draft, so reciprocal A/B background liveness, dual admission/HUD
 and movement isolation remain unverified. A desktop interval without external
 foreground changes is needed; the cause of Chrome's activation is not established.
-See [rev5 receipts/readiness/limits](solo-sandbox-scenarios.md#current-rev5-ownership-guarded-external-foreground-loss-blocks-live2).
+See [rev5 receipts/readiness/limits](solo-sandbox-scenarios.md#earlier-rev5-ownership-guarded-external-foreground-loss-blocks-live2).
 
 Evidence **V** =
 `C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791609724221-29dd246d/`.

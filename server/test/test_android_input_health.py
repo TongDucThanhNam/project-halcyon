@@ -1,4 +1,8 @@
 import unittest
+import ctypes
+from ctypes import wintypes
+from pathlib import Path
+import tempfile
 from unittest.mock import Mock, patch
 
 from Tools.android_input_health import native_input_lifecycle
@@ -72,6 +76,107 @@ class LaunchReadinessTests(unittest.TestCase):
         with patch.object(health.time, 'monotonic', side_effect=lambda: clock[0]), \
                 patch.object(health.time, 'sleep', side_effect=lambda gap: clock.__setitem__(0, clock[0]+gap)):
             self.assertFalse(health.wait_launch_ready(adb, after_guest_wall=5, timeout=4)['ready'])
+
+
+class OwnedWindowTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.exe = Path(self.temp)/'dnplayer.exe'
+        self.exe.touch()
+        self.user, self.kernel = Mock(), Mock()
+        self.user.EnumWindows.side_effect = lambda visit, _: visit(10, 0)
+        self.user.GetClassNameW.side_effect = lambda hwnd, buf, count: setattr(buf, 'value', 'LDPlayerMainFrame' if hwnd == 10 else 'OtherApp') or 1
+        def pid(hwnd, target):
+            if target is not None:
+                ctypes.cast(target, ctypes.POINTER(wintypes.DWORD))[0] = 100 if hwnd == 10 else 200
+            return 1
+        self.user.GetWindowThreadProcessId.side_effect = pid
+        self.user.GetForegroundWindow.return_value = 20
+        self.user.IsIconic.return_value = False
+        self.user.IsWindow.return_value = True
+        self.kernel.OpenProcess.side_effect = lambda access, inherit, pid: pid
+        self.kernel.QueryFullProcessImageNameW.side_effect = lambda handle, flags, buf, size: setattr(buf, 'value', str(self.exe) if handle == 100 else 'other.exe') or 1
+        self.enterContext(patch.object(ctypes, 'WinDLL', side_effect=lambda name, **kw: self.user if name == 'user32' else self.kernel))
+        for name in ('SetForegroundWindow', 'BringWindowToTop', 'AttachThreadInput', 'SetFocus', 'MoveWindow', 'SetWindowPos'):
+            getattr(self.user, name).side_effect = AssertionError('forbidden activation/movement API')
+        self.addCleanup(self.assert_no_activation)
+
+    def assert_no_activation(self):
+        for name in ('SetForegroundWindow', 'BringWindowToTop', 'AttachThreadInput', 'SetFocus', 'MoveWindow', 'SetWindowPos'):
+            getattr(self.user, name).assert_not_called()
+
+    def test_other_app_or_peer_foreground_is_information_only(self):
+        for foreground in (20, 30):
+            self.user.GetForegroundWindow.return_value = foreground
+            state = health.qualify_owned_ldplayer(self.exe, process_id=100)
+            self.assertEqual(state['after_foreground']['hwnd'], foreground)
+            self.assertEqual(state['after_foreground']['pid'], 200)
+            health.require_owned_window(state)
+        self.user.ShowWindow.assert_not_called()
+
+    def test_minimized_restore_is_once_nonactivating_and_rechecked(self):
+        self.user.IsIconic.side_effect = [True, False]
+        self.assertTrue(health.qualify_owned_ldplayer(self.exe, process_id=100)['restore_attempted'])
+        self.user.ShowWindow.assert_called_once_with(10, 4)
+
+    def test_unrestorable_or_changed_window_is_not_qualified(self):
+        self.user.IsIconic.return_value = True
+        with self.assertRaisesRegex(ValueError, 'minimized'):
+            health.qualify_owned_ldplayer(self.exe, process_id=100)
+        self.user.ShowWindow.assert_called_once_with(10, 4)
+        self.user.ShowWindow.reset_mock()
+        with self.assertRaisesRegex(ValueError, 'minimized'):
+            health.require_owned_window({'executable': self.exe, 'pid': 100, 'hwnd': 10})
+        self.user.ShowWindow.assert_not_called()
+        self.user.IsIconic.return_value = False
+        with self.assertRaisesRegex(ValueError, 'window changed'):
+            health.require_owned_window({'executable': self.exe, 'pid': 100, 'hwnd': 11})
+
+    def test_wrong_pid_path_or_missing_window_is_refused(self):
+        with self.assertRaisesRegex(RuntimeError, 'absent or ambiguous'):
+            health.qualify_owned_ldplayer(self.exe, process_id=101)
+        other = Path(self.temp)/'other.exe'
+        other.touch()
+        with self.assertRaisesRegex(RuntimeError, 'absent or ambiguous'):
+            health.qualify_owned_ldplayer(other, process_id=100)
+        self.user.IsWindow.return_value = False
+        with self.assertRaisesRegex(ValueError, 'absent/changed'):
+            health.qualify_owned_ldplayer(self.exe, process_id=100)
+        self.user.ShowWindow.assert_not_called()
+
+
+class FrameworkReadinessTests(unittest.TestCase):
+    def run_wait(self, signal, boot=lambda elapsed: '1', timeout=120):
+        clock, rows, adb = [0.0], [], Mock()
+        def shell(command, **kwargs):
+            return boot(clock[0]) if command.startswith('getprop') else signal(clock[0])
+        adb.shell.side_effect = shell
+        with patch.object(health.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(health.time, 'sleep', side_effect=lambda gap: clock.__setitem__(0, clock[0]+gap)):
+            result = health.wait_framework_ready(adb, timeout=timeout, record=rows.append)
+        self.assertTrue(all('am start' not in call.args[0] for call in adb.shell.call_args_list))
+        return result, clock[0]
+
+    def test_old_records_are_retained_and_full_quiet_interval_required(self):
+        result, elapsed = self.run_wait(lambda _: '1.0 ActivityManager: ANR in historical')
+        self.assertTrue(result['ready'])
+        self.assertEqual(elapsed, 65)
+        self.assertEqual(result['observations'][0]['new_signals'], ['1.0 ActivityManager: ANR in historical'])
+
+    def test_new_anr_or_force_stop_resets_quiet_window(self):
+        for marker in ('ANR in', 'Force stopping'):
+            result, elapsed = self.run_wait(lambda t: '' if t < 40 else f'40.0 {marker} owned')
+            self.assertTrue(result['ready'])
+            self.assertEqual(elapsed, 105)
+
+    def test_boot_not_complete_and_continuous_anrs_expire_with_evidence(self):
+        for signal, boot in ((lambda t: f'{t} ANR in system', lambda t: '1'),
+                             (lambda t: '', lambda t: '0')):
+            result, elapsed = self.run_wait(signal, boot, timeout=60)
+            self.assertFalse(result['ready'])
+            self.assertEqual(elapsed, 60)
+            self.assertEqual(result['bound_s'], 60)
+            self.assertTrue(result['observations'])
 
 
 if __name__=='__main__':

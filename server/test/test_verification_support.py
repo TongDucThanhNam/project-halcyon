@@ -109,5 +109,41 @@ class TickAttributionTests(unittest.TestCase):
         self.assertEqual(verify_sandbox.DEADLINE_MS, 50)
 
 
+class SharedHostReadinessTests(unittest.TestCase):
+    def run_wait(self, sample, timeout=1800):
+        clock, rows = [0.0], []
+        with patch.object(support.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(support.time, 'sleep', side_effect=lambda gap: clock.__setitem__(0, clock[0]+gap)):
+            result = support.wait_host_cpu_ready(lambda bound: sample(clock[0]), timeout=timeout, record=rows.append)
+        self.assertEqual(result['observations'], rows)
+        return result, clock[0]
+
+    def test_full_minute_at_or_below20_is_required(self):
+        result, elapsed = self.run_wait(lambda t: {'PercentProcessorTime': 20})
+        self.assertTrue(result['ready'])
+        self.assertEqual(elapsed, 60)
+
+    def test_busy_sample_resets_quiet_interval_without_failing_workload(self):
+        result, elapsed = self.run_wait(lambda t: {'PercentProcessorTime': 21 if t == 55 else 10})
+        self.assertTrue(result['ready'])
+        self.assertEqual(elapsed, 120)
+        self.assertEqual(result['observations'][11]['quiet_s'], 0)
+
+    def test_busy_host_stops_wait_at30minutes_without_qualification(self):
+        result, elapsed = self.run_wait(lambda t: {'PercentProcessorTime': 21})
+        self.assertFalse(result['ready'])
+        self.assertEqual(elapsed, 1800)
+        self.assertEqual(result['bound_s'], 1800)
+
+    def test_missing_nonfinite_or_failed_measurement_cannot_qualify(self):
+        def failed(t):
+            raise RuntimeError('sampler unavailable')
+        for sample in (lambda t: {}, lambda t: {'PercentProcessorTime': float('nan')}, failed):
+            result, elapsed = self.run_wait(sample, timeout=60)
+            self.assertFalse(result['ready'])
+            self.assertEqual(elapsed, 60)
+            self.assertTrue(all('error' in row for row in result['observations']))
+
+
 if __name__ == '__main__':
     unittest.main()

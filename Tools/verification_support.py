@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import time
+import math
 
 ROOT = Path(__file__).resolve().parents[1]
 REPARSE_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -70,4 +72,41 @@ def owned_input_environment() -> dict[str, str]:
 def runtime_switches() -> dict[str, str | None]:
     """Record explicit experimental configuration, never credentials or tokens."""
     return {name: os.environ.get(name) for name in RUNTIME_SWITCHES}
+
+
+def wait_host_cpu_ready(sample, *, timeout=1800, record=lambda row: None):
+    """Observe <=20% CPU for60s; never manipulate shared-host workloads.
+
+    The injected sampler retains the existing measurement method and accepts
+    a remaining-time bound. Invalid/missing samples break the quiet interval.
+    """
+    if not 60 <= timeout <= 1800:
+        raise ValueError('CPU readiness wait must be between60 and1800seconds')
+    started = time.monotonic()
+    deadline, quiet_since, observations = started+timeout, None, []
+    while time.monotonic() < deadline:
+        row = {'host_wall': time.time(), 'elapsed_s': time.monotonic()-started}
+        try:
+            row['sample'] = sample(min(15, deadline-time.monotonic()))
+            percent = float(row['sample']['PercentProcessorTime'])
+            if not math.isfinite(percent) or not 0 <= percent <= 100:
+                raise ValueError('invalid total CPU percentage')
+            now = time.monotonic()
+            if percent > 20:
+                quiet_since = None
+            elif quiet_since is None:
+                quiet_since = now
+            row['quiet_s'] = 0 if quiet_since is None else now-quiet_since
+            row['ready'] = row['quiet_s'] >= 60 and now <= deadline
+        except Exception as exc:
+            quiet_since = None
+            row.update(ready=False, error=str(exc), quiet_s=0)
+        observations.append(row)
+        record(row)
+        if row['ready']:
+            return {'ready': True, 'bound_s': timeout, 'ceiling_percent': 20,
+                    'quiet_required_s': 60, 'observations': observations}
+        time.sleep(max(0, min(5, deadline-time.monotonic())))
+    return {'ready': False, 'bound_s': timeout, 'ceiling_percent': 20,
+            'quiet_required_s': 60, 'observations': observations}
 
