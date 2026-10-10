@@ -2016,6 +2016,10 @@ class MatchServer:
         finally:
             if self.session is not None:
                 self.session.remove_client(conn)
+                if self._trace_path is not None:
+                    with self._trace_lock, open(self._trace_path, "a", encoding="ascii") as output:
+                        output.write(json.dumps({"time": time.time(), "direction": "disconnect",
+                            "connection": id(conn), "opcode": 1000, "payload": ""}) + "\n")
                 # NOTE: a zero-client WORLD is deliberately left running —
                 # the client's world-entry dance closes the draft conn before
                 # the world conn opens (live 2026-09-07 07:02:39→47), and the
@@ -2070,8 +2074,9 @@ class MatchServer:
             return  # consumed, no reply (§15.8: tick ≈513/s rising)
         if opcode == wire.OP.PLAYER_UUID:
             self.session_uuid = payload.split(b"\x00", 1)[0].decode("ascii", "replace")
-            self.log(f"[match] join: session uuid {self.session_uuid}")
-            self._serve_join(conn)
+            token = payload.split(b"\x00", 1)[0].decode("ascii", "replace")
+            self.log(f"[match] join: identity {identity_from_token(token)}")
+            self._serve_join(conn, session_uuid=token)
             return
         if opcode in (wire.OP.JOIN_1112, wire.OP.JOIN_1118, wire.OP.BUILD_LOCK,
                       wire.OP.LOCK_COMMIT, wire.OP.JOIN_1131, wire.OP.SHOP_OPEN,
@@ -2088,11 +2093,11 @@ class MatchServer:
         detail = f" payload={payload.hex()}" if 1000 < opcode < 1110 and len(payload) <= 22 else ""
         self.log(f"[match] c2s op={opcode} ({len(payload)} B){detail}")
 
-    def _serve_join(self, conn):
+    def _serve_join(self, conn, *, session_uuid=None):
         """Present unpicked slots; 1118 comes from the client, not this burst."""
         with self._session_lock:
             send = self._sender(conn)
-            ident = identity_from_token(self.session_uuid)
+            ident = identity_from_token(self.session_uuid if session_uuid is None else session_uuid)
             if self.session is None or not self.session.is_alive():
                 players = roster.default_solo_bots(ident, self.match_id)
                 self.session = SnapshotStream(conn, players, self.match_id, send, self.log)
@@ -2111,6 +2116,14 @@ class MatchServer:
             else:
                 self.session.add_client(conn, ident, send)
                 self._streams_by_conn[conn] = self.session
+            if self._trace_path is not None:
+                player = self.session.clients[conn][0]
+                record = {"time": time.time(), "direction": "identity", "opcode": 1000,
+                          "payload": "", "connection": id(conn), "identity": ident,
+                          "eid": player.eid, "slot": player.slot, "team": player.team,
+                          "match_id": self.match_id, "phase": self.session.phase}
+                with self._trace_lock, open(self._trace_path, "a", encoding="ascii") as output:
+                    output.write(json.dumps(record, separators=(",", ":")) + "\n")
 
     def _sender(self, conn):
         def send(opcode, payload):

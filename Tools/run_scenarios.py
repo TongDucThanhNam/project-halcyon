@@ -122,6 +122,7 @@ ISOLATED_ENVIRONMENT = (
 # runtime imports only snapshot files (script path and sys.path both resolve
 # inside the snapshot) and the worker asserts that before simulating.
 PINNED_TOOLS = ("Tools/run_scenarios.py", "Tools/scenario_client.py",
+                "Tools/nonvisual_entry.py", "Tools/native_ui.py", "Tools/Teardown/client_input_state.js",
                 "Tools/verification_support.py",
                 "Tools/verify_sandbox.py", "Tools/classic_client.py",
                 "Tools/sandbox_qa.py", "Tools/input_bridge.py", "Tools/android_input_health.py",

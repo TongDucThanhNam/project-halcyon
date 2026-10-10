@@ -91,6 +91,9 @@ def main(argv=None) -> int:
         cmd += ["--match-host", args.match_host]
 
     env = dict(os.environ)
+    # Parameterless update/exitLobby RPCs cannot carry a guest token. Give
+    # the primary device the same explicit listener identity as the second.
+    env['HALCYON_PRIMARY_DEVICE_TAG'] = args.serial
     if args.device_serial:
         # Tag = device serial → identity survives port drift across restarts.
         env["HALCYON_DEVICE_PORTS"] = f"{args.device_host_https}={args.device_serial}"

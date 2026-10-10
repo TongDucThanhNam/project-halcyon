@@ -1,5 +1,132 @@
 # Current implementation and validation status
 
+## Entry checkpoint — 2026-10-10
+
+**Current rev5: Live2 ordinary SETUP/BLOCKED; accepted rev4 Live1 retained.**
+Dispatch `run-1791609724221-29dd246d` implements shared host-input ownership
+receipts, pre/post-gesture focus checks and measured pre-attach readiness.
+A passed the readiness guard and sent one qualified PLAY, then Chrome gained
+foreground; the new guard stopped input and released the lock. B never booted.
+The cause of that external focus change is unknown; a desktop interval without
+external foreground changes is needed. No dual draft/HUD, reciprocal background
+liveness or movement isolation was qualified. This is not a gameplay regression
+or a triggered background-suspension REPLAN. All native/rev4 leaf guards remain.
+
+Final-source checks: client172, legacy291, workflow40, transport39 and platform36
+PASS; smoke73 PASS/1 reviewed skip. Full discovery: **1519 executed PASS /28
+reviewed skips**. Seven exact headless pairs and two960-second verifier runs
+PASS, all38,400 ticks below50 ms (max27.3683/49.9362 ms). Current source matches
+all final unit manifests and both simulation pins; independent reference remains
+UNAVAILABLE. Offline checks do not close the live acceptance gaps.
+Both emulators, Frida and stack stopped; A's full guest baseline restored and
+four owned runtime inputs unchanged. See [rev5 evidence and scope](solo-sandbox-scenarios.md#current-rev5-ownership-guarded-external-foreground-loss-blocks-live2)
+and [current check table](one-week-acceleration.md#host-input-ownership-execution--2026-10-10-rev5).
+No image/video work, gameplay changes or commits.
+
+### Earlier rev4 accepted single-client result
+
+**Earlier rev4: Live1 single-client WORLD PASS; Live2 SETUP/BLOCKED.** Dispatch
+`run-1791605229771-8926354d` implements the authorized strict-descendant,
+eventless/textless-leaf flags exception, with exact `0x1C` and input-bit guards.
+Every permitted difference is recorded as UNCLASSIFIED, never inferred opacity.
+One cold-menu run qualified Skye selection, LOCK IN (1123/native LOCKED), full
+load/WORLD handoff and native HUD. Two-client work stopped at host focus and
+repeated Android process-startup preparation failures, before dual draft/HUD.
+This is an ordinary bounded setup blocker, **not a rev4 REPLAN trigger**.
+Movement isolation is unrun and its extension remains undone; no Day3 or
+independent gameplay-fidelity acceptance is claimed.
+
+Final checks: client163, legacy-client291, workflow40, transport39, platform36
+PASS; smoke73 PASS/1 reviewed skip. Full discovery: **1510 executed PASS / 28
+reviewed skips**. Seven headless pairs and two960-second verifier simulations
+match exactly; every tick meets50 ms (max21.6946/20.6932 ms). Details are in the
+[rev4 check record](one-week-acceleration.md#leaf-flags-entry-execution--2026-10-10-rev4).
+Both guests' full routing/hosts/CA/firewall/reverse baseline comparisons pass;
+both emulators, Frida and stack are stopped, four owned runtime inputs unchanged.
+See [receipts, maxima, exact blockers and evidence](solo-sandbox-scenarios.md#earlier-rev4-single-client-world-passed-dual-setup-blocked).
+Further live work needs a measured stable cold-launch lifecycle and qualified
+dual-driver foreground ownership. Changes are uncommitted; no image/video work.
+
+### Earlier rev3 inference attempt
+
+**BLOCKED (REPLAN), rev3 inference contradicted.** Dispatch
+`run-1791604424986-0a47aa99` collected 60 complete, no-input DRAFT reads before
+enabling any animation exception. The corresponding eventless/textless LOCK IN
+descendant changed flag **bit0**, not only bits7–14: low bits `0x4C → 0x4D →
+0x4C`, cumulative change mask `0x7F81`. Rev3 rule3 explicitly requires replan
+for this evidence. No flag tolerance or LOCK IN gesture was applied.
+
+Focused observation-stage checks: **38 PASS**. Requested animation-rule tests,
+full suites and freeze gates are unrun after the mandated stop; the earlier
+green results below are historical. WORLD/HUD, two actual clients and movement
+isolation remain unverified. Both emulators/stack/Frida are stopped, complete
+guest baseline comparisons pass, and all four owned runtime files are unchanged.
+See [series, per-node changed fields/bits and measured maxima](solo-sandbox-scenarios.md#earlier-rev3-animation-inference-contradicted--blocked-replan)
+and [rev3 execution](one-week-acceleration.md#animated-descendant-inference--2026-10-10-rev3).
+
+### Earlier selected-control pair attempt (rev2)
+
+**SETUP/BLOCKED at LOCK IN; acceptance remains OPEN.** Dispatch
+`run-1791600566706-3174527e` implemented the revised control/ancestry/overlap
+pair contract with complete 4,096-budget reads and fully recorded outside
+differences. Two runs qualified menu entry, three measured Skye-list scrolls
+and server-echoed Skye selection. Neither sent LOCK IN: a protected descendant
+changed flags, including `76 → 204` at the final pre-gesture boundary. A bounded
+read-only follow-up qualified 3/20 pairs, so this is **not** the revised
+never-stable-ancestry replan condition. No flags or failed checks were dropped.
+WORLD/HUD, two actual clients and movement isolation remain unverified/unrun.
+
+Final-code checks: client **156 PASS**, legacy-client **291 PASS**, workflow
+**40 PASS**, transport **39 PASS**, smoke **73 PASS / 1 reviewed skip**, platform
+FSM/identity/multiclient **36 PASS**. Sequential freeze: **1,503 executed tests
+PASS / 28 reviewed skips**, seven exact headless pairs, and two exact 960-second
+verifier runs. Every tick met 50 ms (max **32.0046 / 20.7234 ms**); source pins
+match the final code. These offline passes do not close the live entry blocker.
+See [qualified-entry evidence](solo-sandbox-scenarios.md#opt-in-nonvisual-entry--2026-10-10)
+and [current execution/checks](one-week-acceleration.md#selected-control-entry-execution--2026-10-10).
+Both emulators/stack and owned Frida are stopped. All guest routing, firewall,
+hosts/CA and reverse-map baseline comparisons **PASS** in this run; classified
+Android UID10021/10015 policy rules were preserved. Four owned input hashes
+are unchanged. Changes remain uncommitted; no image/video work occurred.
+
+### Earlier full-tree equality attempt (superseded decision)
+
+**BLOCKED (REPLAN); acceptance remains OPEN.** Revised dispatch
+`run-1791599711016-5f09ca4c` raised only UI-mode traversal to 4,096 nodes and
+measured every completed read. Draft fits (maximum 1,210 visited / 678 active,
+71.510 ms), but full-tree equality fails during pre-input qualification and
+again in a bounded consecutive-read comparison (1,196 / 670 both reads).
+Zero draft gestures were sent. This triggers the revised stability replan;
+no mutation guard was weakened. Focused checks: **104 PASS**. WORLD/HUD,
+two actual clients, movement isolation and final all/headless/verifier gates
+remain unverified/unrun. See [entry evidence and subtree option](solo-sandbox-scenarios.md#opt-in-nonvisual-entry--2026-10-10)
+and [revised execution](one-week-acceleration.md#revised-entry-execution--2026-10-10).
+
+Both emulators and stack are stopped; four owned input hashes are unchanged.
+Our guest routing is restored, with no Halcyon-tagged rules remaining. Full
+IPv4/IPv6 baseline equality retains two classified Android-managed allowlist
+additions: UID10021 (media/download providers) and UID10015 (Google services).
+Hosts/CA/mounts/reverses match baseline; Android policy rules were not deleted.
+
+### Earlier attempt, before the UI-only budget revision
+
+The opt-in owner-independent
+nonvisual reader qualified four menu controls and reached a device-bound draft
+connection, but stable draft exceeds Decision 1's unchanged 1,024-node limit
+(two bounded reads: 1,024 visited / 546 active). No partial-tree acceptance or
+budget increase was used. WORLD/HUD, two actual clients and movement isolation
+remain unverified; final all/headless/verifier gates were not run after the
+replan stop. See [entry contract](solo-sandbox-scenarios.md#opt-in-nonvisual-entry--2026-10-10)
+and [measured results](one-week-acceleration.md#entry-execution-checkpoint--2026-10-10).
+
+Partial tool/platform changes and evidence are preserved, uncommitted. Both
+emulators and the local stack are stopped; four owned runtime inputs are
+hash-unchanged. Hosts/CA/mounts/reverses match baseline and no Halcyon firewall
+rules remain. Full IPv4/IPv6 baseline equality remains **failed** due to one
+preserved unrelated `bw_happy_box` UID10021 rule; cleanup is not reported as a
+blanket PASS. The October 9 results below remain historical, not final-source
+qualification of these changes.
+
 ## Execution checkpoint — 2026-10-09
 
 **Acceptance remains OPEN.** The [dated acceleration checkpoint](one-week-acceleration.md#execution-checkpoint--2026-10-09)
@@ -31,8 +158,9 @@ attempted. Guests were restored, both emulators/stack stopped, and original
 configuration hashes verified unchanged. Evidence and final sequential freeze
 gate locations: [execution results](one-week-acceleration.md#execution-results-and-final-source-gate-locations),
 root `run-1791564257036-9a4bad79` under the evidence directory above.
-Twelve tracked bytecode files and nine PNGs remain an operator hygiene decision;
-none is removed or opened. Complete faithful PvP, independent gameplay fidelity,
+The tracked-bytecode/PNG hygiene decision was resolved by `25db815`: twelve
+bytecode files were untracked and nine historical PNGs removed. No image review
+was performed. Complete faithful PvP, independent gameplay fidelity,
 long-run native movement/stability and six-actual-client delivery remain open.
 
 ## Retained migration measurements following the 2026-10-04 audit

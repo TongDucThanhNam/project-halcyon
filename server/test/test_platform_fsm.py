@@ -109,5 +109,26 @@ class TestFsm(unittest.TestCase):
         self.assertEqual(upd["host"], "192.168.1.99")
 
 
+    def test_device_join_and_exit_do_not_change_other_guests_update(self):
+        self._with_auto(True)
+        with mock.patch.object(local_stack, '_device_states', {}):
+            local_stack.fsm_on_rpc('joinLobby', self.path, client_key='device:A')
+            self.assertEqual(local_stack.client_update('device:A', {})['returnValue']['state'], 'playing')
+            self.assertEqual(local_stack.client_update('device:B', {})['returnValue'], {'state': 'menus'})
+            local_stack.fsm_on_rpc('joinLobby', self.path, client_key='device:B')
+            local_stack.fsm_on_rpc('exitLobby', self.path, client_key='device:A')
+            self.assertEqual(local_stack.client_update('device:A', {})['returnValue'], {'state': 'menus'})
+            self.assertEqual(local_stack.client_update('device:B', {})['returnValue']['state'], 'playing')
+            self.assertEqual(self._update()['port'], 9999)
+
+    def test_device_state_respects_explicit_fsm_disabled_configuration(self):
+        self._with_auto(False)
+        answer = {'code': 0, 'returnValue': {'state': 'spectating'}}
+        with mock.patch.object(local_stack, '_device_states', {}):
+            local_stack.fsm_on_rpc('joinLobby', self.path, client_key='device:A')
+            self.assertEqual(local_stack.client_update('device:A', answer), answer)
+            self.assertEqual(local_stack._device_states, {})
+
+
 if __name__ == "__main__":
     unittest.main()

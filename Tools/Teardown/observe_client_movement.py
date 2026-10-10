@@ -74,7 +74,11 @@ def mapped_base(maps):
     return next(iter(bases))
 
 
-def anchor_config(library):
+MENU_ANCHORS = ((0xe0e700, 0x4c), (0xe13458, 0x34), (0xe0d4e0, 0x68),
+                (0xe09b18, 0x60), (0xe08d20, 8), (0xe01c10, 0x10))
+
+
+def anchor_config(library, *, ui_only=False):
     data = Path(library).read_bytes()
     if hashlib.sha256(data).hexdigest() != BINARY_SHA256:
         raise ValueError('movement anchors require the pinned owned ARM64 library')
@@ -82,7 +86,7 @@ def anchor_config(library):
     size, count = struct.unpack_from('<HH', data, 54)
     segments = [struct.unpack_from('<IIQQQQQQ', data, phoff + i * size) for i in range(count)]
     anchors = []
-    for va, length in ANCHORS:
+    for va, length in ANCHORS + (MENU_ANCHORS if ui_only else ()):
         segment = next(s for s in segments if s[0] == 1 and s[3] <= va and va + length <= s[3] + s[5])
         offset = segment[2] + va - segment[3]
         anchors.append({'va': va, 'bytes': list(data[offset:offset + length])})
@@ -91,7 +95,7 @@ def anchor_config(library):
 
 class ClientMovementObserver:
     def __init__(self, adb, output, eid, *, endpoint='127.0.0.1:27042', library=DEFAULT_LIBRARY,
-                 period_ms=10, model_transform=False):
+                 period_ms=10, model_transform=False, ui_only=False):
         if not 5 <= period_ms <= 100:
             raise ValueError('sampling period must be 5..100 ms')
         self.adb, self.output, self.eid = adb, Path(output), eid
@@ -99,6 +103,11 @@ class ClientMovementObserver:
         if type(model_transform) is not bool:
             raise ValueError('model_transform must be a boolean')
         self.model_transform = model_transform
+        if type(ui_only) is not bool:
+            raise ValueError('ui_only must be a boolean')
+        if ui_only and (eid is not None or model_transform):
+            raise ValueError('UI-only observer cannot claim a gameplay owner/model')
+        self.ui_only = ui_only
         self.session = self.script = self.handle = None
         self.errors, self.clocks = [], []
         self.lock = threading.Lock()
@@ -211,8 +220,9 @@ class ClientMovementObserver:
         maps = self.adb.shell(f"su -c 'cat /proc/{pid}/maps'")
         base = mapped_base(maps)
         config = {'eid': self.eid, 'base': hex(base), 'period_ms': self.period_ms,
+                  'ui_only': self.ui_only,
                   'model_transform': self.model_transform,
-                  'anchors': anchor_config(self.library)}
+                  'anchors': anchor_config(self.library, ui_only=self.ui_only)}
         source = Path(__file__).with_name('client_movement_observer.js').read_text(encoding='utf-8')
         source = source.replace('__CONFIG__', json.dumps(config))
         self.handle = self.output.open('x', encoding='utf-8')
@@ -229,8 +239,12 @@ class ClientMovementObserver:
                 self.metadata.update(model_transform=True,
                     model_source='c58004 -> owner presentation interface -> 8ad524 -> d7cce0 model matrix',
                     limit='Logical entity plus owner-bound root model world matrix. Not bone pose, camera projection, or display-time/frame measurement.')
-            self.calibrate()
-            self.script.exports_sync.start()
+            if self.ui_only:
+                self.metadata.update(source='code-anchored native UI root and active controls',
+                                     limit='UI only; no gameplay owner or WORLD qualification.')
+            else:
+                self.calibrate()
+                self.script.exports_sync.start()
             return self.metadata
         except Exception:
             self.stop()
@@ -245,7 +259,8 @@ class ClientMovementObserver:
                     time.sleep(.005)
                 if self.samples != self.metadata['sampling']['sampled']:
                     self.errors.append('sample delivery count differs from sampler count')
-                self.calibrate()
+                if not self.ui_only:
+                    self.calibrate()
             except Exception as exc:
                 self.errors.append(repr(exc))
             try:

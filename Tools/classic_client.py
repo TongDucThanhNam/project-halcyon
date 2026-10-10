@@ -178,17 +178,12 @@ class ClassicMatchExercise:
         bound. A transient traversal failure is unknown, never an empty UI.
         Keep the bound unchanged and do not send/repeat any Android input.
         """
-        for attempt in range(20):
-            try:
-                return self.observer.ui_state()
-            except Exception as exc:
-                if not any(reason in str(exc) for reason in
-                           ('native UI cycle/node limit', 'native UI root changed')):
-                    raise
-                self.d.observations.setdefault('ui_read_gaps', []).append(
-                    {'at':time.time(), 'attempt':attempt, 'unknown':str(exc)})
-                self.require(attempt < 19, 'PRESENTATION', 'native UI tree did not settle; no input attempted')
-                time.sleep(.1)
+        from Tools.native_ui import fresh_ui_state
+        try:
+            return fresh_ui_state(self.observer,
+                self.d.observations.setdefault('ui_read_gaps', []).append)
+        except ValueError as exc:
+            self.require(False, 'PRESENTATION', str(exc))
 
     def upgrade(self, owner, slot):
         # The native Level Up panel can precede its enabled upgrade controls.

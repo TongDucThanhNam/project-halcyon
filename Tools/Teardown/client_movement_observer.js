@@ -13,6 +13,9 @@ function monotonicMs() {
     if (clockGettime(1, ts) !== 0) throw new Error('clock_gettime failed');
     return ts.readS64().toNumber() * 1000 + ts.add(8).readS64().toNumber() / 1e6;
 }
+// UI-only entry never touches the WORLD registry. Gameplay initialization and
+// its owner/navigation/lifetime qualification remain the same, inside this scope.
+function installGameplayObserver() {
 const manager = base.add(0x3114978).readPointer();
 const registry = manager.readPointer();
 const entityType = base.add(0x2b09220).readU32();
@@ -632,3 +635,103 @@ rpc.exports = {
     },
     stop() { if (timer !== null) clearInterval(timer); timer = null; flush(); return {sampled}; }
 };
+}
+
+// Read the identified virtual size accessors without executing translated ARM.
+// Unknown/dirty cached layouts remain unknown, never a fabricated zero size.
+function menuSize(p, seen = new Set()) {
+    if (p.isNull() || seen.has(p.toString()) || seen.size >= 64) return null;
+    seen.add(p.toString());
+    const method = p.readPointer().add(0x48).readPointer().sub(base).toString();
+    if (method === '0xe01c10') {
+        const size = base.add(0x2ad9da0).readPointer();
+        return [size.readFloat(), size.add(4).readFloat()];
+    }
+    if (method === '0xe13e54') return [p.add(0x90).readFloat(), p.add(0x94).readFloat()];
+    if (method === '0xe13458') return menuSize(p.add(0x20).readPointer(), seen);
+    if (method === '0xe0e700') {
+        const image = p.add(0xe0).readPointer(), binding = p.add(0xd0).readPointer();
+        if (image.isNull() || binding.isNull()) {
+            const zero = base.add(0x2ad9da0).readPointer();
+            return [zero.readFloat(), zero.add(4).readFloat()];
+        }
+        return [0, 1].map(i => {
+            const size = p.add(0x90+i*4).readFloat();
+            return size < 0 ? image.add(8+i*2).readU16() : size;
+        });
+    }
+    if (method === '0xe0d4e0') {
+        const text = p.add(0xd0);
+        if ((text.add(0x48).readU8() & 128) !== 0) return null;
+        const width = text.add(0x28).readFloat();
+        return [width > 0 ? width : text.add(0x3c).readFloat()-text.add(0x34).readFloat(),
+                text.add(0x40).readFloat()-text.add(0x38).readFloat()];
+    }
+    return null;
+}
+
+function menuTree() {
+    const started = monotonicMs();
+    const root = base.add(0x3110ce8).readPointer();
+    if (root.isNull()) throw Error('native UI root absent');
+    const pending = [root], seen = new Set(), nodes = [], labels = [];
+    while (pending.length) {
+        const p = pending.pop();
+        if (p.isNull()) continue;
+        const address = p.toString();
+        if (seen.has(address))
+            throw Error('native UI cycle/node limit: cycle; visited=' + seen.size +
+                        '; active=' + nodes.length + '; duration_ms=' + (monotonicMs()-started));
+        seen.add(address);
+        // UI-only budget revised by the operator on 2026-10-10. Reaching the
+        // bound is a refusal, never permission to use a partial draft tree.
+        // Gameplay traversal above retains its original 1024-node bound.
+        if (seen.size >= 4096)
+            throw Error('native UI cycle/node limit: node-limit; visited=' + seen.size +
+                        '; active=' + nodes.length + '; duration_ms=' + (monotonicMs()-started));
+        const next = p.add(0x30).readPointer(), flags = p.add(0x84).readU32();
+        pending.push(next);
+        if ((flags & 12) !== 12) continue;
+        const child = p.add(0x28).readPointer(), v = p.readPointer();
+        pending.push(child);
+        const relative = q => q.isNull() ? '0x0' : q.sub(base).toString();
+        const count = p.add(8).readU32(), events = [], eventBuffer = p.add(0x10).readPointer();
+        if (count > 64 || (count && eventBuffer.isNull())) throw Error('native UI event bound');
+        for (let i = 0; i < count; i++) {
+            const e = eventBuffer.add(i * 0x30);
+            events.push({type:e.add(0x28).readU32(),
+                words:Array.from({length:5}, (_, j) => e.add(j*8).readPointer().toString())});
+        }
+        const node = {address, flags, vtable:relative(v), parent:p.add(0x20).readPointer().toString(),
+            child:child.toString(), next:next.toString(), events,
+            bounds_method:relative(v.add(0x68).readPointer()),
+            local_bounds:relative(v.add(0x70).readPointer()), size_method:relative(v.add(0x48).readPointer()),
+            anchor:[0x50,0x54].map(o=>p.add(o).readFloat()),
+            origin:[0x68,0x6c].map(o=>p.add(o).readFloat()),
+            scale:[0x70,0x74].map(o=>p.add(o).readFloat()),
+            size:[0x90,0x94].map(o=>p.add(o).readFloat()), resolved_size:menuSize(p),
+            clip:[0,2,4,6].map(o=>p.add(0x7c+o).readS16())};
+        if (v.equals(base.add(0x2726530))) {
+            const length = p.add(0xd8).readU32(), buffer = p.add(0xe0).readPointer();
+            if (length > 4096 || (length && buffer.isNull())) throw Error('invalid native label');
+            node.text = length ? buffer.readUtf16String(length) : '';
+            if (length) labels.push(node.text);
+        }
+        nodes.push(node);
+    }
+    if (!base.add(0x3110ce8).readPointer().equals(root)) throw Error('native UI root changed');
+    const ended = monotonicMs();
+    return {root:root.toString(), guest_monotonic_ms:ended, nodes, labels,
+            traversal:{visited:seen.size, active:nodes.length, duration_ms:ended-started,
+                       node_limit:4096, complete:true, root_unchanged:true}};
+}
+
+if (cfg.ui_only === true) {
+    rpc.exports = {
+        qualify() { return {mode:'ui-only', base:base.toString(), ui:menuTree()}; },
+        uiState:menuTree,
+        stop() { return {sampled:0}; }
+    };
+} else {
+    installGameplayObserver();
+}

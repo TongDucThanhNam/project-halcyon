@@ -1,5 +1,425 @@
 # Repeatable scenario verification — pilot record
 
+## Opt-in nonvisual entry — 2026-10-10
+
+### Current rev5: ownership guarded; external foreground loss blocks Live2
+
+Dispatch `run-1791609724221-29dd246d` preserves accepted rev4 Live1 and its
+strict-leaf UNCLASSIFIED rule. **Live2 SETUP/BLOCKED, not REPLAN; Live3 UNRUN.**
+No two-client admission/HUD, reciprocal background-client liveness, movement
+isolation or remote native movement observation has been accepted.
+
+Entry now requires `nonvisual_entry.launch_guest_wall`: the owned guest's
+`date +%s.%N` sampled immediately before its launch, distinct from the host's
+`not_before` used for RPC/wire correlation. Before Frida attach, the existing
+entry path reads at least three ready samples, at least one second apart:
+exactly one unchanged PID, that PID's NuoActivityGame `state=RESUMED`, and its
+latest native lifecycle marker `Resume - Post` after launch. The pinned owned
+`NuoView$Renderer.executeState` Resume branch checks `isInitialized` before
+emitting either Resume marker (see `readiness-anchor.json`). An `init` log is
+**not** initialization completion. Missing initialized evidence is UNKNOWN,
+not proof that the renderer is uninitialized. Absent PID is sampled without
+masking other shell failures. No attach or gesture bypasses this guard.
+
+Both profiles must share the same run-scoped, external `input_lock` path.
+Each gesture acquires the bounded OS file lock, activates its own qualified
+PID/hwnd using the unchanged activation function/check, checks Java/native
+health, obtains/revalidates fresh control pairs, checks ownership/foreground,
+sends one gesture, rechecks foreground and guest health, and releases. The
+lock is not held for admission, loading, roster or countdown waits. Receipts
+retain driver/token, request/acquire/release times and waiting peers. Timeout,
+owner-token loss or foreground theft latches SETUP; no further gestures or
+refocus retries. Candidate and final native-pair rules remain unchanged.
+
+Here **V** is
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791609724221-29dd246d/`.
+A alone was cold-started once, with B never booted. `readiness-A-result.json`
+retains47 samples over the60-second bound: PID4292 became stable/resumed but
+native Resume was absent. One explicit Android HOME→owned-activity reactivation
+(no force-stop, Frida or touch) retained that PID and produced three qualified
+samples (`activity-reactivation-A.json`, `reactivated-readiness-A-result.json`).
+The driver repeated the pre-attach check successfully. Final-parser replay
+also confirms all three retained ready samples; that parser now requires the
+activity record header itself and rejects a Resume older than a later renderer
+initialization-start marker.
+
+`entry-A` sent **one** qualified PLAY gesture. Its lease acquired at
+1791610342.411210; the immediate pre-input foreground check at1791610343.631401
+qualified hwnd7211794/PID14928. At1791610344.488120, immediately after ADB returned,
+foreground was hwnd7866552. The driver stopped and released at1791610344.584553.
+`foreground-owner-diagnostic.json` identifies that hwnd as Chrome PID30324,
+not the stopped B emulator; what caused Chrome's activation is unknown. The
+post-gesture native transition was not qualified. No draft connection, LOCK IN
+or subsequent gesture occurred. This is additional external foreground loss,
+not evidence of a client defect and not proof of an inter-driver race in this
+attempt. The shared-lock negative guard worked; actual two-driver qualification
+remains unrun. A bounded desktop interval without external foreground changes
+is the next prerequisite; no browser process was stopped or window guard waived.
+
+`background-A-summary.json` retains59 passive Java/native samples. A remained
+initialized/unpaused with Java window_focus=true, focused=false and native
+Resume latest while Chrome was foreground. **Zero bound-connection samples**:
+this is not the requested B-foreground/A-bound-client measurement or its reverse.
+B was never started because A never reached the draft hold. Background suspend/
+connection-loss REPLAN conditions were therefore not tested or triggered.
+Measured MENU maximum:166 visited /83 active nodes /21.802272 ms; later stages
+unrun. Full input/lease/maxima summary: `entry-run-summary.json`.
+
+Cleanup: A's full guest IPv4/IPv6, hosts, CA contents/mounts and reverse maps
+match its baseline; Android-managed UID10021 media/download and UID10015 Google
+rules were preserved. Frida5142's exact `/data/local/tmp/fsrv -D` command was
+verified before stopping and removing the added27042 forward. Stack33972 and
+both emulators are stopped; B was untouched. Four owned runtime hashes match.
+The first cleanup identity assertion omitted the observed `-D` argument and
+refused; exact startup command matching then completed cleanup safely.
+See `c-emulator-5554-restoration-check.json`, `frida-cleanup.json`,
+`processes-final.json`, `emulators-final.txt`, `owned-after.json`.
+
+Final-source checks: client172 (including56 entry/lifecycle tests), legacy291,
+workflow40, transport39 and platform36 PASS; smoke73 PASS/1 reviewed skip.
+Full discovery:1519 executed PASS /28 reviewed skips (1547 run); the same27
+missing owned inputs and one Windows symlink privilege case as rev4. Seven
+headless scenarios pass exact independent-pair comparison. Two960-second
+verifier simulations match stream/state/checkpoints across38,400 ticks; every
+tick is below50 ms, maxima27.3683/49.9362 ms. This is local harness/determinism
+qualification, not Live2/Live3 or independent gameplay-fidelity acceptance;
+external reference remains UNAVAILABLE. All final check manifests and both
+simulation pins match current source (`final-source-review.json`). Both
+emulators remain off, no live runtime process remains, and all four owned input
+hashes match after freeze. No image/video work, gameplay changes or commits.
+
+### Earlier rev4: single-client WORLD passed; dual setup BLOCKED
+
+Dispatch `run-1791605229771-8926354d` withdraws the opacity inference and
+authorizes only a structural, **UNCLASSIFIED** leaf-flags exception. Across
+each complete candidate pair and the final pre-tap revalidation, the node must
+be a strict descendant of the selected control, not its label/control/ancestor,
+have `child == 0x0`, no text or events, and differ **only** in flags. All other
+fields (including structure, bounds, scale, methods and resolved size) remain
+identical. `flags & 0x1C` must be unchanged and `flags & 16` clear in both reads.
+Non-leaves and overlapping non-descendants remain strict. Each tolerated node
+retains its address, field, before/after, XOR and every changed bit in the
+receipt's `pairs[].tolerated_differences`; outside differences stay separate.
+The meaning of unclassified bits, and whether an eventless leaf participates
+in hit-testing, remain **unknown**. No opacity or animation semantics are
+assigned. A descendant `0x1C` change without input triggers immediate REPLAN;
+20 never-stable control/ancestry pairs still trigger the bounded REPLAN rule.
+An ordinary ancestor bit-1 change refuses its pair without being tolerated.
+
+**Live 1 PASS.** One cold-menu run used the existing `run_scenarios.py --mode
+client --scenario movement-walk` entry-only path. Four menu inputs, three
+measured Skye scrolls, Skye selection (1118), and one LOCK IN were followed by
+1123 acknowledgment, native LOCKED, 1119/1006/1132 finalization, client1134/1137,
+WORLD1011/ready echo, and qualified native HUD. No build/shop dismissal was
+needed. Device `emulator-5554` → listener9443 → guest
+`a8006997-b05f-5d1c-9d2c-fd4ffbbd13f0` → identity `devtag:8c30e46cce91` →
+connection `2290320937168` → EID1500/slot0/team1. LOCK IN's descendant
+`0x763862d01b50` changed flags `2892→844` (XOR2048, bit11) and at final
+revalidation `844→76` (XOR768, bits8–9); both qualified differences are retained.
+This is one instrumented local entry success, not gameplay fidelity acceptance.
+
+**Live 2 BLOCKED, not REPLAN; Live 3 UNRUN.** The first dual run stopped on
+host foreground qualification (A zero inputs; B PLAY only). Ten serialized
+focus-only switches, then ten with both native/Java observers, passed; the
+cause of the driver's focus refusal remains unclassified. API return values
+are now included in failed activation diagnostics; the guard is not relaxed.
+Two subsequent fresh preparation attempts stopped before driver entry because
+the game PID was absent (first B, then A). ActivityManager records a process
+spawned during force-stop teardown, killed for `remove task`, then `failed to
+attach`; the explicit launcher activity remained INITIALIZING/app-null. A
+two-second post-force-stop gap did not resolve both instances. The stage was
+stopped under the setup-attempt bound. No two-client draft admission, dual HUD
+or movement isolation is claimed; movement-isolation extension remains undone.
+Further live work needs a measured cold-launch/process-lifecycle guard and
+qualified dual-driver foreground ownership, not another blind launch or a
+weakened UI check.
+
+Evidence root **U**:
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791605229771-8926354d/`.
+`single-entry-01/entry-stages.jsonl`, `live1-summary.json`, and `single-profile-01.json`
+retain Live1 receipts, bindings and command profile; `entry-run-summary.json`
+aggregates stage maxima. Dual evidence: `dual-entry-01-{0,1}`, `dual-cold-start-03.json`,
+`dual-cold-start-04.json`, `dual2-process-diagnostic.json`, and
+`final-emulator-{5554,5556}-logcat.{bin,txt}`. The first combined log collection
+had a host decoding error; the binary-preserving UTF-8 recollection is retained,
+not a claim that the failed collection was complete. `focus-parallel-{0,1}.json`
+and `focus-instrumented-{0,1}.json` retain all bounded focus diagnostics.
+
+Live1 maxima (visited/active/ms; UI-only bound remains4,096, gameplay1,024):
+
+| Screen | Visited | Active | ms |
+|---|---:|---:|---:|
+| MENU | 169 | 86 | 6.981 |
+| MODE | 414 | 257 | 20.873 |
+| MAP | 271 | 156 | 11.872 |
+| DIFFICULTY | 319 | 191 | 13.318 |
+| MENU_TRANSITION | 274 | 162 | 11.110 |
+| DRAFT | 1210 | 678 | 115.063 |
+| LOCKED | 1258 | 726 | 53.040 |
+| LOADING | 684 | 493 | 63.155 |
+| HUD | 580 | 407 | 49.216 |
+
+Final-code client tests: **163 PASS**, including44 entry tests. Full discovery:
+1510 executed PASS/28 reviewed skips; seven exact headless pairs and two exact
+960-second verifier simulations, all ticks meeting50 ms. Full commands and
+qualifications are in [rev4 execution](one-week-acceleration.md#leaf-flags-entry-execution--2026-10-10-rev4).
+Both guest routing/firewall/hosts/CA/mount/reverse baselines pass exactly;
+both emulators, Frida and stack are stopped, owned inputs unchanged. The second
+guest lacked `fsrv`: the existing owned first-guest executable was copied and
+SHA-verified (no download); it remains installed but stopped. No images or commits.
+
+### Earlier rev3: animation inference contradicted — BLOCKED (REPLAN)
+
+Dispatch `run-1791604424986-0a47aa99` required a no-input DRAFT series before
+enabling the proposed `0x7F80` flag-animation exception. **No exception was
+enabled.** Sixty consecutive complete reads over **12.471 s** found the
+corresponding LOCK IN descendant at `0x7638650cc0d0`: vtable `0x27266f0`, native
+size 490×221, no text/events, and the same vtable/dimension/event-type ancestry
+as the prior `0x763866ffa290`. A second same-size descendant remained constant;
+the varying one had 35 distinct flag words, only the `flags` field changed,
+but its cumulative XOR mask was **`0x7F81`**, not a subset of `0x7F80`.
+
+Exact contradiction, zero-based read indices:
+
+| Pair | Flags before → after | Low bits before → after | XOR |
+|---|---|---|---|
+| 36 → 37 | `0x2B4C → 0x0B4D` | `0x4C → 0x4D` | `0x2001` |
+| 37 → 38 | `0x0B4D → 0x00CC` | `0x4D → 0x4C` | `0x0B81` |
+
+This directly triggers rev3 rule 3 (bits 0–6 changing without input). It does
+not prove what bit0 or bits7–14 mean; it disproves the proposed constant-low-bit
+premise for this observation series. LOCK IN and subsequent implementation/live
+work stopped for replan, without ignoring bits or retrying the input.
+
+Evidence root **T**:
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791604424986-0a47aa99/`.
+`draft-series-01.json` retains all 60 complete reads; the qualified observer's
+metadata retains the pinned library SHA and zero errors. Every varying node's
+fields, bit mask and before/after samples are in `draft-series-01-analysis.json`;
+`animation-inference-verdict.json` retains the exact low-bit transitions, and
+`animation-target-lineage.json` correlates the prior/current descendant.
+
+All 12 varying nodes (flag bits are the union of consecutive-read XORs):
+
+| Node | Changed fields | Changed flag bits |
+|---|---|---|
+| `0x7638650cc0d0` (LOCK IN descendant) | flags | 0, 7–14 |
+| `0x763874fb2200` | flags, scale | 0, 7–14 |
+| `0x7638650c3d40` | flags, origin, resolved_size | 0, 1 |
+| `0x7638650c3ea0` | flags, origin, resolved_size, size | 0 |
+| `0x7638650c3f58` | flags, origin, resolved_size | 0, 1 |
+| `0x763864c69200` | flags | 1 |
+| `0x7638650c2cc0` | flags | 1 |
+| `0x7638650c2da0` | flags | 1 |
+| `0x7638650c2e78` | flags | 1 |
+| `0x7638650c3378` | flags | 1 |
+| `0x7638650c3968` | flags | 1 |
+| `0x763865a4ca88` | flags | 1 |
+
+Series maxima: **1,196 visited / 670 active / 51.393 ms**. The preceding
+staging attempt qualified four menu inputs and two measured Skye-list scrolls,
+then refused the next scroll's final overlapping-node mutation. It did not
+reconfirm Skye selection in this run and sent no LOCK IN. The subsequent
+60-read series contained no input. Staging maxima (visited/active/ms), retained
+in `entry-stage-maxima.json`: MENU 169/86/7.233; MODE 414/257/17.515;
+MAP 271/156/12.084; DIFFICULTY 319/191/17.613; MENU_TRANSITION 274/162/11.915;
+DRAFT 1196/670/60.515.
+
+The existing entry profile now supports `draft_observation_only: 50..100`,
+which retains a bounded series after selection and deliberately ends SETUP
+without claiming WORLD acceptance. Its focused module passed **38 tests**;
+the live staging attempt stopped before reaching this option, so the series
+used the same qualified observer directly, without gestures. Animation-rule
+regressions and remaining full/client/freeze gates are **UNRUN/not implemented
+after the REPLAN stop**, not inherited passes from the earlier dispatch.
+WORLD/HUD, two-client admission and movement isolation remain unverified.
+See [rev3 execution and cleanup](one-week-acceleration.md#animated-descendant-inference--2026-10-10-rev3).
+
+### Earlier rev2: strict selected-control pair qualification
+
+**SETUP/BLOCKED at LOCK IN; not WORLD or Day 3 acceptance.** Dispatch
+`run-1791600566706-3174527e` implements the revised selected-control stability
+contract. Two complete 4,096-budget reads must agree on root, screen identifiers,
+modal/root-layer inventory, selected control and its full ancestry. Changed
+descendants or overlapping nodes refuse qualification. Permitted outside
+differences retain node ids, every changed field, before/after values and counts
+in each gesture receipt. A bounded pre-receipt wait permits at most 20 read
+pairs; a final read checks the prepared receipt with **no settling or input
+retry**. Post-input pairs and subsequent server/native transitions are retained.
+Gameplay mode still uses its unchanged 1,024-node and owner/navigation checks.
+
+Evidence root **S**:
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791600566706-3174527e/`.
+Both `single-entry-03` and `single-entry-05` qualified four menu controls, three
+measured Skye-list scrolls and ordinary Skye selection (matching 1118 echo).
+The latter bound device `emulator-5554` → guest
+`a8006997-b05f-5d1c-9d2c-fd4ffbbd13f0` → `devtag:8c30e46cce91` → connection
+`3018772917584` → EID1500/slot0/team1. It retained 30 permitted outside-node
+differences across gesture pairs. **Neither run sent LOCK IN.** The first
+refused a changing descendant during candidate qualification; the second
+obtained a valid pair but a descendant's flags changed `76 → 204` at the final
+boundary. `lock-in-final-boundary-diagnostic.json` identifies the node and raw
+diff; `single-entry-05/entry-stages.jsonl` retains full reads and receipts.
+
+The stage was stopped, not blindly retried. A no-input 20-pair follow-up
+(`lock-readonly-pairs.json`) qualified 3 pairs and refused 17: 16 descendant
+mutations and one selected-ancestry mutation. Thus the updated **never-stable
+ancestry replan condition was not met**; this is a bounded live SETUP blocker,
+not a claim that the revised decision is impossible. No flags were masked and
+no descendant changes were ignored. Further live work needs new evidence of a
+stable final LOCK IN receipt; a design that excludes those descendant changes
+would require a changed decision, not an undocumented relaxation.
+
+All five attempts' measured maxima (transient trees included, maxima need not
+be simultaneous) are retained in `entry-run-summary.json`:
+
+| Native screen | Visited | Active | Traversal ms |
+|---|---:|---:|---:|
+| MENU | 1,263 | 764 | 45.137 |
+| MODE | 414 | 257 | 22.816 |
+| MAP | 271 | 156 | 18.214 |
+| DIFFICULTY | 319 | 191 | 14.913 |
+| DRAFT | 1,210 | 678 | 56.456 |
+| MENU_TRANSITION | 274 | 162 | 9.749 |
+| BOOTSTRAP | 62 | 32 | 1.914 |
+| UNKNOWN (first attempt, later identified transition) | 274 | 162 | 11.092 |
+
+Repairs were evidence-led: the exact retiring eight-label mode-card set is now
+a read-only transition, not an actionable MENU; native size accessor `0xe01c10`
+was anchored to avoid treating a measured offscreen zero-size widget as a
+viewport-sized unknown; pre-receipt settling retains all failed pairs without
+relaxing final-boundary refusal. Attempt04 sent zero gestures for missing native
+Resume. Attempt05 followed measured native-MENU preparation and ordinary
+activity reactivation, not a waived readiness guard. The owned Android sign-in
+dialog path and post-draft build/shop controls remain incomplete/unqualified.
+WORLD/HUD, two actual clients and movement isolation are **UNRUN/unverified**.
+See [current checks and cleanup](one-week-acceleration.md#selected-control-entry-execution--2026-10-10).
+
+### Earlier 4,096-node attempt (superseded full-tree equality decision)
+
+This subsection records the older dispatch, not the current guard instructions.
+
+**Revised-budget follow-up: still BLOCKED (REPLAN), now on full-tree
+stability, not capacity.** Dispatch `run-1791599711016-5f09ca4c` authorizes
+4,096 nodes in UI-only mode, with complete traversal, cycle/root checks and
+the unchanged 4,096-unit text bound. Gameplay mode remains at 1,024 nodes with
+unchanged owner/EID/navigation checks. Every completed UI-only read now records
+visited/active counts and native-monotonic traversal duration; entry results
+aggregate measured maxima by screen.
+
+The cold-menu attempt reached bound draft with four qualified menu inputs.
+Draft reached a pair of equal trees during its settling wait, but the Skye
+scroll receipt's subsequent pre-input pair differed in four unrelated nodes
+(flags/geometry); the driver correctly failed SETUP with **zero draft inputs**.
+A bounded no-input follow-up pair both completed at 1,196 visited / 670 active
+nodes (30.912 / 34.204 ms), with unchanged root, labels and node identities, but
+one non-text node's flags changed `108 → 8940`. Full-tree signatures differed.
+This meets the revised brief's consecutive-read stability replan condition;
+no relaxed comparison or repeated input was substituted.
+
+Evidence root **R**:
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791599711016-5f09ca4c/`.
+`single-entry-01/entry-stages.jsonl` retains the pre-input pair;
+`draft-stability-comparison.json` retains both complete follow-up trees.
+Measured stage maxima (transient trees included; not one simultaneous read):
+
+| Native screen | Visited | Active | Traversal ms |
+|---|---:|---:|---:|
+| MENU | 169 | 86 | 11.730 |
+| MODE | 414 | 257 | 13.798 |
+| MAP | 271 | 156 | 14.612 |
+| DIFFICULTY | 319 | 191 | 12.442 |
+| DRAFT | 1,210 | 678 | 71.510 |
+
+**Subtree-scoped replan option, not implemented:** retain complete 4,096-node
+enumeration for unique label/control identity, active ancestry, blockers and
+unchanged root; bind the selected control, click callbacks, clip and full
+ancestor geometry across consecutive reads. Separately qualify which dynamic
+non-input flags/geometry outside that control's ancestry may vary. Do not merely
+drop changed fields or accept incomplete trees. This changes the current
+whole-tree equality contract and needs a revised decision before execution.
+WORLD/HUD, actual two-client admission and movement remain unverified. The
+revised run's focused checks passed 104 tests, but full freeze gates remain
+unrun after the replan stop; see the latest acceleration checkpoint.
+
+### Earlier 1,024-node attempt (superseded capacity decision)
+
+**Partial implementation, not a qualified entry path.** Decision 1's original
+1,024-node complete-tree bound is exceeded in draft. Two read-only observations
+both stopped at `node-limit; visited=1024; active=546`. The bound was not raised,
+partial trees were not accepted, and implementation/live work stopped for replan.
+The owner-independent reader did work on menu pages; this does **not** establish
+an owner dependency or a need for image evidence. Smallest resolution: revise
+the UI-only draft traversal/qualification design (with explicit uniqueness and
+completeness guarantees), or explicitly revise its budget; leave gameplay-mode
+owner/EID/navigation checks unchanged.
+
+The existing runner accepts `nonvisual_entry.enabled: true` in its client
+profile. This is separate from forbidden legacy `drive_entry`; existing-WORLD
+mode still requires explicit `--wire-trace` and `--connection`. Entry mode must
+not also supply those flags: it binds the new connections by the explicit
+listener's guest identity, never the newest connection or newest wire file.
+
+```powershell
+python -B Tools/run_scenarios.py --mode client --scenario movement-walk `
+  --adb-serial emulator-5554 --client-profile <external-entry-profile.json> `
+  --output <new-external-evidence-directory>
+```
+
+The profile's `nonvisual_entry` object names `not_before` (host epoch before
+this cold client launch), `launch_guest_wall` (guest epoch immediately before
+that launch; required by the rev5 pre-attach guard), `rpc_journal`, the fresh run's `wire_dir`,
+`device_tag` and `listener_port`, `java_bridge` (external retained
+`frida-java-bridge` 7.0.13 package directory), and an external shared
+`input_lock`. `runtime_observer.endpoint` selects the owned Frida endpoint;
+`host_window` names the owned LDPlayer executable and exact host `pid`.
+`entry_only: true` ends after WORLD/HUD qualification; it does not claim
+movement or full-match acceptance. Otherwise the requested existing exercise
+follows. Use an external runtime copy, never modify the owned answers in place.
+
+Receipts retain the pinned native code fingerprint, active bounded UI tree,
+unique control and click-event ancestor, finite clipped bounds, expected stage,
+Java-view focus/unpaused initialization and native Resume readiness. A second
+read checks tree consistency immediately before each gesture. Hero scrolling
+derives its region from the target control's clip and requires measured progress;
+stale/duplicate/unknown controls, lost focus or absent transitions fail SETUP
+without repeating an input. Initial cold native initialization is **not** a
+`Resume - Post` receipt. A measured ordinary activity reactivation can establish
+that lifecycle signal; absence remains a setup unknown, never assumed ready.
+
+`peers` lists the second explicit `{device_tag, listener_port}` (optionally
+`guest_id`). Each driver holds before LOCK IN until both identified guests are
+connected and selected on opposite teams in the same trace/match. The platform
+keeps each guest's update/exit state separate; wire identity/disconnect rows
+permit draft-to-WORLD connection handoff without adopting another guest.
+Menu page transitions are native observations; `joinLobby`, selection/lock,
+roster/finalization, load readiness, owner bootstrap and native HUD are distinct
+subsequent acceptance signals. Default skin only; no skin gesture is sent.
+
+Here **E** is
+`C:/Users/terasumi/AppData/Local/halcyon-evidence/run-1791596543434-0bbf43bf/`.
+The first attempt refused missing native Resume with zero gestures. Subsequent
+bounded attempts repaired mode-page classification and receipt timing without
+repeating refused inputs. `single-entry-05` observed `joinLobby` error -32601
+(method not scripted); only then was the documented `pending_auto`/six-player
+reply added to the runtime copy and `Config/answers.example.json`.
+
+`single-entry-07` (source pin in `live-pin-07.json`) qualified PLAY → SOLO BOTS →
+3V3 → VERY EASY and correlated the guest to draft connection `1841954085968`,
+EID1500, slot0/team1. It refused a still-visible MENU after the server draft
+opener. Stable-draft read-only follow-up hit the bound twice, retained in
+`single-07-draft-bound-diagnostic.json`; no hero/lock gesture followed.
+The diagnostic-only error-message edit names the same unchanged bound.
+
+**UNVERIFIED:** hero selection/scrolling, lock/admission, build-panel dismissal,
+WORLD/HUD, and the whole two-client movement contract. The post-draft mocked
+path is not client evidence: in particular a native `CLOSE` control is not yet
+qualified from retained build-panel observations. Sign-in-dialog handling is
+not implemented, and utility-level negatives do not yet all demonstrate the
+full runner SETUP result contract. Do not use this entry mode as acceptance.
+Offline results, unrun freeze gates and cleanup caveats are in the
+[October 10 checkpoint](one-week-acceleration.md#entry-execution-checkpoint--2026-10-10).
+
 ## Current nonvisual paths — September 22, 2026
 
 The no-image/video invariant in `AGENTS.md` supersedes the historical capture

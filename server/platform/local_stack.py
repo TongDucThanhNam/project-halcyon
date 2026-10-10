@@ -60,6 +60,8 @@ DEFAULT_ANSWERS = {
 
 _active_gateway = None
 _log_lock = threading.Lock()
+_device_states: dict[str, dict] = {}
+_device_states_lock = threading.Lock()
 
 
 def _log(line: str) -> None:
@@ -264,7 +266,12 @@ def _rebuild_jwt(token: str, player_id: str, session_id: str | None = None) -> s
         for key in ("session_id", "sessionId"):
             if key in data:
                 data[key] = session_id
-    body = base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+    # The actual client may send only token[:63] as 1000. A rewritten full
+    # player UUID with an unchanged/shared leading tag would still collide.
+    # Keep the per-player tag first and compact, as _mint_token already does.
+    tag = uuid.uuid5(_IDENTITY_NAMESPACE, f'device-tag:{player_id}').hex[:12]
+    data = {'d': tag, **{k: v for k, v in data.items() if k != 'd'}}
+    body = base64.urlsafe_b64encode(json.dumps(data, separators=(',', ':')).encode()).decode().rstrip("=")
     return f"{parts[0]}.{body}.{parts[2]}"
 
 
@@ -309,13 +316,15 @@ def fsm_on_boot(answers_path: str = ANSWERS_PATH,
     makes the booting client try to open a match socket from the menu
     (observed 2026-09-06: gray screen, then a libhoudini native death).
     Disable with "_fsm_auto": false in answers.json."""
+    with _device_states_lock:
+        _device_states.clear()
     if _answers().get("_fsm_auto", True):
         _fsm_update_state(answers_path, {"state": "menus"}, gw_port=gw_port)
 
 
 def fsm_on_rpc(rpc_method: str, answers_path: str = ANSWERS_PATH,
                gw_port: int | None = None,
-               match_host: str | None = None) -> None:
+               match_host: str | None = None, *, client_key: str | None = None) -> None:
     """Drive the client's update-FSM from the RPC stream: the client polls
     `update` as its FSM driver, so the moment it sends joinLobby we flip
     `playing` (+host/port) — skipping matched_partners/accept screen, the
@@ -336,11 +345,12 @@ def fsm_on_rpc(rpc_method: str, answers_path: str = ANSWERS_PATH,
             else int(answers_cfg.get("_gw_port", 7100))
         host = match_host if match_host is not None \
             else answers_cfg.get("_match_host", "127.0.0.1")
-        _fsm_update_state(
-            answers_path,
-            {"state": "playing", "host": host,
-             "matchId": MATCH_ID},
-            gw_port=port)
+        state = {"state": "playing", "host": host, "matchId": MATCH_ID, "port": port}
+        if client_key is None:
+            _fsm_update_state(answers_path, state)
+        else:
+            with _device_states_lock:
+                _device_states[client_key] = state
         _log(f"FSM joinLobby -> update=playing (host {host}, port {port})")
         if _active_gateway is not None and _active_gateway.active_match is not None:
             ms = _active_gateway.active_match
@@ -349,7 +359,11 @@ def fsm_on_rpc(rpc_method: str, answers_path: str = ANSWERS_PATH,
                 ms.stop()
                 _active_gateway.active_match = None
     elif rpc_method == "exitLobby":
-        _fsm_update_state(answers_path, {"state": "menus"})
+        if client_key is None:
+            _fsm_update_state(answers_path, {"state": "menus"})
+        else:
+            with _device_states_lock:
+                _device_states[client_key] = {"state": "menus"}
         _log("FSM exitLobby -> update=menus")
         if _active_gateway is not None and _active_gateway.active_match is not None:
             ms = _active_gateway.active_match
@@ -357,6 +371,14 @@ def fsm_on_rpc(rpc_method: str, answers_path: str = ANSWERS_PATH,
                 _log(f"FSM exitLobby: terminating idle match {ms.match_id[:8]} on port {ms.port}")
                 ms.stop()
                 _active_gateway.active_match = None
+
+
+def client_update(client_key: str, answer):
+    """An unqueued guest never inherits another guest's playing state."""
+    if not _answers().get("_fsm_auto", True):
+        return answer
+    with _device_states_lock:
+        return {"code": 0, "returnValue": dict(_device_states.get(client_key, {"state": "menus"}))}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -531,12 +553,10 @@ class Handler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {"_raw": body.decode("utf-8", "replace")}
             rpc_method = payload.get("method", "?")
-            _log_rpc({"t": time.time(), "host": host, "service": service,
-                      "method": rpc_method, "params": payload.get("params"),
-                      "headers": dict(self.headers)})
+            request_at = time.time()
             key = f"{service}/{rpc_method}"
             answer = None
-            device_tag = getattr(self.server, "device_tag", "")
+            device_tag = getattr(self.server, "device_tag", os.environ.get('HALCYON_PRIMARY_DEVICE_TAG', ''))
             if rpc_method == "createGuestPlayer":
                 # Fresh install: mint this device's identity from its hwid
                 # (or from the listener tag — cloned images share the hwid).
@@ -565,7 +585,29 @@ class Handler(BaseHTTPRequestHandler):
                 answer = _rewrite_identity(
                     answer, _device_player_id(device_tag),
                     client_payload.get("session_id") if client_payload else None)
-            fsm_on_rpc(rpc_method)
+            guest_id = _device_player_id(device_tag) or client_pid or DEFAULT_PLAYER_UUID
+            client_key = f"device:{device_tag}" if device_tag else f"player:{guest_id}"
+            fsm_on_rpc(rpc_method, client_key=client_key)
+            if rpc_method == "update":
+                answer = client_update(client_key, answer)
+            # Retain the listener and normalized identity, not another copy of
+            # session tokens. The wire token may be the client's truncated JWT.
+            identities = [guest_id]
+            if isinstance(answer, dict):
+                value = answer.get("returnValue") or {}
+                token = value.get("sessionToken", "") if isinstance(value, dict) else ""
+                if token:
+                    decoded = _client_token_payload([token]) or {}
+                    guest_id = decoded.get("player_id", guest_id)
+                    identities = [guest_id]
+                    if decoded.get("d"):
+                        identities.append(f"devtag:{decoded['d']}")
+            _log_rpc({"t": request_at, "host": host, "service": service,
+                      "method": rpc_method, "params": payload.get("params"),
+                      "headers": dict(self.headers), "device_tag": device_tag,
+                      "listener_port": self.server.server_port,
+                      "guest_id": guest_id, "match_identities": identities,
+                      "response": answer if rpc_method in ("joinLobby", "update", "exitLobby") else None})
             # The client parses the body as a STREAM of JSON values
             # (FUN_00ebfddc: while(*cursor) parse_next). A trailing newline
             # makes parse_next fail on the leftover byte, dispatch a NULL

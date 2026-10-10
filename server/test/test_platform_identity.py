@@ -172,6 +172,19 @@ class TestTruncatedJoinFrame(unittest.TestCase):
 
     FRAME_WINDOW = 63
 
+    def test_listener_rewrite_separates_truncated_actual_join_tokens(self):
+        from server.match_server import identity_from_token
+        original = local_stack._mint_token(DEFAULT)
+        identities = []
+        for serial in ('emulator-5554', 'emulator-5556'):
+            player_id = local_stack._device_player_id(serial)
+            rewritten = local_stack._rebuild_jwt(original, player_id)
+            self.assertEqual(identity_from_token(rewritten), player_id)
+            expected = 'devtag:' + _claims(local_stack._mint_token(player_id))['d']
+            identities.append(identity_from_token(rewritten[:self.FRAME_WINDOW]))
+            self.assertEqual(identities[-1], expected)
+        self.assertNotEqual(*identities)
+
     def test_mint_leads_with_device_tag_claim(self):
         pid = "11111111-2222-4333-8444-555555555555"
         claims = _claims(local_stack._mint_token(pid))

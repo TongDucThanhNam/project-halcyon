@@ -1,5 +1,13 @@
 {
   "_comment": "Local CE bootstrap template; setup_local.py generates synthetic local identity. No external credentials.",
+  "_joinLobby_provenance": "Docs/Teardown/vainglory-mobile-local-stack.md, Match-entry exchange verified end-to-end (2026-09-06): pending_auto with numPlayers=6. Nonvisual 2026-10-10 run retained the previous unscripted-method reply before adding this answer.",
+  "joinLobby": {
+    "code": 0,
+    "returnValue": {
+      "state": "pending_auto",
+      "numPlayers": 6
+    }
+  },
   "status_redirect": {
     "mode": "raw",
     "body": "rpc.kindred-live.net:8443"

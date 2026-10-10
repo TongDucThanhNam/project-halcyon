@@ -33,7 +33,8 @@ LANES = {
     "transport": ("test_wire", "test_e2e", "test_multiclient"),
     "client": ("test_nonvisual_movement", "test_nonvisual_abilities", "test_nonvisual_flask",
                "test_nonvisual_recall", "test_nonvisual_shop", "test_nonvisual_classic",
-               "test_client_projection", "test_android_input_health", "test_movement_client_report"),
+               "test_client_projection", "test_android_input_health", "test_movement_client_report",
+               "test_nonvisual_entry"),
     # Kept explicit, not deleted or excluded from --suite all. Its old fixtures
     # need a nonvisual migration; this lane's failures remain release blockers.
     "legacy-client": ("test_scenario_client",),

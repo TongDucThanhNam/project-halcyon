@@ -9556,7 +9556,17 @@ def run_client(scenario: str, args) -> dict:
         adb = Adb(serial)
         qa = QaSession(qa_dir) if qa_dir else _AbsentQa()
         explicit_trace = getattr(args, "wire_trace", None)
-        if explicit_trace:
+        entry = profile.get('nonvisual_entry') or {}
+        if entry.get('enabled') is True:
+            if scenario == 'minion-push' or any(
+                    isinstance(value, dict) and (value.get('drive_entry')
+                        or value.get('capture_backend', 'none') != 'none')
+                    for value in profile.values()):
+                raise ClientStageFailure('SETUP', 'FAIL', 'nonvisual entry cannot enable legacy entry/capture paths')
+            if explicit_trace or getattr(args, 'connection', None) is not None:
+                raise ClientStageFailure('SETUP', 'FAIL', 'entry creates its binding; do not also select an existing WORLD')
+            tail = None
+        elif explicit_trace:
             tail = verify_trace(explicit_trace,
                                 timeout=float(getattr(args, "timeout", 30.0) or 30.0))
         elif scenario == "movement-walk":
@@ -9571,6 +9581,18 @@ def run_client(scenario: str, args) -> dict:
                               timeout=float(getattr(args, "timeout", 30.0) or 30.0),
                               profile_digest=profile_digest)
         driver.stage("SETUP", "PENDING")
+        if entry.get('enabled') is True:
+            from Tools.nonvisual_entry import NonvisualEntry
+            try:
+                NonvisualEntry(driver).run()
+            except ClientStageFailure:
+                raise
+            except Exception as exc:
+                raise ClientStageFailure('SETUP', 'FAIL', f'nonvisual entry configuration/readiness: {exc}') from exc
+            if entry.get('entry_only') is True:
+                return driver.finish('PASS', observed={'entry': driver.observations['entry_binding'],
+                    'wire_trace': str(driver.tail.path), 'connection': driver.connection},
+                    expected={'scope': 'ordinary menu-to-WORLD entry only; gameplay not exercised'})
         if scenario == "movement-walk":
             return driver.run_movement_walk()
         if scenario == "classic-match":
