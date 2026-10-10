@@ -129,6 +129,8 @@ class FakeAdb:
                 heroes = self.harness.qa.state.get("heroes", [])
                 if heroes:
                     heroes[0].setdefault("ranks", {})[str(slot)] = 1
+                    if type(heroes[0].get("ability_points")) is int:
+                        heroes[0]["ability_points"] -= 1
             return
         if self.harness.mode in ("skye-b", "skye-c"):
             self._emit("s2c", 1086, build_lock(ENEMY_EID, SKYE_EID))
@@ -2621,6 +2623,49 @@ class TestCaptureLifecycle(unittest.TestCase):
 
 class TestMinionPushClient(unittest.TestCase):
     """Named-stage minion observation (review item 3)."""
+
+    def test_census_cadence_does_not_accumulate_sleep_and_service_overhead(self):
+        # Synthetic timing regression, not a device/scheduler qualification.
+        # Keep the real writer and its raw timestamps; only its clock and QA
+        # latency are controlled. The existing comparison margin stays intact.
+        from unittest.mock import patch
+        clock = [0.0]
+        epoch = time.time()
+        fake_time = types.SimpleNamespace(**vars(time))
+        fake_time.time = lambda: epoch + clock[0]
+        fake_time.monotonic = lambda: clock[0]
+
+        def sleep(seconds):
+            clock[0] += seconds + .025
+
+        fake_time.sleep = sleep
+
+        def prepare(harness):
+            original = harness.qa.submit
+
+            def submit(command, **kwargs):
+                if command.get("command") == "lane_minions":
+                    clock[0] += .020
+                return original(command, **kwargs)
+
+            harness.qa.submit = submit
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(sc, "time", fake_time):
+                result, harness = run_minion_trial(
+                    Path(directory), 1, rows=[], window=8, prepare=prepare)
+            try:
+                window = result["observations"]["minion_window"]
+                offsets = [t - window["window_start"] for t in window["census_instants"]]
+                self.assertEqual(len(offsets), 9)
+                self.assertLessEqual(max(abs(t - i) for i, t in enumerate(offsets)),
+                                     sc.FIXTURE_SAMPLING_MARGIN_S)
+                # Do not "repair" evidence by stamping the scheduled instant:
+                # the census was actually received after sleep/service delay.
+                self.assertAlmostEqual(offsets[0], .020, places=6)
+                self.assertAlmostEqual(offsets[-1], 8.065, places=6)
+            finally:
+                harness.cleanup()
 
     def _wire_fake(self, harness):
         """Route QA submit through the fake and support lane_minions."""
@@ -6142,6 +6187,10 @@ class TestRunClientRefusals(unittest.TestCase):
         and wrote nothing)."""
         harness = Harness("skye-a")
         try:
+            # HEAD's already-learned fixture masked the upgrade-before-refusal
+            # bug. A real unlearned owner must not even receive that tap.
+            harness.qa.state["heroes"][0].update(
+                ranks={"0": 0, "1": 1, "2": 1}, ability_points=1)
             qa_dir = harness.base / "qa"
             qa_dir.mkdir(exist_ok=True)
             (qa_dir / "state.json").write_text(json.dumps({"tick": 100}),
@@ -6171,6 +6220,8 @@ class TestRunClientRefusals(unittest.TestCase):
             self.assertEqual(result["status"], "FAIL",
                              "a fixture refusal is a classified failure")
             self.assertEqual(result["first_failed_stage"], "SETUP")
+            self.assertEqual(result["gestures"], [])
+            self.assertEqual([c for c in harness.adb.calls if c[0] in ("tap", "swipe")], [])
             self.assertEqual(result["stages"]["SETUP"]["status"], "FAIL")
             self.assertNotIn("failure_kind", result,
                              "this is a pre-input refusal, not an "
@@ -6203,6 +6254,128 @@ class TestRunClientRefusals(unittest.TestCase):
             # the returned record carries.
             self.assertEqual(persisted["fixture_contract"],
                              json.loads(json.dumps(contract)))
+        finally:
+            harness.cleanup()
+
+    def test_measured_mismatch_after_ordinary_learning_never_casts(self):
+        harness = Harness("skye-a")
+        try:
+            driver = harness.driver()
+            harness.qa.state["heroes"][0].update(
+                ranks={"0": 0, "1": 1, "2": 1}, ability_points=1)
+            driver.profile["declared_fixture"]["skye_points"] = 0
+            original_tap = harness.adb.tap
+
+            def changed_after_input(x, y):
+                original_tap(x, y)
+                harness.qa.state["heroes"][1]["level"] = 2
+
+            harness.adb.tap = changed_after_input
+            with self.assertRaises(sc.ClientStageFailure) as caught:
+                driver.run_nonvisual_cast("A", controlled=True)
+            self.assertIn("enemy level 2 != declared 1", caught.exception.detail)
+            self.assertEqual(caught.exception.stage, "SETUP")
+            self.assertEqual([g["kind"] for g in driver.gestures], ["native-ability-upgrade"])
+            self.assertEqual([c[0] for c in harness.adb.calls if c[0] in ("tap", "swipe")], ["tap"])
+        finally:
+            harness.cleanup()
+
+    def test_invalid_declarations_refuse_before_camera_or_upgrade_input(self):
+        overrides = (
+            {"declared_fixture": None},
+            {"skye_position": 4},
+            {"enemy_position": [float("nan"), 0]},
+            {"placement_tolerance": -1},
+            {"declared_fixture": {"skye_level": "six"}},
+        )
+        for override in overrides:
+            with self.subTest(override=override):
+                harness = Harness("skye-a")
+                try:
+                    driver = harness.driver()
+                    driver.profile.update(override)
+                    with self.assertRaises(sc.ClientStageFailure):
+                        driver.run_nonvisual_cast("A", controlled=True)
+                    self.assertEqual(driver.gestures, [])
+                    self.assertEqual([c for c in harness.adb.calls if c[0] in ("tap", "swipe")], [])
+                finally:
+                    harness.cleanup()
+
+    def test_unreachable_declared_learning_refuses_before_any_gesture(self):
+        harness = Harness("skye-a")
+        try:
+            driver = harness.driver()
+            harness.qa.state["heroes"][0].update(
+                ranks={"0": 0, "1": 1, "2": 1}, ability_points=1)
+            # Driver will spend this point, so declaration of one leftover
+            # point is unreachable even though every declaration is typed.
+            with self.assertRaises(sc.ClientStageFailure) as caught:
+                driver.run_nonvisual_cast("A", controlled=True)
+            self.assertIn("unreachable", caught.exception.detail)
+            self.assertEqual(driver.gestures, [])
+            self.assertEqual([c for c in harness.adb.calls if c[0] in ("tap", "swipe")], [])
+        finally:
+            harness.cleanup()
+
+    def test_malformed_complete_declarations_refuse_before_any_gesture(self):
+        for field, value in (("skye_level", True), ("skye_ranks", []),
+                             ("skye_points", "0"), ("skye_hp_policy", "exact"),
+                             ("skye_energy_exact", float("inf"))):
+            with self.subTest(field=field):
+                harness = Harness("skye-a")
+                try:
+                    driver = harness.driver()
+                    driver.profile["declared_fixture"][field] = value
+                    with self.assertRaises(sc.ClientStageFailure):
+                        driver.run_nonvisual_cast("A", controlled=True)
+                    self.assertEqual(driver.gestures, [])
+                    self.assertEqual([c for c in harness.adb.calls if c[0] in ("tap", "swipe")], [])
+                finally:
+                    harness.cleanup()
+
+    def test_unreachable_ranks_are_known_even_when_preparation_points_are_unknown(self):
+        harness = Harness("skye-a")
+        try:
+            driver = harness.driver()
+            self.assertIsNone(harness.qa.state["heroes"][0]["ability_points"])
+            driver.profile["declared_fixture"]["skye_ranks"]["1"] = 4
+            with self.assertRaises(sc.ClientStageFailure) as caught:
+                driver.run_nonvisual_cast("A", controlled=True)
+            self.assertIn("unreachable", caught.exception.detail)
+            self.assertEqual(driver.gestures, [])
+            self.assertEqual([c for c in harness.adb.calls if c[0] in ("tap", "swipe")], [])
+        finally:
+            harness.cleanup()
+
+    def test_pre_input_declaration_checks_all_copies_without_measured_state(self):
+        harness = Harness("skye-a")
+        try:
+            profile = harness.driver().profile
+            contract = sc.build_fixture_contract(profile, "A")
+            self.assertEqual(sc.validate_fixture_declaration(contract, profile["declared_fixture"], "A"), [])
+            for field in ("skye_level", "skye_ranks", "skye_points", "enemy_level",
+                          "skye_energy_policy", "skye_hp_policy", "enemy_hp_policy"):
+                with self.subTest(field=field):
+                    malformed = copy.deepcopy(profile)
+                    malformed["declared_fixture"].pop(field)
+                    self.assertTrue(sc.validate_fixture_declaration(
+                        sc.build_fixture_contract(malformed, "A"), malformed["declared_fixture"], "A"))
+            mutations = (
+                lambda c: c["skye"].update(level=99),
+                lambda c: c.update(skye_hp_policy="exact"),
+                lambda c: c["declared_fixture"].update(skye_points=99),
+                lambda c: c["enemy"].update(position_tolerance=3),
+                lambda c: c.update(slot="B"),
+            )
+            for mutate in mutations:
+                changed = copy.deepcopy(contract)
+                mutate(changed)
+                self.assertTrue(sc.validate_fixture_declaration(changed, profile["declared_fixture"], "A"))
+            # Enemy energy policy remains observational, not a new required
+            # preparation step. Its optional exact value can stay undeclared.
+            profile["declared_fixture"]["enemy_energy_policy"] = "exact"
+            self.assertEqual(sc.validate_fixture_declaration(
+                sc.build_fixture_contract(profile, "A"), profile["declared_fixture"], "A"), [])
         finally:
             harness.cleanup()
 

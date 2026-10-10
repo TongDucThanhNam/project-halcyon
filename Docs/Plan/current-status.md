@@ -1,6 +1,41 @@
 # Current implementation and validation status
 
-## Audit and execution workflow — 2026-10-04
+## Execution checkpoint — 2026-10-09
+
+**Acceptance remains OPEN.** The [dated acceleration checkpoint](one-week-acceleration.md#execution-checkpoint--2026-10-09)
+and [coverage matrix](week-one-coverage-matrix.md) distinguish declared composition,
+headless/native contracts and actual-client qualification. The October 4 red
+audit remains in the acceleration leaf; later green runs are not evidence that
+its historical 255-ms outlier was repaired.
+
+Fresh discovery (`bda39c2`) passed 1,470 tests / 28 reviewed skips, seven exact
+headless pairs, and the 960-second verifier (max 21.4335/22.3473 ms; zero >50 ms).
+Evidence root: `C:/Users/terasumi/AppData/Local/halcyon-evidence/`, prefix
+`discovery-run-1791562480510-fac7cde6-`, suffixes `all`, `headless`, `verifier`.
+The verifier is a **remeasurement, not an attributed repair**. The dispatch's
+Day 1 repair checks pass (legacy-client **291**, client adapters **119**, zero
+skips); full measured fixture equality and diagnostic behavior are unchanged.
+The minion sampler's accumulated cadence drift was reproduced and repaired
+without changing comparison margins or causal/identity/continuity negatives.
+Day 2 offline checks pass: seven exact headless pairs, a baseline-identical
+verifier pair (max **21.7158/21.1300 ms**, zero >50 ms), and the expanded native
+aggregate grid (**901 cases**, decimal deltas retained, not rounded away).
+The selected post-repair native movement effect remains a classified unknown.
+
+**Day 3 is SETUP/BLOCKED.** Both actual LDPlayer instances passed build 147219
+and local routing checks and focused the game, but neither established a WORLD
+connection. Both existing nonvisual-runner attempts refused with zero gestures.
+Nonvisual menu-to-WORLD entry in the existing driver is the missing capability;
+opposite-team PvP and its native effects were not tested. No Day 4 match was
+attempted. Guests were restored, both emulators/stack stopped, and original
+configuration hashes verified unchanged. Evidence and final sequential freeze
+gate locations: [execution results](one-week-acceleration.md#execution-results-and-final-source-gate-locations),
+root `run-1791564257036-9a4bad79` under the evidence directory above.
+Twelve tracked bytecode files and nine PNGs remain an operator hygiene decision;
+none is removed or opened. Complete faithful PvP, independent gameplay fidelity,
+long-run native movement/stability and six-actual-client delivery remain open.
+
+## Retained migration measurements following the 2026-10-04 audit
 
 **Acceptance remains OPEN; no complete faithful-gameplay or PvP claim.**
 The active operating plan is [the one-week acceleration workflow](one-week-acceleration.md):
@@ -11,8 +46,9 @@ in this audit; the process IDs and “running” state in older entries below ar
 historical observations, not a current service-health report.
 
 The full discovery test suite is **1,470 tests, 0 failures, 0 errors, 28 skips, 781.250 seconds** (PASS).
-All legacy client fixture contracts were migrated to the nonvisual contract without weakening assertions
-or bypassing native guards: `--suite legacy-client` passes cleanly (**284/284 tests PASS**, 715.810 seconds).
+The legacy client fixture migration passed `--suite legacy-client`
+(**284/284 tests PASS**, 715.810 seconds); discovery retained causal/identity/
+continuity negatives but found an upgrade-before-declaration-refusal gap.
 The smoke lane passes 71 tests (70 non-skipped, 1 skipped) in 10.901 seconds.
 
 **Seven production headless scenarios pass**, byte-exact across two independent
@@ -23,8 +59,10 @@ and **meets the 50 ms deadline gate on every tick** (Run 1 max 22.65 ms, 0 over 
 
 The executable original ARM64 health-helper pilot covers 885 cases / 1,770 native
 executions, with 883 exact numeric comparisons to the production pool kernel.
-All release blockers for Day 1 of the one-week acceleration workflow are resolved;
-Day 2 priorities focus on multi-client synchronization, shared pursuit/steering, and match lifecycle.
+These retained checks do not by themselves close Day 1 or attribute the old
+deadline failure. The dated checkpoint above supersedes that earlier closure
+claim; Day 2 covers shared movement/pools and overload attribution before
+actual two-client synchronization and match lifecycle acceptance.
 
 ## Ten-hour run handoff — September22,21:55 local
 

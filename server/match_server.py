@@ -1593,20 +1593,28 @@ class SnapshotStream(threading.Thread):
         return result
 
     @_state_locked
-    def advance_simulation(self):
+    def advance_simulation(self, *, phase_timings=None):
         """Run one 50 ms tick; OS scheduling changes when, never how much."""
         # Non-overlapping opt-in work attribution. In particular, QA mailbox
         # I/O must not be mislabeled as simulation cost. No timings feed rules.
-        phase_ms = {} if self.trace_movement_ticks else None
+        phase_ms = {} if self.trace_movement_ticks or phase_timings is not None else None
         phase_started = time.monotonic() if phase_ms is not None else None
+        cpu_started = time.thread_time_ns() if phase_timings is not None else None
+        if phase_timings is not None:
+            phase_timings.clear()
         self._movement_phase_ms = phase_ms or {}
         def mark_phase(name):
-            nonlocal phase_started
+            nonlocal phase_started, cpu_started
             if phase_ms is not None:
                 finished = time.monotonic()
                 phase_ms[name] = (finished - phase_started) * 1000
                 phase_started = finished
                 self._movement_phase_ms = phase_ms
+                if phase_timings is not None:
+                    cpu_finished = time.thread_time_ns()
+                    phase_timings[name] = {"wall_ms": phase_ms[name],
+                                          "thread_cpu_ms": (cpu_finished - cpu_started) / 1_000_000}
+                    cpu_started = cpu_finished
 
         if self.qa is not None:
             self.qa.pump(self)

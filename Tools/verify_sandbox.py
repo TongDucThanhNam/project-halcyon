@@ -340,6 +340,28 @@ def percentiles(samples: list[int]) -> dict[str, float]:
             "over_50ms": sum(ns > DEADLINE_MS * 1_000_000 for ns in ordered)}
 
 
+def tick_attribution(wall_ms, thread_cpu_ms, phases):
+    """Diagnostic classification only; never changes the 50 ms release gate.
+
+    Thread CPU can be quantized on Windows. A long wall-dominated tick is
+    consistent with host/scheduler waiting, not proof of the exact cause.
+    Small zero-CPU samples must not be called stalls merely due to quantization.
+    """
+    dominant = max(phases, key=lambda name: phases[name]["wall_ms"], default=None)
+    cpu_phase = max(phases, key=lambda name: phases[name]["thread_cpu_ms"], default=None)
+    if cpu_phase is not None and phases[cpu_phase]["thread_cpu_ms"] == 0:
+        cpu_phase = None
+    if wall_ms > DEADLINE_MS and thread_cpu_ms <= wall_ms * .1:
+        classification = "HOST_OR_SCHEDULER_STALL_INFERRED"
+    elif thread_cpu_ms >= wall_ms * .5 and thread_cpu_ms > 0:
+        classification = "CPU_WORK"
+    else:
+        classification = "MIXED_OR_CPU_CLOCK_QUANTIZED"
+    return {"classification": classification, "dominant_wall_phase": dominant,
+            "dominant_thread_cpu_phase": cpu_phase,
+            "wall_minus_thread_cpu_ms": wall_ms - thread_cpu_ms}
+
+
 def invariant_checks(world):
     """Runtime invariants, separate from measured production tick work."""
     ids = list(world.hero_sims) + list(world.structures.structures) + list(world.jungle.monsters)
@@ -428,9 +450,10 @@ def run_worker(args) -> dict:
             controller.step(tick)
             before = time.perf_counter_ns()
             cpu_before = time.thread_time_ns()
+            phases = {}
             if controller.profile is not None:
                 profile.enable()
-            world.advance_simulation()
+            world.advance_simulation(phase_timings=phases)
             if controller.profile is not None:
                 profile.disable()
             sim_cost = time.perf_counter_ns() - before
@@ -442,8 +465,17 @@ def run_worker(args) -> dict:
             minions = world.wave_director.minions
             seen_minions.update(minion.eid for minion in minions)
             live_minions = sum(minion.alive for minion in minions)
-            slowest.append((cost, tick, live_minions, len(world.jungle.monsters), len(pending), cpu_cost))
-            slowest.sort(reverse=True)
+            phases["intents"] = {"wall_ms": controller.intent_cost_ns / 1_000_000,
+                                 "thread_cpu_ms": controller.intent_cpu_ns / 1_000_000}
+            row = {"tick": tick, "seconds": (tick + 1) * TICK_SECONDS,
+                   "cost_ms": cost / 1_000_000, "thread_cpu_ms": cpu_cost / 1_000_000,
+                   "live_minions": live_minions, "monsters": len(world.jungle.monsters),
+                   "messages": len(pending), "phases": phases,
+                   "unattributed_wall_ms": cost / 1_000_000 - sum(p["wall_ms"] for p in phases.values()),
+                   "unattributed_thread_cpu_ms": cpu_cost / 1_000_000 - sum(p["thread_cpu_ms"] for p in phases.values())}
+            row.update(tick_attribution(row["cost_ms"], row["thread_cpu_ms"], phases))
+            slowest.append(row)
+            slowest.sort(key=lambda row: (row["cost_ms"], row["tick"]), reverse=True)
             del slowest[20:]
             for opcode, payload in pending:
                 stream.write(struct.pack(">IHI", tick, opcode, len(payload)))
@@ -520,10 +552,15 @@ def run_worker(args) -> dict:
               "source_unchanged_during_run": source_unchanged,
               "tick_cost": percentiles(costs), "simulation_only_cost": percentiles(sim_costs),
               "thread_cpu_cost": percentiles(cpu_costs),
-              "slowest_ticks": [{"tick": tick, "seconds": (tick + 1) * TICK_SECONDS,
-                    "cost_ms": cost / 1_000_000, "live_minions": nminions,
-                    "monsters": nmonsters, "messages": messages, "thread_cpu_ms": cpu_cost / 1_000_000}
-                    for cost, tick, nminions, nmonsters, messages, cpu_cost in slowest],
+              "slowest_ticks": slowest,
+              "timing_attribution": {
+                  "measured_ticks": ticks, "retained_slowest": 20,
+                  "thread_clock_resolution_s": time.get_clock_info("thread_time").resolution,
+                  "limits": ["Phase clocks are diagnostic overhead; no timings feed simulation rules.",
+                             "Intents plus production tick are timed; serialization/invariants are outside tick cost.",
+                             "Windows thread CPU may be quantized, including zeros and samples above wall time.",
+                             "Host/scheduler classification is an inference for >50 ms wall with <=10% thread CPU; exact cause unknown.",
+                             "Dominant wall/CPU phases name measured intervals, not a function-level profile."]},
               "stream_sha256": digest_file(stream_path), "stream_bytes": stream_path.stat().st_size,
               "state_sha256": digest_file(state_path), "checkpoint_sha256": checkpoints.hexdigest(),
               "opcode_counts": dict(counts), "coverage": coverage,

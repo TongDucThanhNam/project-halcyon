@@ -73,9 +73,40 @@ class EvidenceBoundaries(unittest.TestCase):
             self.assertEqual(run['ticks'], 2)
             self.assertIn('Tools/verification_support.py', run['source_manifest'])
             self.assertEqual(Path(run['navmesh']['path']), Path(navigation.DEFAULT_CLASSIC_NAVMESH).resolve())
+            self.assertEqual(run['timing_attribution']['measured_ticks'], 2)
+            for tick in run['slowest_ticks']:
+                self.assertEqual(set(tick['phases']), {'qa', 'wave', 'bots', 'heroes_effects', 'economy', 'intents'})
+                for phase in tick['phases'].values():
+                    self.assertGreaterEqual(phase['wall_ms'], 0)
+                    self.assertGreaterEqual(phase['thread_cpu_ms'], 0)
+                self.assertAlmostEqual(tick['cost_ms'], tick['unattributed_wall_ms'] +
+                                       sum(p['wall_ms'] for p in tick['phases'].values()))
         self.assertFalse((Path(result['source_snapshot']) / 'Local').exists())
         for index in (1, 2):
             self.assertEqual((output / f'worker-{index}-stderr.log').read_text(encoding='utf-8'), '')
+
+
+class TickAttributionTests(unittest.TestCase):
+    def test_long_wall_zero_cpu_is_host_or_scheduler_inference_not_cpu_work(self):
+        phases = {'wave': {'wall_ms': 250, 'thread_cpu_ms': 0},
+                  'heroes_effects': {'wall_ms': 5, 'thread_cpu_ms': 0}}
+        row = verify_sandbox.tick_attribution(255, 0, phases)
+        self.assertEqual(row['classification'], 'HOST_OR_SCHEDULER_STALL_INFERRED')
+        self.assertEqual(row['dominant_wall_phase'], 'wave')
+        self.assertIsNone(row['dominant_thread_cpu_phase'])
+
+    def test_cpu_heavy_tick_names_its_measured_phase(self):
+        phases = {'wave': {'wall_ms': 40, 'thread_cpu_ms': 39},
+                  'heroes_effects': {'wall_ms': 20, 'thread_cpu_ms': 18}}
+        row = verify_sandbox.tick_attribution(60, 57, phases)
+        self.assertEqual(row['classification'], 'CPU_WORK')
+        self.assertEqual(row['dominant_thread_cpu_phase'], 'wave')
+        self.assertEqual(row['dominant_wall_phase'], 'wave')
+
+    def test_small_zero_cpu_sample_does_not_prove_a_host_stall(self):
+        row = verify_sandbox.tick_attribution(3, 0, {'wave': {'wall_ms': 3, 'thread_cpu_ms': 0}})
+        self.assertEqual(row['classification'], 'MIXED_OR_CPU_CLOCK_QUANTIZED')
+        self.assertEqual(verify_sandbox.DEADLINE_MS, 50)
 
 
 if __name__ == '__main__':

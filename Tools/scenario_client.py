@@ -652,6 +652,79 @@ def build_fixture_contract(profile: dict, slot: str) -> dict:
     }
 
 
+def validate_fixture_declaration(contract: dict, declared: dict, slot: str) -> list[str]:
+    """Pre-gesture declaration checks; never manufacture a measured manifest.
+
+    The full measured-state validator below remains the post-preparation gate.
+    In particular, ordinary learning may change ranks and available points.
+    """
+    failures = []
+
+    def finite(value):
+        return type(value) in (int, float) and math.isfinite(value)
+
+    if not isinstance(contract, dict) or not isinstance(declared, dict):
+        return ["fixture declaration must be an object"]
+    if contract.get("slot") not in ("A", "B", "C") or contract.get("slot") != slot:
+        failures.append("contract.slot must agree with the requested A/B/C slot")
+    if contract.get("declared_fixture") != declared:
+        failures.append("contract.declared_fixture and profile declaration disagree")
+    for name in ("skye", "enemy"):
+        actor = contract.get(name)
+        if not isinstance(actor, dict):
+            failures.append(f"contract {name} missing/malformed")
+            continue
+        required = {"team", "level"}
+        if name == "skye":
+            required.update(("hero_id", "eid", "ranks", "ability_points"))
+        for field in ("hero_id", "eid", "team", "level", "ability_points", "ranks"):
+            value = actor.get(field)
+            if value is None:
+                if field in required:
+                    failures.append(f"{name} {field} undeclared (None)")
+                continue
+            if field == "ranks":
+                valid = isinstance(value, dict) and all(
+                    isinstance(k, str) and finite(v) for k, v in value.items())
+            else:
+                valid = type(value) is int
+            if not valid:
+                failures.append(f"contract {name} {field} malformed: {value!r}")
+        for field in ("inventory", "default_items", "statuses"):
+            if actor.get(field) is not None and not isinstance(actor[field], list):
+                failures.append(f"contract {name} {field} must be a list")
+        position = actor.get("position")
+        if not isinstance(position, (list, tuple)) or len(position) != 2 or not all(map(finite, position)):
+            failures.append(f"contract {name} position must be a finite 2-sequence")
+        tolerance = actor.get("position_tolerance")
+        if not finite(tolerance) or tolerance < 0:
+            failures.append(f"contract {name} position_tolerance must be finite and nonnegative")
+        for field, suffix in (("level", "level"), ("ranks", "ranks"),
+                              ("ability_points", "points")):
+            if actor.get(field) != declared.get(f"{name}_{suffix}"):
+                failures.append(f"declared_fixture.{name}_{suffix} disagrees with contract {field}")
+        for resource in ("hp", "energy"):
+            policy, exact = actor.get(f"{resource}_policy"), actor.get(f"{resource}_exact")
+            required_policy = name == "skye" or resource == "hp"
+            if (required_policy or policy is not None) and policy not in ("full", "exact"):
+                failures.append(f"{name}_{resource}_policy must be full/exact")
+            if (exact is not None and not finite(exact)) or (required_policy and policy == "exact" and not finite(exact)):
+                failures.append(f"{name}_{resource}_exact must be a finite number")
+            if required_policy and policy == "exact" and finite(exact) and exact < 0:
+                failures.append(f"{name}_{resource}_exact must be nonnegative")
+            if required_policy:
+                for suffix in ("policy", "exact"):
+                    key = f"{name}_{resource}_{suffix}"
+                    value = actor.get(f"{resource}_{suffix}")
+                    if value != declared.get(key) or value != contract.get(key):
+                        failures.append(f"declaration copies for {key} disagree")
+    skye, enemy = contract.get("skye"), contract.get("enemy")
+    if isinstance(skye, dict) and isinstance(enemy, dict):
+        if skye.get("position_tolerance") != enemy.get("position_tolerance"):
+            failures.append("contract skye/enemy position_tolerance differ")
+    return failures
+
+
 def validate_fixture(manifest: dict, contract: dict) -> list[str]:
     """Measured manifest vs the declared contract, applied to BOTH actors.
 
@@ -6733,6 +6806,45 @@ class ClientDriver:
 
     # -- scenario flows -----------------------------------------------------
 
+    def _validate_declared_preparation(self, slot: str) -> None:
+        """Refuse invalid declarations/unreachable learning before ANY gesture."""
+        declared = self.profile.get("declared_fixture")
+        if not isinstance(declared, dict):
+            raise ClientStageFailure("SETUP", "FAIL", "fixture declaration must be an object")
+        try:
+            self.fixture_contract = build_fixture_contract(self.profile, slot)
+        except (TypeError, ValueError) as exc:
+            raise ClientStageFailure("SETUP", "FAIL", f"malformed fixture declaration: {exc}") from exc
+        failures = validate_fixture_declaration(self.fixture_contract, declared, slot)
+        if not failures:
+            owner = self.skye()
+            ranks, points = owner.get("ranks"), owner.get("ability_points")
+            key = {"A": "0", "B": "1", "C": "2"}[slot]
+            # Snapshot points may legitimately be None before QA creates the
+            # economy. Never replace unknown state with invented zeroes.
+            if isinstance(ranks, dict):
+                planned_ranks = dict(ranks)
+                if ranks.get(key, 0) == 0:
+                    if (type(points) is int and points <= 0) or (slot == "C" and owner["level"] < 6):
+                        failures.append("no legal ordinary learning reaches the declared fixture")
+                    planned_ranks[key] = 1
+                if planned_ranks != declared["skye_ranks"]:
+                    failures.append("declared ranks/points unreachable by planned ordinary learning")
+                if type(points) is int:
+                    planned_points = points - int(ranks.get(key, 0) == 0)
+                    if planned_points != declared["skye_points"]:
+                        failures.append("declared ranks/points unreachable by planned ordinary learning")
+            for name, actor in (("skye", owner), ("enemy", self.enemy())):
+                for resource in (("hp", "energy") if name == "skye" else ("hp",)):
+                    if declared.get(f"{name}_{resource}_policy") == "exact" and actor:
+                        maximum = actor.get(f"max_{resource}")
+                        if type(maximum) in (int, float) and declared[f"{name}_{resource}_exact"] > maximum:
+                            failures.append(f"{name}-{resource} exact request is outside the actor's legal maximum {maximum}")
+        if failures:
+            raise ClientStageFailure("SETUP", "FAIL",
+                "declared fixture contract violated before input: " + "; ".join(failures))
+        self.observations["fixture_declaration"] = {"status": "PASS", "scope": "declaration/preparation only"}
+
     def _prepare_declared_fixture(self, slot: str) -> dict:
         """Declared fixture: restore the comparable HP/EP values through
         legal QA resources (receipts retained), then freeze the manifest
@@ -7201,9 +7313,15 @@ class ClientDriver:
                                   row.get("hp"), True)]}
             movement_samples = 0
             session_lost = False
-            deadline = time.monotonic() + window
+            sample_origin = time.monotonic()
+            deadline = sample_origin + window
             while time.monotonic() < deadline:
-                time.sleep(1.0)
+                # Schedule from one origin instead of accumulating census
+                # work and sleep overshoot into every later sample. Preserve
+                # actual receipt times below: stalls are still evidence, not
+                # rewritten timestamps or a relaxed comparison margin.
+                next_sample = sample_origin + movement_samples + 1.0
+                time.sleep(max(0.0, next_sample - time.monotonic()))
                 movement_samples += 1
                 try:
                     census = lane_census()
@@ -8389,6 +8507,9 @@ class ClientDriver:
             self.observations['wire_identity'] = {'eid': eid, 'slot': wire_slot, 'hero_id': hero_id,
                                                   'connection': self.connection}
             self._guard_nonvisual_movement_ui(observer)
+            if controlled:
+                self.refresh_rows()
+                self._validate_declared_preparation(slot)
             self._lock_nonvisual_camera(observer)
             self.refresh_rows()
             owner = self.skye()

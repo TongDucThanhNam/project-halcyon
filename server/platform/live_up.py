@@ -134,8 +134,12 @@ def main(argv=None) -> int:
                        "--host-https", str(args.device_host_https)]
         if args.match_host and args.match_host != "127.0.0.1":
             device_argv += ["--host", args.match_host]
-        rc = guest_setup.main(device_argv) and rc
-    print("[live] host side ready — relaunch the game and drive the taps")
+        device_rc = guest_setup.main(device_argv)
+        rc = rc or device_rc
+    if rc:
+        print("[live] guest setup failed — host is up, client routing is not qualified")
+    else:
+        print("[live] host side ready — relaunch the game and drive the taps")
     return rc
 
 

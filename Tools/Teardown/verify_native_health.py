@@ -7,7 +7,7 @@ grid is not hit calculation, full-match/client acceptance, or official server pa
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import itertools
 import json
@@ -174,19 +174,101 @@ class NativeHealth:
         return raw
 
 
-def production_split(case):
-    """Call the real StatusManager kernel, not a Python copy of the native math."""
-    if case.delta > 0 or case.flags != 0:
-        return None
+def production_pools(case):
+    """Persistent production pools for isolated or sequential aggregate hits."""
     from server.status_effects import StatusEffect, StatusManager, StatusType
     manager = StatusManager()
     for key, kind, amount in (("barrier", StatusType.BARRIER, case.barrier),
                               ("fortified", StatusType.FORTIFIED_HEALTH, case.fortified)):
         if amount:
             manager.apply_effect(StatusEffect(key, kind, 1, 1, 10, 0, 10, amount))
+    return manager
+
+
+def production_split(case):
+    """Call the real StatusManager kernel, not a Python copy of the native math."""
+    if case.delta > 0 or case.flags != 0:
+        return None
+    manager = production_pools(case)
     remaining, _ = manager.absorb_damage_with_barrier(1, -case.delta, 1, current_hp=case.hp)
     return (-remaining, 0, manager.get_barrier(1, 1) - case.barrier,
             manager.get_fortified_health(1, 1) - case.fortified)
+
+
+def float32(value):
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+SEQUENCES = (
+    ("barrier-then-fortified", Case("initial", 0, 500, 40, 120), (20, 40, 100, 300)),
+    ("current-hp-cap", Case("initial", 0, 30, 5, 100), (5, 20, 100)),
+    ("subunit-pools", Case("initial", 0, 1, .125, .375), (.125, .25, .5, 1)),
+)
+NON_DYADIC_CASES = (
+    Case("decimal-unprotected", -.1, .3, 0, 0),
+    Case("decimal-both-pools", -.3, 1, .1, .2),
+    Case("decimal-large", -123.456, 789.123, 12.345, 67.89),
+    Case("decimal-hp-cap", -100.1, 30.3, .1, 100.7),
+    Case("decimal-pool-exhaustion", -.7, .9, .2, .3),
+)
+
+
+def sequential_hits(first, second):
+    """Refeed aggregate pools; this does not execute native effect scheduling."""
+    sequences, failures = [], []
+    for name, initial, damages in SEQUENCES:
+        manager = production_pools(initial)
+        hp = initial.hp
+        native_state = (initial.hp, initial.barrier, initial.fortified)
+        rows = []
+        for index, damage in enumerate(damages):
+            case = Case(f"{name}-{index}", -damage, *native_state)
+            raw_a, raw_b = first.run(case), second.run(case)
+            output = struct.unpack("<4f", raw_a)
+            before = (hp, manager.get_barrier(1, 1), manager.get_fortified_health(1, 1))
+            remaining, _ = manager.absorb_damage_with_barrier(1, damage, 1, current_hp=hp)
+            production = (-remaining, 0, manager.get_barrier(1, 1) - before[1],
+                          manager.get_fortified_health(1, 1) - before[2])
+            hp = max(0, hp - remaining)
+            # Explicit harness accumulation at native storage precision, not
+            # a new rounding policy in the production simulation.
+            native_state = tuple(float32(max(0, value + output[offset]))
+                                 for value, offset in zip(native_state, (0, 2, 3)))
+            production_state = (hp, manager.get_barrier(1, 1), manager.get_fortified_health(1, 1))
+            matches = output == production and native_state == production_state
+            rows.append({"input": asdict(case), "native": output, "native_hex": raw_a.hex(),
+                         "production": production, "native_state_after": native_state,
+                         "production_state_after": production_state, "repeat_byte_exact": raw_a == raw_b,
+                         "production_exact_numeric_match": matches})
+            if raw_a != raw_b or not matches:
+                failures.append(case.name)
+        sequences.append({"name": name, "initial": asdict(initial), "hits": rows})
+    return sequences, failures
+
+
+def non_dyadic_measurements(first, second):
+    """Bounded float32-vs-production observations, NOT an epsilon-based gate.
+
+    Strict NativeHealth.run/validate_case are unchanged. Record explicit input
+    quantization separately from arithmetic deltas on equal float32 inputs.
+    """
+    rows, failures = [], []
+    for requested in NON_DYADIC_CASES:
+        native_input = replace(requested, **{key: float32(getattr(requested, key))
+                                            for key in ("delta", "hp", "barrier", "fortified")})
+        raw_a, raw_b = first.run(native_input), second.run(native_input)
+        output = struct.unpack("<4f", raw_a)
+        production = production_split(requested)
+        same_input = production_split(native_input)
+        rows.append({"requested_input": asdict(requested), "float32_native_input": asdict(native_input),
+                     "native": output, "native_hex": raw_a.hex(), "repeat_byte_exact": raw_a == raw_b,
+                     "production_requested_input": production, "production_float32_input": same_input,
+                     "native_minus_production": [a - b for a, b in zip(output, production)],
+                     "same_input_arithmetic_delta": [a - b for a, b in zip(output, same_input)],
+                     "numeric_parity": "MEASURED_ONLY_NOT_QUALIFIED"})
+        if raw_a != raw_b:
+            failures.append(requested.name)
+    return rows, failures
 
 
 def qualify(binary, include_grid=False):
@@ -209,20 +291,30 @@ def qualify(binary, include_grid=False):
         rows.append(row)
         if not repeatable or not branch_ok or matches is False:
             failures.append(case.name)
+    sequences, sequence_failures = sequential_hits(first, second)
+    measurements, measurement_failures = non_dyadic_measurements(first, second)
+    failures.extend(sequence_failures + measurement_failures)
+    sequence_rows = [hit for sequence in sequences for hit in sequence["hits"]]
+    count = len(rows) + len(sequence_rows) + len(measurements)
     return {
         "status": "FAIL" if failures else "PASS", "scope": "NATIVE_COMPONENT_ONLY",
         "binary": str(Path(binary).resolve()), "binary_sha256": BINARY_SHA256,
         "elf_va": hex(START), "native_bytes": SIZE, "unicorn": first.api.__version__,
         "fpcr": 0, "independent_engines": 2, "registers_and_inputs_reset_between_cases": True,
-        "case_count": len(rows), "native_executions": 2 * len(rows),
-        "production_comparisons": sum(row["production"] is not None for row in rows),
-        "repeat_byte_exact": all(row["repeat_byte_exact"] for row in rows),
+        "case_count": count, "isolated_case_count": len(rows), "native_executions": 2 * count,
+        "production_comparisons": sum(row["production"] is not None for row in rows) + len(sequence_rows),
+        "sequential_hit_count": len(sequence_rows), "non_dyadic_measurement_count": len(measurements),
+        "sequences": sequences, "non_dyadic_measurements": measurements,
+        "non_dyadic_max_abs_delta": max(abs(v) for row in measurements for v in row["native_minus_production"]),
+        "repeat_byte_exact": all(row["repeat_byte_exact"] for row in rows + sequence_rows + measurements),
         "failed_cases": failures, "cases": rows, "seconds": time.perf_counter() - started,
         "comparison_policy": "exact numeric equality on dyadic inputs; +0/-0 equivalent; native repeats byte-exact",
         "limits": [
             "Only signed-delta pool splitting; original damage/hit eligibility is an INPUT.",
             "Synthetic buffers, not a game process, actual device or original server executable.",
-            "Production comparison covers primary-pool damage with one barrier and one fortified pool.",
+            "Production comparison covers primary-pool damage with one barrier and one fortified pool, including sequential aggregate hits.",
+            "Sequential aggregate accumulation is harness code, not native effect scheduling or death cleanup.",
+            "Non-dyadic cases are measurement-only, with input quantization and arithmetic deltas retained; no production rounding policy changed.",
             "Healing, alternate-pool flags, pool expiry/multiple-pool ordering and non-dyadic rounding are not production-qualified here.",
             "No whole-match, smoothness, PvP or independent full-game fidelity acceptance."
         ],
@@ -260,7 +352,7 @@ def main(argv=None):
         result["error"] = "authored source changed during qualification"
     (output / "result.json").write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items()
-                      if key not in ("cases", "source_manifest")} |
+                      if key not in ("cases", "sequences", "non_dyadic_measurements", "source_manifest")} |
                      {"result": str(output / "result.json")}, indent=2))
     return 0 if result["status"] == "PASS" else 2 if result["status"] == "UNAVAILABLE" else 1
 

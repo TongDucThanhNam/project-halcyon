@@ -94,6 +94,32 @@ class ResourcePoolWireTests(unittest.TestCase):
         damage = next(i for i, (op, _) in enumerate(frames) if op == 1054)
         self.assertLess(gain, damage)
 
+    def test_expired_pool_removal_is_published_before_combat_at_exact_expiry(self):
+        self.pool('expired', 40, until=1)
+        self.drain()
+        frames = self.hit(80, 1)
+        expiry = next(i for i, (op, p) in enumerate(frames)
+                      if op == 1053 and p[8] == 4 and struct.unpack_from('>f', p, 4)[0] == -40)
+        hit = next(i for i, (op, _) in enumerate(frames) if op == 1054)
+        self.assertLess(expiry, hit)
+        self.assertEqual((self.hero.hp, self.native.barrier), (920, 0))
+
+    def test_1054_publishes_pre_pool_damage_even_when_fully_absorbed(self):
+        self.pool('barrier', 100)
+        frames = self.hit(80, 1)
+        damage = [struct.unpack_from('>f', p, 8)[0] for op, p in frames if op == 1054]
+        self.assertEqual(damage, [-80])
+        self.assertEqual((self.hero.hp, self.native.barrier), (1000, 20))
+        self.assertFalse(any(op == 1053 and p[8] == 0 for op, p in frames),
+                         '1054 already owns HP consumption; no duplicate HP delta')
+
+    def test_1054_publishes_pre_pool_damage_across_barrier_and_fortified(self):
+        self.pool('barrier', 20)
+        self.pool('fortified', 100, kind=StatusType.FORTIFIED_HEALTH)
+        frames = self.hit(100, 1)
+        self.assertEqual([struct.unpack_from('>f', p, 8)[0] for op, p in frames if op == 1054], [-100])
+        self.assertEqual((self.hero.hp, self.native.barrier, self.native.fortified), (960, 0, 60))
+
     def test_reconnect_and_refresh_or_cleanse_preserve_remaining_pool(self):
         self.pool('first', 200)
         self.pool('second', 100)

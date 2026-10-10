@@ -53,25 +53,33 @@ class MovementTimingTests(unittest.TestCase):
         world, _, _, _, _ = session()
         reference, _, _, _, _ = session()
         world.trace_movement_ticks = True
-        clock = [0.0]
+        clock, cpu = [0.0], [0]
         def qa_work(_):
             clock[0] += .011
         original_step = world._step_heroes
         def hero_work(*args):
             original_step(*args)
             clock[0] += .017
+            cpu[0] += 17_000_000
         world.qa = Mock(pump=qa_work)
         world._step_heroes = hero_work
         lines = []
         world.log = lines.append
-        with patch('server.match_server.time.monotonic', side_effect=lambda: clock[0]):
-            world.advance_simulation()
+        phases = {'stale': {}}
+        with (patch('server.match_server.time.monotonic', side_effect=lambda: clock[0]),
+              patch('server.match_server.time.thread_time_ns', side_effect=lambda: cpu[0])):
+            world.advance_simulation(phase_timings=phases)
             world._trace_movement_tick(0, 0)
         reference.advance_simulation()
         record = json.loads(lines[-1].split(' ', 1)[1])
         self.assertAlmostEqual(record['phases_ms']['qa'], 11)
         self.assertAlmostEqual(record['phases_ms']['heroes_effects'], 17)
         self.assertAlmostEqual(sum(record['phases_ms'].values()), 28)
+        self.assertNotIn('stale', phases)
+        self.assertAlmostEqual(phases['qa']['wall_ms'], 11)
+        self.assertEqual(phases['qa']['thread_cpu_ms'], 0)
+        self.assertAlmostEqual(phases['heroes_effects']['wall_ms'], 17)
+        self.assertEqual(phases['heroes_effects']['thread_cpu_ms'], 17)
         self.assertEqual((world.sim_tick, world.sim_time, world.hero_sim.position_fixed),
                          (reference.sim_tick, reference.sim_time, reference.hero_sim.position_fixed))
         world.trace_movement_ticks = False

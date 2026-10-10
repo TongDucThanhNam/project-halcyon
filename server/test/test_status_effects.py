@@ -178,6 +178,52 @@ class TestStatusManager(unittest.TestCase):
         self.assertAlmostEqual(self.sm.get_barrier(1500, now=11.0), 0.0)
 
 
+class TestCombatPoolContracts(unittest.TestCase):
+    """Authored individual-effect ordering; not a native multi-effect oracle."""
+
+    def setUp(self):
+        self.manager = StatusManager()
+
+    def pool(self, key, amount, expiry, kind=StatusType.BARRIER, applied=0):
+        effect = StatusEffect(key, kind, 1500, 1500, expiry - applied, applied, expiry, amount)
+        self.manager.apply_effect(effect)
+        return effect
+
+    def test_barrier_earliest_expiry_precedes_insertion_order(self):
+        late = self.pool("late-first", 40, 10)
+        early = self.pool("early-second", 30, 5)
+        self.assertEqual(self.manager.absorb_damage_with_barrier(1500, 35, 1, current_hp=100), (0, 35))
+        self.assertEqual((early.magnitude, late.magnitude), (0, 35))
+        self.assertEqual([e.effect_id for e in self.manager.effects[1500]], ["late-first"])
+
+    def test_barrier_equal_expiry_preserves_insertion_not_lexical_order(self):
+        first = self.pool("z-first", 30, 5)
+        second = self.pool("a-second", 40, 5)
+        self.assertEqual(self.manager.absorb_damage_with_barrier(1500, 35, 1, current_hp=100), (0, 35))
+        self.assertEqual((first.magnitude, second.magnitude), (0, 35))
+        self.assertEqual([e.effect_id for e in self.manager.effects[1500]], ["a-second"])
+
+    def test_fortified_halves_post_barrier_damage_but_is_capped_by_current_hp(self):
+        for hp, expected_remaining, expected_fortified in ((1000, 60, 90), (30, 90, 120), (0, 120, 150)):
+            with self.subTest(hp=hp):
+                self.manager = StatusManager()
+                self.pool("barrier", 20, 5)
+                fortified = self.pool("fortified", 150, 5, StatusType.FORTIFIED_HEALTH)
+                remaining, absorbed = self.manager.absorb_damage_with_barrier(1500, 140, 1, current_hp=hp)
+                self.assertEqual((remaining, absorbed), (expected_remaining, 140 - expected_remaining))
+                self.assertEqual(fortified.magnitude, expected_fortified)
+
+    def test_expiry_equality_and_later_times_exclude_both_pool_types(self):
+        for now in (1, 2):
+            with self.subTest(now=now):
+                self.manager = StatusManager()
+                barrier = self.pool("expired-barrier", 50, 1)
+                fortified = self.pool("expired-fortified", 50, 1, StatusType.FORTIFIED_HEALTH)
+                self.pool("future", 50, 5, applied=3)
+                self.assertEqual(self.manager.absorb_damage_with_barrier(1500, 100, now, current_hp=200), (100, 0))
+                self.assertEqual((barrier.magnitude, fortified.magnitude), (50, 50))
+
+
 class TestDamageModifierQueue(unittest.TestCase):
 
     def setUp(self):

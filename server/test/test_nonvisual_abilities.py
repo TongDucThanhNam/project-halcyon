@@ -233,6 +233,18 @@ class NonvisualAbilityTests(unittest.TestCase):
         self.adb.tap.assert_called_once_with(880, 92)
         self.qa.submit.assert_not_called()
 
+    def test_controlled_undeclared_fixture_refuses_before_unlocked_camera_gesture(self):
+        self.owner.update(ranks={'0': 0}, ability_points=1)
+        self.owner_obs.camera_control.return_value = {'eid': 1500, 'locked': False, 'center': [880, 92]}
+        with self.assertRaises(sc.ClientStageFailure) as caught:
+            self.driver.run_nonvisual_cast('A', controlled=True)
+        self.assertEqual(caught.exception.stage, 'SETUP')
+        self.assertIn('undeclared', caught.exception.detail)
+        self.adb.tap.assert_not_called()
+        self.adb.swipe.assert_not_called()
+        self.owner_obs.camera_control.assert_not_called()
+        self.driver._guard_nonvisual_movement_ui.assert_called_once_with(self.owner_obs)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -43,7 +43,18 @@ class NativeHealthContracts(unittest.TestCase):
         result = native.qualify(binary)
         self.assertEqual(result['status'], 'PASS')
         self.assertEqual((result['case_count'], result['native_executions'], result['production_comparisons']),
-                         (10, 20, 8))
+                         (26, 52, 19))
+        self.assertEqual(result['isolated_case_count'], 10)
+        self.assertEqual(result['sequential_hit_count'], 11)
+        self.assertEqual(result['non_dyadic_measurement_count'], 5)
+        for sequence in result['sequences']:
+            self.assertTrue(all(hit['production_exact_numeric_match'] for hit in sequence['hits']))
+            for before, after in zip(sequence['hits'], sequence['hits'][1:]):
+                self.assertEqual(before['native_state_after'], tuple(after['input'][k] for k in ('hp', 'barrier', 'fortified')))
+        self.assertGreater(result['non_dyadic_max_abs_delta'], 0,
+                           'measure actual float32-vs-production differences, never hide them behind a tolerance')
+        for measurement in result['non_dyadic_measurements']:
+            self.assertEqual(measurement['numeric_parity'], 'MEASURED_ONLY_NOT_QUALIFIED')
         self.assertTrue(result['repeat_byte_exact'])
         self.assertEqual(result['scope'], 'NATIVE_COMPONENT_ONLY')
 
