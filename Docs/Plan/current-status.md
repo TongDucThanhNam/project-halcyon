@@ -1,5 +1,33 @@
 # Current implementation and validation status
 
+## Workflow revision — 2026-10-11
+
+The operator approved a revised workflow: one integration/runtime owner plus at
+most one disjoint offline worker, per-change versus per-candidate gate cadence,
+operator-assisted menu entry and protocol participants for the remaining slots.
+The ordered list in the 2026-10-10 hand-off below (Live2 → secondary desktop) is
+**superseded** by the [milestones](one-week-acceleration.md#workflow-revision--2026-10-11);
+automated dual entry and secondary-desktop measurement are optional tooling.
+Six-real-client acceptance remains deferred. No acceptance status changes with this entry.
+
+**Milestone 2 PASS (server/session scope).** `Tools/protocol_participants.py`:
+six wire-only participants (Skye/Catherine/Adagio vs Ringo/Gwen/Amael, slots
+0/1/2 vs 3/4/5) pass draft/readiness with production defaults and each reach an
+authoritative outcome for learn (`1078`→1082/1162), native cast (`1041/1042`),
+move (1016), attack (1054), purchase (1085) and Recall; Skye reconnects with the
+same identity. Evidence `Local/evidence/protocol-participants-cd784e2192ec44a482f89274dcdc7255/`.
+This does not prove native-client behavior, complete kits or a finished match.
+
+**Late-match deadline regression found and repaired.** The default verifier
+failed the unchanged 50 ms gate twice on this source, once on a CPU-qualified
+host (max 77.4 / 53.5 ms; `Local/evidence/halcyon-sandbox-verify-4ezdhojw/`),
+dominated by wave-phase scans over retained minion history. `server/wave.py`
+now uses live/spatial indexes preserving iteration order; profile 900–960 s wave
+time 16.9→10.8 s, distance calls 5.31M→0.64M. Stream/state/checkpoint hashes are
+identical to the failing run, and the qualified rerun passes (max 17.6 / 21.2 ms;
+`Local/evidence/halcyon-sandbox-verify-i9ofyrwi/`). Retained objects are not
+pruned; memory growth over 30 minutes remains an M3 measurement.
+
 ## Entry checkpoint — 2026-10-10
 
 **Session hand-off (operator ended the day after rev8).** Committed state:

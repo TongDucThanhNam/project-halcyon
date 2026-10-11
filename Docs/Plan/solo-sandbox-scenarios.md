@@ -663,6 +663,11 @@ procedures below. Existing runner client scenarios `movement-walk`,
 ordinary ADB inputs. Select an already-qualified WORLD with explicit
 `--wire-trace`, `--connection`, `--adb-serial` and, except reference walking,
 `--qa-dir`. No recorder or screenshot-based entry guard runs on these paths.
+Since 2026-10-11 that WORLD may come from **operator-assisted entry** (a human
+performs ordinary PLAY/selection/LOCK IN); every nonvisual WORLD qualification
+and entry-time limit still applies after handoff, and human observation is never
+setup or acceptance evidence. See the
+[workflow revision](one-week-acceleration.md#workflow-revision--2026-10-11).
 The historical `minion-push` client driver has not yet been converted; do not
 run its image-dependent path. Production headless minion checks remain usable.
 

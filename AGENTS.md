@@ -36,9 +36,12 @@ simulation server-side. That is the actual work.
 
 Artifacts that are **never tracked in Git** (by IP rule, see below):
 `.pcap`, `.vgr`, decrypted payloads, extracted textures/models, the deobfuscated
-binary. Per the operator's 2026-09-13 relocation request, owned inputs may
-live physically under the project's Git-ignored `Local/` directory. New QA
-evidence stays outside the checkout. See `Docs/Setup/windows-local-development.md`.
+binary. Per the operator's 2026-10-11 consolidation request, the checkout is
+`D:/project-halcyon` and all owned inputs, runtime files and QA evidence belong
+under its Git-ignored `Local/` directory. New evidence goes in unique
+`Local/evidence/` directories, not drive roots, AppData or system TEMP.
+This supersedes older outside-checkout storage instructions in historical leaves.
+See `Docs/Setup/windows-local-development.md`.
 
 ---
 
@@ -157,7 +160,7 @@ are not, and must be derived or rebuilt.
   in `Local/research/`, and platform configuration in `Local/runtime/halcyon_stack/`.
   `server/paths.py` supports explicit overrides and legacy locations. Historical
   `D:/Downloads/vg/` and `$TEMP/vg_max/` references remain evidence provenance.
-  Keep new QA output outside the checkout; never track payloads in Git.
+  Keep new QA output under ignored `Local/evidence/`; never track payloads in Git.
 
 ## Verification strategy
 
@@ -240,15 +243,19 @@ status. Do not invent another executable path for these scenarios.
 instrumented client acceptance, and independently measured gameplay fidelity. A passing test
 count alone never closes faithful-gameplay acceptance.
 
-**Artifacts.** Keep all QA output outside the repo; never delete old journals/captures
+**Artifacts.** Keep all QA output under Git-ignored `Local/evidence/`; never delete old journals/captures
 to prepare a new run; allocate unique output directories. The existing boundary on no
 assets/payloads in the repo remains unchanged.
 
 ## Current phase
 
 The **2026-10-04 audit and active execution workflow** is
-`Docs/Plan/one-week-acceleration.md`: one owner, no delegation; CPU/native-first
-inner loop with targeted nonvisual client evidence only when needed. Full
+`Docs/Plan/one-week-acceleration.md`: one integration/runtime owner; at most one
+additional offline worker on explicitly disjoint files and pinned inputs. No
+concurrent runtime control or competing heavy measurement work (operator,
+2026-10-11). CPU/native-first inner loop with targeted nonvisual client evidence
+only when needed; ordinary menu entry may be operator-assisted (see the
+acceleration leaf's workflow revision). Full
 faithful PvP remains the target, not a one-week completion claim. Current full
 test and deadline failures are explicit release blockers, not waived gates.
 

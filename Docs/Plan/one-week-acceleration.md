@@ -2,7 +2,11 @@
 
 ## Decision and completion boundary
 
-**One owner; no delegation. Binary-first, CPU-only for the inner loop.** Reuse
+**One integration/runtime owner; at most one additional offline worker on
+explicitly disjoint files and pinned inputs** (operator, 2026-10-11; see
+[workflow revision](#workflow-revision--2026-10-11)). No concurrent runtime
+control or competing heavy measurement work. **Binary-first, CPU-only for the
+inner loop.** Reuse
 the existing production simulation and scenario runner. Do not launch LDPlayer
 for each hypothesis, rewrite the engine, hunt leaked sources, or revive broad
 binary/codec dead ends. No images, recording or visual acceptance dependencies.
@@ -808,6 +812,15 @@ not a guessed engine deadlock, is why it is outside the edit-by-edit smoke loop.
 5. Preserve the external result, update the behavior board, and proceed to the
    next contract. Full discovery and full production gates still run at freeze.
 
+**Gate cadence (2026-10-11).** Per meaningful code change: `--suite smoke`, tests
+selected by *behavioral* impact (longer focused lanes when shared timing/schema/
+driver code changes), and the seven exact headless pairs. Per frozen integration
+candidate, normally at most one per day: `--suite all` with reviewed skips, the
+seven pairs on that pin and the unchanged verifier/deadline gate. `--suite all`
+already includes `legacy-client`; do not run that lane separately without a
+diagnostic reason. A deferred candidate is not qualified by an earlier day's
+results. Release requirements below are unchanged.
+
 Bounded RE rule: spend at most 60–90 minutes on one **known-anchor** experiment
 before recording what is missing. After two failed setup attempts without new
 evidence, stop that experiment and continue an independent offline item. Do not
@@ -898,15 +911,18 @@ remains open even when local native consumer behavior matches Halcyon output.
 
 ## Seven-day dependency schedule
 
-Relative days begin with the execution sprint, not the host clock. One owner
-works sequentially; long checks run while doing non-overlapping documentation
-or read-only analysis. Do not edit hashed code during a measured run.
+Relative days begin with the execution sprint, not the host clock. Workers may
+perform disjoint offline work concurrently; integration and measured runtime/
+performance gates remain single-owner and source-pinned. Long checks run while
+doing non-overlapping documentation or read-only analysis. Do not edit hashed
+code during a measured run. The 2026-10-11 milestone order in the
+[workflow revision](#workflow-revision--2026-10-11) supersedes Day 3 below.
 
 | Day | Highest-leverage work | Exit evidence, not a promise |
 |---|---|---|
 | 1 | Stabilize the audited workflow; migrate legacy client fixtures to the new nonvisual contract; lock a declared hero/item coverage matrix | Full discovery with every failure/skip classified; no bypassed focus/native guards; CPU/native and source-pin commands reproducible |
 | 2 | Shared movement/pursuit, combat pool ordering and long-run overload attribution before new kits | Named regression and exact two-process scenario; phase/tick attribution for deadline misses; targeted native client trajectory evidence where needed |
-| 3 | Two actual clients first, then six owned headless sessions against our local server | Team/owner isolation, target locks, damage/death, disconnect/rejoin and late-join state; headless six-session success is not six-device acceptance |
+| 3 | Six protocol participants and two operator-assisted actual clients may progress independently; neither substitutes for the other's acceptance evidence | Team/owner isolation, target locks, damage/death, disconnect/rejoin and late-join state; headless six-session success is not six-device acceptance |
 | 4 | One ordinary complete match on the declared composition | Shop/skills, lane/jungle/objectives, turret protection/aggro, death/respawn, base destruction, result and menu return, without forced casts/kills |
 | 5 | Close critical shared fidelity gaps and the chosen composition's remaining mechanics; assists/vision where exposed | Native/reference-backed boundary cases and retained contradictory evidence; unqualified broader kits remain listed |
 | 6 | Freeze a source/config/input pin; full tests, seven headless pairs, 960 s verifier and real-duration client soak | All release gates pass on the candidate; real client stability observation includes the previously problematic ~30-minute window |
@@ -936,6 +952,59 @@ match acceptance, and explicit independent-reference coverage/unknowns. A fixed
 960-second simulation runs faster than wall time and does **not** replace a real
 client soak. The long verifier's current workload has no hero deaths/respawns or
 match finish; separate lifecycle/client evidence is mandatory.
+
+### Workflow revision — 2026-10-11
+
+Operator-approved after a Claude/Codex review of rev1–rev8. Automated dual
+LDPlayer menu→WORLD entry blocked every recent revision and repeated full/legacy
+gates cost about 146 minutes across five freezes; more offline agents alone do
+not move either. Boundaries, invariant 7, determinism, unchanged checks and the
+release gate above are **not** relaxed.
+
+- **Roles.** Integration/runtime owner: `server/match_server.py`,
+  `Tools/run_scenarios.py`, `Tools/scenario_client.py`, status docs, device
+  control and candidate gates. At most one offline worker on new or explicitly
+  disjoint files; it never starts emulators, Frida, the stack or the verifier.
+- **Operator-assisted entry.** A human may perform ordinary PLAY/selection/LOCK IN.
+  Human visual judgment is never the setup guard or acceptance evidence: after
+  handoff the existing nonvisual WORLD qualification (build, device/process,
+  connection, owner/EID/slot, hero, ready echo, progressing WORLD, native HUD,
+  initial state) and existing-WORLD attachment (`drive_entry:false`) apply
+  unchanged, including entry-time limits. Automated dual entry is optional
+  tooling, off the critical path. Android startup/readiness failures remain
+  SETUP/BLOCKED.
+- **Protocol participants.** Non-rendering clients use only the ordinary wire
+  path against our own server: gateway/socket, `1118`/`1123` draft, readiness,
+  `1078` skill learning, native `1041/1042` casts, `1012`, `1060`, shop/Recall.
+  No teleport, forced state/WORLD, direct `_apply_event` or HP/XP edits. They
+  prove server/session behavior, not native client behavior.
+- **Determinism split.** Wall-paced socket runs prove lifecycle/stability; exact
+  determinism is proved by replaying a recorded application-order input journal
+  through production dispatch in two processes.
+- **Documentation.** One dated status entry per day; per-run detail lives in
+  `Local/evidence/<run>/summary.json` with links to logs/traces/manifests.
+
+Milestones toward a playable 3v3 (exit evidence in parentheses):
+
+1. Pin worktree/config/input hashes and the declared six-hero composition
+   (Skye, Ringo, Catherine, Gwen, Adagio, Amael).
+2. Six wire participants (distinct identities, correct owner/slot, legal
+   learn/cast/move/attack/shop/Recall, normal readiness, same-identity reconnect).
+3. Real-duration wire-only full server lifecycle (natural death/respawn,
+   reconnect, crystal→result; deadline/latency/crash recorded; timeout ≠ finish).
+4. Exact recorded-input replay (two independent production replays, exact
+   event/state/checkpoint equality).
+5. Operator-assisted native validation: one real client + five participants,
+   then two + four (reciprocal native effects, continuity, reconnect); may run
+   alongside 2–4.
+6. Complete ordinary mixed match on the declared composition, no forced state.
+7. Freeze candidate: full gates plus real-client stability across the
+   historical ~30-minute window.
+8. Six real clients (friend group) complete a fresh match — when the operator
+   reopens the deferred six-client milestone.
+
+CE reference qualification is a bounded fidelity task beside this sequence,
+not a prerequisite for admission or complete-match work.
 
 Routes: [current status](current-status.md), [differential validation](differential-validation.md),
 [scenario contracts](solo-sandbox-scenarios.md), [performance](solo-sandbox-performance.md),

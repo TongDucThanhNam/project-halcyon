@@ -19,6 +19,7 @@ from .combat import basic_attack_reach
 from dataclasses import dataclass, field
 import heapq
 import math
+from weakref import WeakKeyDictionary
 
 
 SANDBOX_MINION_PROFILES = (
@@ -217,6 +218,75 @@ class Minion:
         return self.seg >= len(self.path)
 
 
+class _MinionIndex:
+    """Derived indexes over the director's append-only history, not game state.
+
+    Retain historical identity lookup for launched contacts after source death.
+    Only living actors and pending corpses need tick/reconnect traversal.
+    Replacing the history list (standalone fixtures) rebuilds the cache.
+    """
+
+    def __init__(self, director):
+        self.history = director.minions
+        self.count = 0
+        self.actors = {}
+        self.present = {}
+
+    def extend(self, director):
+        for minion in self.history[self.count:]:
+            self.actors[minion.eid] = minion
+            if minion.alive or minion.eid in director.pending_removals:
+                self.present[minion.eid] = minion
+        self.count = len(self.history)
+
+
+# Like navigation's geometry caches, these indexes are derived, excluded from
+# canonical gameplay state and disposable. Weak keys do not retain matches.
+_MINION_INDEXES = WeakKeyDictionary()
+
+
+class _MinionNeighborhood:
+    """Conservative broad phase, preserving the original fighter-list order.
+
+    Movement is sequential: update each cell after that actor's final position,
+    including ally obstruction. Exact existing float distance tests still make
+    every gameplay decision; cells only exclude impossible candidates.
+    """
+    CELL = 8 * SCALE
+
+    def __init__(self, fighters):
+        self.order = {minion: index for index, minion in enumerate(fighters)}
+        self.cells = {}
+        self.locations = {}
+        for minion in fighters:
+            self.update(minion)
+
+    def update(self, minion):
+        cell = minion._x // self.CELL, minion._y // self.CELL
+        previous = self.locations.get(minion)
+        if previous == cell:
+            return
+        if previous is not None:
+            self.cells[previous].remove(minion)
+            if not self.cells[previous]:
+                del self.cells[previous]
+        self.cells.setdefault(cell, set()).add(minion)
+        self.locations[minion] = cell
+
+    def near(self, minion, radius):
+        if not math.isfinite(radius):
+            return list(self.order)
+        # One extra lattice unit is conservative around float conversion at
+        # cell/radius boundaries. The narrow phase retains its old arithmetic.
+        reach = math.ceil(radius * SCALE) + 1
+        x, y = minion.position_fixed
+        candidates = []
+        for cx in range((x - reach) // self.CELL, (x + reach) // self.CELL + 1):
+            for cy in range((y - reach) // self.CELL, (y + reach) // self.CELL + 1):
+                candidates.extend(self.cells.get((cx, cy), ()))
+        return sorted(candidates, key=self.order.__getitem__)
+
+
 class Director:
     """Schedules waves and produces the s2c payloads, deterministically.
 
@@ -250,6 +320,18 @@ class Director:
         self._state_catalog = None
         self.pending_contacts: list[PendingMinionContact] = []
         self._contact_serial = 0
+
+    def _minion_index(self):
+        index = _MINION_INDEXES.get(self)
+        if index is None or index.history is not self.minions or index.count > len(self.minions):
+            index = _MinionIndex(self)
+            _MINION_INDEXES[self] = index
+        index.extend(self)
+        return index
+
+    def present_minions(self):
+        """Spawn-order actors not yet despawned; history remains in minions."""
+        return self._minion_index().present.values()
 
     # -- pair emission (corpus raw-burst order) ------------------------------
 
@@ -335,7 +417,7 @@ class Director:
 
     def _present_at(self, now):
         now = self._last_now if now is None else now
-        return sorted((m for m in self.minions if m.spawn_at <= now and
+        return sorted((m for m in self.present_minions() if m.spawn_at <= now and
                        (m.alive or m.eid in self.pending_removals)), key=lambda m: m.eid)
 
     def get_spawn_frames(self, now=None, *, actor_slots=None):
@@ -393,6 +475,7 @@ class Director:
         """Emit native death now; keep the actor and its slot until corpse removal."""
         if not victim.alive:
             return []
+        self._minion_index()
         victim.hp, victim.alive = 0.0, False
         victim.target = victim.target_hero = None
         victim.next_attack_at = None
@@ -401,6 +484,7 @@ class Director:
 
     def _flush_removals(self, now):
         frames = []
+        index = self._minion_index()
         for eid, (due, _, _) in sorted(self.pending_removals.items(), key=lambda item: (item[1][0], item[0])):
             if due > now:
                 continue
@@ -408,6 +492,7 @@ class Director:
                            (OP_DESPAWN_1035, roster.build_despawn(eid))))
             self.actor_slots.release(eid)
             del self.pending_removals[eid]
+            index.present.pop(eid, None)
         return frames
 
     # -- pump ----------------------------------------------------------------
@@ -444,12 +529,11 @@ class Director:
                     out.append((OP_STATE_1067, roster.build_entity_state(
                         m.eid, m.side, roster.ENTITY_STATE_MOVING)))
 
-        fighters = [m for m in self.minions if m.alive and m.spawn_at <= now]
-        for m in self.minions:
-            if not m.alive or now < m.spawn_at:
-                continue
+        fighters = [m for m in self.present_minions() if m.alive and m.spawn_at <= now]
+        neighborhood = _MinionNeighborhood(fighters)
+        for m in fighters:
             self._attach_navigation(m)
-            focus = self._select_target(m, fighters, structures) if self.combat else None
+            focus = self._select_target(m, fighters, structures, neighborhood) if self.combat else None
             before, previous_seg = (m.x, m.y), m.seg
             dt = max(0.0, now - m._last_step)
             m._last_step = now  # Stopped/CC time must never become later travel.
@@ -471,7 +555,7 @@ class Director:
             # Preserve spawn staggering at a combat front: do not walk into
             # the occupied disc of the next ally. The front advances on death.
             if (m.x, m.y) != before and self.rules.ally_spacing > 0:
-                for ally in fighters:
+                for ally in neighborhood.near(m, self.rules.ally_spacing):
                     if ally is m or not ally.alive or ally.side != m.side:
                         continue
                     old_distance = self._dist_pos(ally, *before)
@@ -479,6 +563,7 @@ class Director:
                         m.x, m.y = before
                         m.seg = previous_seg
                         break
+            neighborhood.update(m)
             order_frames = []
             if dt or not can_move:
                 # Publish the next reachable waypoint only while the actor
@@ -503,7 +588,7 @@ class Director:
                             all_heroes=all_heroes, on_projectile_release=on_projectile_release)
         return out
 
-    def _select_target(self, minion, fighters, structures=None):
+    def _select_target(self, minion, fighters, structures=None, neighborhood=None):
         hero = minion.target_hero
         if hero is not None:
             if not hero.is_alive or hero.team == minion.side or jungle.JungleManager.is_in_brush(hero.x, hero.y) or self._dist(minion, hero) > max(6.0, minion.attack_range):
@@ -513,7 +598,9 @@ class Director:
         if minion.target is not None and (not minion.target.alive or self._dist(minion, minion.target) > self.rules.aggro_range + 2):
             minion.target = None
         if minion.target is None:
-            foes = [other for other in fighters if other.alive and other.side != minion.side
+            nearby = (fighters if neighborhood is None else
+                      neighborhood.near(minion, max(self.rules.aggro_range, minion.attack_range)))
+            foes = [other for other in nearby if other.alive and other.side != minion.side
                     and self._dist(minion, other) <= max(self.rules.aggro_range, minion.attack_range)]
             if not foes and structures is None and (minion.arrived or minion.has_engaged):
                 # A standalone lane has no next structure to march toward.
@@ -545,12 +632,15 @@ class Director:
         if not self.pending_contacts:
             return out
         tick = self._contact_clock(now)
-        actors = {m.eid: m for m in self.minions if m.spawn_at <= now}
+        actors = self._minion_index().actors
+        def actor_at(eid):
+            actor = actors.get(eid)
+            return actor if actor is not None and actor.spawn_at <= now else None
         def valid(pending):
             minion, target = pending.source, pending.target
             if minion.eid != pending.source_eid:
                 return False
-            owner = actors.get(pending.source_eid)
+            owner = actor_at(pending.source_eid)
             # Windup needs its living original source. Once 1037 is released,
             # source death/removal and movement cannot recall the projectile.
             # A different actor reusing the source EID never inherits it.
@@ -564,7 +654,7 @@ class Director:
             if target.eid != pending.target_eid or not getattr(target, 'is_alive', getattr(target, 'alive', False)):
                 return False
             if isinstance(target, Minion):
-                return actors.get(pending.target_eid) is target
+                return actor_at(pending.target_eid) is target
             if isinstance(target, HeroMovement):
                 return all_heroes is None or all_heroes.get(pending.target_eid) is target
             return structures is not None and structures.structures.get(pending.target_eid) is target
@@ -627,11 +717,12 @@ class Director:
                                      damage_callback=damage_callback, all_heroes=all_heroes,
                                      on_projectile_release=on_projectile_release,
                                      status_manager=status_manager)
-        fighters = [m for m in self.minions if m.alive and m.spawn_at <= now]
+        fighters = [m for m in self.present_minions() if m.alive and m.spawn_at <= now]
+        neighborhood = _MinionNeighborhood(fighters)
         for minion in fighters:
             if not minion.alive:
                 continue
-            target = self._select_target(minion, fighters, structures)
+            target = self._select_target(minion, fighters, structures, neighborhood)
             if target is None or not self._in_attack_range(minion, target):
                 continue
             if status_manager is not None and not status_manager.can_attack(minion.eid, now):
@@ -667,19 +758,19 @@ class Director:
 
     def on_minion_damaged_by_hero(self, victim_eid: int, hero: "Any"):
         """Aggro phản đòn: minion attacked by hero (and nearby allies within 4u) switch target to hero."""
-        victim = next((m for m in self.minions if m.eid == victim_eid and m.alive), None)
-        if victim is None:
+        victim = self._minion_index().actors.get(victim_eid)
+        if victim is None or not victim.alive:
             return
         victim.target_hero = hero
-        for m in self.minions:
+        for m in self.present_minions():
             if m.alive and m.side == victim.side and self._dist(m, victim) <= 4.0:
                 m.target_hero = hero
 
     def apply_hero_damage_to_minion(self, victim_eid: int, damage: float, hero: "Any", now=None) -> list[tuple[int, bytes]]:
         """Apply hero damage/aggro and native death; removal follows the corpse period."""
         out = []
-        victim = next((m for m in self.minions if m.eid == victim_eid and m.alive), None)
-        if victim is None:
+        victim = self._minion_index().actors.get(victim_eid)
+        if victim is None or not victim.alive:
             return out
         victim.hp -= damage
         self.on_minion_damaged_by_hero(victim_eid, hero)
