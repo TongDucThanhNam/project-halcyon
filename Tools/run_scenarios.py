@@ -124,6 +124,8 @@ ISOLATED_ENVIRONMENT = (
 # inside the snapshot) and the worker asserts that before simulating.
 PINNED_TOOLS = ("Tools/run_scenarios.py", "Tools/scenario_client.py",
                 "Tools/journal_replay.py",
+                "Tools/protocol_host.py", "Tools/protocol_participants.py", "Tools/protocol_observer.py",
+                "Tools/protocol_policy.py", "Tools/protocol_telemetry.py",
                 "Tools/nonvisual_entry.py", "Tools/native_ui.py", "Tools/Teardown/client_input_state.js",
                 "Tools/verification_support.py",
                 "Tools/verify_sandbox.py", "Tools/classic_client.py",
@@ -495,6 +497,9 @@ class WorldEvidence:
         self.minion_pos_at_fixture: dict[int, tuple[float, float]] = {}
         self.minion_peak: dict[int, tuple[float, float]] = {}    # best toward-enemy pos
         self.minion_last_pos: dict[int, tuple[float, float]] = {}
+        # Evidence owns historical identity. Production may forget actors after
+        # 1035; earlier combat and peak movement must still be classified.
+        self.minion_sides: dict[int, int] = {}
         self.guard_samples: list[tuple[int, int, float, float, bool, bool]] = []
         self._structure_hp: dict[int, float] = {}
         self._last_wave_index = None
@@ -502,6 +507,7 @@ class WorldEvidence:
     def observe(self, tick: int, frames: list[tuple[int, bytes]]) -> None:
         if self.world.wave_director:
             for m in self.world.wave_director.minions:
+                self.minion_sides[m.eid] = m.side
                 if m.alive:
                     prev = self.minion_peak.get(m.eid)
                     if (prev is None
@@ -1118,8 +1124,7 @@ def _survivor_advance(evidence: WorldEvidence, side: int) -> float:
     die under turret fire after advancing; the peak captures the push."""
     best = 0.0
     for eid, start in evidence.minion_pos_at_fixture.items():
-        minion = next((m for m in evidence.world.wave_director.minions if m.eid == eid), None)
-        if minion is None or minion.side != side:
+        if evidence.minion_sides.get(eid) != side:
             continue
         peak = evidence.minion_peak.get(eid)
         if peak is None:
@@ -1145,10 +1150,10 @@ def _guard_deltas(evidence: WorldEvidence, world) -> list[dict]:
     for eid, samples in sorted(by_eid.items()):
         if len(samples) < 2:
             continue
-        minion = next((m for m in world.wave_director.minions if m.eid == eid), None)
-        if minion is None:
+        side = evidence.minion_sides.get(eid)
+        if side is None:
             continue
-        turret = outer[3539] if minion.side == 1 else outer[3545]
+        turret = outer[3539] if side == 1 else outer[3545]
         first, last = samples[0], samples[-1]
         d0 = math.dist((first[1], first[2]), (turret.x, turret.y))
         d1 = math.dist((last[1], last[2]), (turret.x, turret.y))
@@ -1218,7 +1223,7 @@ def _minion_scenario_common(run: ScenarioRun, result: dict, *, window: int,
     run.finish()
 
     evidence = run.evidence
-    minion_eids = _minion_eids(world)
+    minion_eids = set(evidence.minion_sides)
     minion_combat = [(t, v, a, d) for t, v, a, d in evidence.damage
                      if v in minion_eids and a in minion_eids]
     if not minion_combat:

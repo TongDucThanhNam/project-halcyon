@@ -219,9 +219,9 @@ class Minion:
 
 
 class _MinionIndex:
-    """Derived indexes over the director's append-only history, not game state.
+    """Derived indexes over retained actors, not game state.
 
-    Retain historical identity lookup for launched contacts after source death.
+    Launched contacts retain their own source reference after removal.
     Only living actors and pending corpses need tick/reconnect traversal.
     Replacing the history list (standalone fixtures) rebuilds the cache.
     """
@@ -330,7 +330,7 @@ class Director:
         return index
 
     def present_minions(self):
-        """Spawn-order actors not yet despawned; history remains in minions."""
+        """Spawn-order actors not yet despawned."""
         return self._minion_index().present.values()
 
     # -- pair emission (corpus raw-burst order) ------------------------------
@@ -482,9 +482,10 @@ class Director:
         self.pending_removals[victim.eid] = (now + self.rules.corpse_duration, victim, killer_eid)
         return [(1072, build_hero_death(victim.eid, killer_eid))]
 
-    def _flush_removals(self, now):
+    def _flush_removals(self, now, status_manager=None):
         frames = []
         index = self._minion_index()
+        removed = set()
         for eid, (due, _, _) in sorted(self.pending_removals.items(), key=lambda item: (item[1][0], item[0])):
             if due > now:
                 continue
@@ -493,6 +494,15 @@ class Director:
             self.actor_slots.release(eid)
             del self.pending_removals[eid]
             index.present.pop(eid, None)
+            removed.add(eid)
+        if removed:
+            # Corpses no longer publish after 1035. Released contacts own their
+            # source object and accept an absent source lookup; living targets
+            # and windups still require exact identity. Never recycle an EID.
+            self.minions = [m for m in self.minions if m.eid not in removed]
+            _MINION_INDEXES.pop(self, None)
+            if status_manager is not None:
+                status_manager.forget_removed(removed)
         return frames
 
     # -- pump ----------------------------------------------------------------
@@ -501,7 +511,7 @@ class Director:
              navigation=None, status_manager=None, damage_callback=None, all_heroes=None,
              on_projectile_release=None):
         """Return every frame due at `now`, in corpus emission order."""
-        out: list[tuple[int, bytes]] = self._flush_removals(now)
+        out: list[tuple[int, bytes]] = self._flush_removals(now, status_manager)
         self._last_now = now
         if navigation is not None and navigation is not self.navigation:
             self.navigation = navigation

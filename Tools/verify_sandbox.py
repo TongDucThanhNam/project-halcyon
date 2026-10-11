@@ -639,7 +639,9 @@ def run_worker(args) -> dict:
             coverage["invariant_ticks"] += 1
             coverage["peak_live_minions"] = max(coverage["peak_live_minions"], live_minions)
             coverage["peak_entities"] = max(coverage["peak_entities"],
-                len(world.hero_sims) + len(minions) + len(world.jungle.monsters) + len(world.structures.structures))
+                # Preserve this historical coverage counter's original meaning:
+                # all observed minion identities, not only retained/live actors.
+                len(world.hero_sims) + len(seen_minions) + len(world.jungle.monsters) + len(world.structures.structures))
             coverage["gold_miner_spawned"] |= world.jungle._gold_spawned
             coverage["kraken_spawned"] |= world.jungle._kraken_spawned
             if world.structures.match_finished and coverage["match_finished_at"] is None:

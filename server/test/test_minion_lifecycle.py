@@ -11,6 +11,66 @@ from server.test.test_corpus import VGFULL_PCAP, _cached_frames
 
 
 class TestMinionCorpse(unittest.TestCase):
+    def test_removed_history_and_indexes_are_bounded_and_serials_forget_only_removed(self):
+        from server.status_effects import StatusEffect, StatusManager, StatusType
+        director = wave.Director(1_000_000, combat=False)
+        statuses = StatusManager()
+        statuses.apply_effect(StatusEffect('hero', StatusType.STUN, 1500, 1500, 1, 0, 1))
+        hero_serial = statuses.get_attack_interrupt_serial(1500)
+        previous_eid = 0
+        for generation in range(50):
+            now = generation * 10.0
+            director._spawn_pair(now, 0)
+            actors = list(director.minions)
+            self.assertEqual(len(actors), 2)
+            self.assertGreater(actors[0].eid, previous_eid)
+            previous_eid = actors[-1].eid
+            for actor in actors:
+                statuses.apply_effect(StatusEffect('cc', StatusType.STUN, 1500, actor.eid, 1, now, now+1))
+                director.on_minion_death(actor, 1500, now)
+            director._flush_removals(now+3.799, statuses)
+            self.assertEqual(len(director.minions), 2)
+            director._flush_removals(now+3.8, statuses)
+            self.assertEqual(director.minions, [])
+            self.assertEqual(director._minion_index().actors, {})
+            self.assertEqual(list(director.present_minions()), [])
+            self.assertEqual(set(statuses._attack_interrupt_serial), {1500})
+            self.assertEqual(statuses.get_attack_interrupt_serial(1500), hero_serial)
+            statuses.clean_expired(now+4)
+            # Scheduled spawn-state references expire through the real pump,
+            # with automatic waves not due during this manual-spawn fixture.
+            director.pump(now+4, status_manager=statuses)
+            self.assertEqual(director.pending_states, [])
+
+    def test_released_contact_survives_source_removal_but_dead_windup_does_not(self):
+        for released in (True, False):
+            with self.subTest(released=released):
+                director = wave.Director(0)
+                director._spawn_pair(0, 3)
+                source, target = director.minions
+                director.pending_contacts = [wave.PendingMinionContact(
+                    100, 1, source, target, source.eid, target.eid, 17,
+                    release_tick=10, released=released)]
+                director.on_minion_death(source, 1500, 0)
+                director._flush_removals(3.8)
+                self.assertNotIn(source.eid, director._minion_index().actors)
+                before = target.hp
+                frames = director._resolve_contacts(5)
+                self.assertEqual(target.hp, before - (17 if released else 0))
+                self.assertEqual([op for op, _ in frames], [1054] if released else [])
+                self.assertEqual(director.pending_contacts, [])
+
+    def test_contact_to_removed_target_is_discarded(self):
+        director = wave.Director(0)
+        director._spawn_pair(0, 3)
+        source, target = director.minions
+        director.pending_contacts = [wave.PendingMinionContact(
+            100, 1, source, target, source.eid, target.eid, 17, released=True)]
+        director.on_minion_death(target, 1500, 0)
+        director._flush_removals(3.8)
+        self.assertEqual(director._resolve_contacts(5), [])
+        self.assertEqual(director.pending_contacts, [])
+
     def test_lethal_hit_marks_death_once_and_retains_slot_until_exact_removal_boundary(self):
         slots = ActorSlots(capacity=8)
         director = wave.Director(0, actor_slots=slots, combat=False)

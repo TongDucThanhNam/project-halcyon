@@ -67,6 +67,45 @@ in five minutes); server histories (`join_sequence`, `keepalive_ticks`, buff
 allocations, interruption serials) are also unbounded. Seven non-checkpoint live
 ticks > 50 ms are attributed in `Local/evidence/m3-run-1791744282869-report/report.md`.
 
+**M7 preparation: bounded server histories and a separate-process host. M7 is not
+claimed.** Dead wave minions are pruned after the ordinary corpse/`1035` removal.
+Removed-EID interruption serials are forgotten. Production buff/shop allocators
+validate against a monotonic high-water mark. Join/keepalive diagnostics keep the
+latest 256. Probe and journal lists stream to disk. The scenario harness, not the
+server, now retains despawned-minion evidence; its classifications and thresholds
+are unchanged. `Tools/protocol_participants.py --self-host --server-process`
+(`Tools/protocol_host.py`) runs the production gateway/match in a child process
+with PID/source/readiness receipts. This removes participant GIL contention from
+live tick timing.
+
+One 30-minute soak ran with six participants on a defend/farm workload: live
+minions 4–100, 23 hero and 63 neutral deaths, Adagio gen-2 reconnect, and no
+structure orders (stability only, no natural result). Evidence is in
+`Local/evidence/m7-run-1791751582054-soak-1/`. Its replay is exact: 38,391
+operations, 1,390 checkpoints, 1,027,103 events (`…-replay/`).
+
+**Residuals remain open for M7 attribution**
+(`Local/evidence/m7-run-1791751582054-report/report.md`):
+- checkpoint work is +0.069 ms/min after minute two with live minions held fixed
+  (95% CI excludes zero), and ≈0 when canonical state size is held fixed;
+- server RSS is +0.17 MiB/min;
+- six ordinary ticks exceed 50 ms (max 62.4 ms). No periodic checkpoint tick
+  exceeds 50 ms (max 40.0 ms).
+
+Gates: `--suite all` PASS, 1638 run / 1610 executed / 28 skips
+(`Local/evidence/halcyon-checks-42d_e7em`). An earlier run on this candidate
+failed on a stale history assertion and on a venv-launcher PID mismatch; both
+were fixed without loosening the guard (`…/halcyon-checks-wtm03m_f`). The
+CPU-qualified default verifier passes: max 23.8/21.5 ms, zero ticks over 50 ms,
+identical across runs (`Local/evidence/halcyon-sandbox-verify-yg5dkfl5`,
+qualification `Local/evidence/m7prep-verifier-cpu-qualification-20261012`). The
+stream hash `210800b1…` is unchanged. State/checkpoint hashes changed
+(`69d2193a…`/`7135c875…`) because pruned corpses leave canonical state. This is
+an expected canonical difference, not a wire change.
+
+Disk note: D: had about 1 GB free. Existing `Local/evidence` was NTFS-compressed
+in place (about 3:1); nothing was deleted.
+
 ## Entry checkpoint — 2026-10-10
 
 **Session hand-off (operator ended the day after rev8).** Committed state:

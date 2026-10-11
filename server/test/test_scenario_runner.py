@@ -45,6 +45,30 @@ NAV = str(DEFAULT_A001_PATH)
 HAVE_NAV = DEFAULT_A001_PATH.is_file()
 
 
+class TestHistoricalEvidence(unittest.TestCase):
+    def test_removed_minion_keeps_side_and_peak_for_historical_classification(self):
+        from types import SimpleNamespace
+        from server import wave
+        from Tools.run_scenarios import WorldEvidence, _survivor_advance, _guard_deltas
+        minion = wave.Minion(4610,1,0)
+        minion.x, minion.y = 0,2
+        world = SimpleNamespace(wave_director=SimpleNamespace(minions=[minion],wave_index=1),
+                                structures=SimpleNamespace(structures={
+                                    3539:SimpleNamespace(x=17.,y=2.,hp=2500),
+                                    3545:SimpleNamespace(x=-17.,y=2.,hp=2500)}))
+        evidence = WorldEvidence(world)
+        evidence.minion_pos_at_fixture[minion.eid] = (0.,2.)
+        evidence.observe(1,[])
+        minion.x = 8
+        evidence.observe(2,[])
+        evidence.guard_samples = [(1,minion.eid,0.,2.,True,True),
+                                  (2,minion.eid,8.,2.,True,True)]
+        world.wave_director.minions.clear()
+        self.assertEqual(_survivor_advance(evidence,1),8.)
+        self.assertEqual(_survivor_advance(evidence,2),0.)
+        self.assertEqual(_guard_deltas(evidence,world)[0]['delta'],-8.)
+
+
 def _isolated_env(seed: int) -> dict:
     env = dict(os.environ)
     for name in ("HALCYON_QA_DIR", "HALCYON_NO_WAVE", "HALCYON_BOTS", "HALCYON_NO_TAPE"):

@@ -62,12 +62,18 @@ class BuffLifecycle:
     identical compound-status applications do not duplicate their one buff.
     """
 
-    def __init__(self, instance_allocator: Callable[[], int] | None = None):
+    def __init__(self, instance_allocator: Callable[[], int] | None = None, *, monotonic_instances=False):
         if instance_allocator is not None and not callable(instance_allocator):
             raise TypeError("buff instance allocator must be callable")
         self._next_instance = 2_000_000
         self._allocate = instance_allocator or self._allocate_local
         self._allocated: set[int] = set()
+        # Production's shared allocator is strictly increasing (including IDs
+        # consumed by other publishers). Its high-water mark proves uniqueness
+        # without retaining all expired buffs. Arbitrary standalone allocators
+        # retain the original full-set validation contract.
+        self._monotonic_instances = monotonic_instances or instance_allocator is None
+        self._last_instance = 0
         self.active: dict[tuple[int, str], PresentedBuff] = {}
         self._frames: list[tuple[int, bytes]] = []
 
@@ -109,14 +115,18 @@ class BuffLifecycle:
             return previous.instance_id
         instance = self._allocate()
         _u32(instance, "buff instance")
-        if instance == 0 or instance in self._allocated:
+        if (instance == 0 or instance in self._allocated
+                or self._monotonic_instances and instance <= self._last_instance):
             raise ValueError("buff allocator returned a zero or previously allocated identity")
         value = PresentedBuff(key, target_eid, source_eid, kind, instance, now, expires,
                               state_count=state_count, words=tuple(words))
         payload = value.payload(now)
         if previous is not None:
             self.remove(target_eid, key, now=now)
-        self._allocated.add(instance)
+        if self._monotonic_instances:
+            self._last_instance = instance
+        else:
+            self._allocated.add(instance)
         self.active[(target_eid, key)] = value
         self._frames.append((BUFF_STATE if value.state_count or any(value.words) else BUFF_ADD, payload))
         return instance

@@ -64,11 +64,11 @@ class StatusEffect:
 class StatusManager:
     """Manages active status effects and barriers for all match entities."""
 
-    def __init__(self, instance_allocator: Optional[Callable[[], int]] = None):
+    def __init__(self, instance_allocator: Optional[Callable[[], int]] = None, *, monotonic_instances=False):
         self.effects: Dict[int, List[StatusEffect]] = {}  # target_eid -> [StatusEffect]
         self._interrupt_serial: Dict[int, int] = {}
         self._attack_interrupt_serial: Dict[int, int] = {}
-        self.presentation = BuffLifecycle(instance_allocator)
+        self.presentation = BuffLifecycle(instance_allocator, monotonic_instances=monotonic_instances)
         self._resource_frames: List[Tuple[int, bytes]] = []
 
     @staticmethod
@@ -122,6 +122,17 @@ class StatusManager:
 
     def get_interrupt_serial(self, target_eid: int) -> int:
         return self._interrupt_serial.get(target_eid, 0)
+
+    def forget_removed(self, eids):
+        """Forget interruption history only for permanently removed actors.
+
+        Never use for hero death or respawning jungle actors. Dead minion
+        windups are invalid independently; released shots ignore interruption.
+        Effects/presentation retain their ordinary expiry/publication lifecycle.
+        """
+        for eid in eids:
+            self._interrupt_serial.pop(eid, None)
+            self._attack_interrupt_serial.pop(eid, None)
 
     def get_attack_interrupt_serial(self, target_eid: int) -> int:
         """Remember attack-disabling CC after expiry or cleanse between ticks."""

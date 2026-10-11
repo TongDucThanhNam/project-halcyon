@@ -3,13 +3,29 @@ import json
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from Tools import protocol_participants as pp
 from server import gateway, match_server, paths
 
 
 class TestBoundaries(unittest.TestCase):
+    def test_diagnostic_packet_histories_keep_exact_bounded_tail(self):
+        import struct
+        from server import wire
+        match = match_server.MatchServer(log=lambda _: None)
+        conn = Mock()
+        conn.getpeername.return_value = ('127.0.0.1', 1)
+        count = 1000
+        with patch.object(wire, 'read_frame', side_effect=[b'body']*count+[None]), \
+                patch.object(match, '_adopt_key'), \
+                patch.object(wire, 'decode_body', side_effect=[
+                    (wire.OP.KEEPALIVE, struct.pack('>HH2x', wire.KEEPALIVE_MAGIC, tick)) for tick in range(count)]):
+            match._handle(conn)
+        self.assertEqual(match.keepalive_ticks, list(range(count-256,count)))
+        self.assertEqual(match.join_sequence, [(wire.OP.KEEPALIVE,struct.pack('>HH2x',wire.KEEPALIVE_MAGIC,tick))
+                                               for tick in range(count-256,count)])
+
     def test_public_and_non_rfc1918_hosts_refused(self):
         for host in ("8.8.8.8", "1.1.1.1", "169.254.1.1", "100.64.1.1", "0.0.0.0"):
             with self.subTest(host=host), self.assertRaises(ValueError):

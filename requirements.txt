@@ -1,3 +1,5 @@
 # Versions measured in the Windows reproduction environment (2026-09-13).
 pycryptodome==3.23.0
 Pillow==12.3.0
+# Protocol participant/server RSS, private-byte and CPU telemetry.
+psutil==7.2.2

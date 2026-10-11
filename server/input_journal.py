@@ -6,7 +6,7 @@ decisions (tape cursor and tick count), not replacement gameplay results.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import gc
 import inspect
@@ -55,6 +55,30 @@ FIELD_EXCLUSIONS = {
 
 class CanonicalState(bytes):
     """Already encoded by freeze_state, not an arbitrary bytes JSON value."""
+
+
+class _ProbeRows:
+    """Append-only diagnostic evidence on disk, never retained match history."""
+
+    def __init__(self, path):
+        self.path = path
+        self.output = path.open("xb", buffering=65536)
+
+    def append(self, row):
+        self.output.write(encoded(row) + b"\n")
+
+    def close(self):
+        self.output.close()
+
+    def copy_array(self, output):
+        output.write(b"[")
+        separator = b""
+        with self.path.open("rb") as source:
+            for line in source:
+                output.write(separator)
+                output.write(line.rstrip(b"\n"))
+                separator = b","
+        output.write(b"]")
 
 
 def encoded(value):
@@ -140,8 +164,8 @@ class InputJournal:
         self.checkpoint_count = 0
         self.world_start_count = 0
         # Separate, opt-in measurements never enter the replay contract.
-        self.probe = [] if os.environ.get("HALCYON_CHECKPOINT_PROBE") == "1" else None
-        self.gc_intervals = []
+        probing = self.path is not None and os.environ.get("HALCYON_CHECKPOINT_PROBE") == "1"
+        self.probe = self.gc_intervals = None
         self.gc_started = None
         if header is None:
             from Tools.run_scenarios import source_manifest, manifest_digest, ISOLATED_ENVIRONMENT
@@ -174,7 +198,22 @@ class InputJournal:
         if header is None:
             self.header["initial_attachment"] = ({"seq": 0, "sim_tick": world.sim_tick,
                 "phase": world.phase, **self.identity(world.conn)} if world.conn is not None else None)
-        self.write(self.header)
+        try:
+            # Do not leak partially opened evidence files if a probe path or
+            # header write fails. Register the GC callback only after success.
+            with ExitStack() as cleanup:
+                if self.output is not None:
+                    cleanup.callback(self.output.close)
+                self.write(self.header)
+                if probing:
+                    self.probe = _ProbeRows(self.path.with_name("probe-" + self.path.stem + ".measurements.jsonl"))
+                    cleanup.callback(self.probe.close)
+                    self.gc_intervals = _ProbeRows(self.path.with_name("probe-" + self.path.stem + ".gc.jsonl"))
+                    cleanup.callback(self.gc_intervals.close)
+                cleanup.pop_all()
+        except Exception as exc:
+            self.closed, self.failure = True, repr(exc)
+            raise
         if self.probe is not None:
             gc.callbacks.append(self._gc_probe)
 
@@ -197,9 +236,14 @@ class InputJournal:
         if phase == "start":
             self.gc_started = time.monotonic_ns()
         elif self.gc_started is not None:
-            self.gc_intervals.append({"start_ns": self.gc_started,
-                                      "end_ns": time.monotonic_ns(),
-                                      "generation": info["generation"]})
+            try:
+                self.gc_intervals.append({"start_ns": self.gc_started,
+                                          "end_ns": time.monotonic_ns(),
+                                          "generation": info["generation"]})
+            except Exception as exc:
+                # GC callback exceptions are otherwise ignored by Python. Make
+                # the next operation/close fail rather than lose evidence.
+                self.failure = f"GC probe write failed: {exc!r}"
             self.gc_started = None
 
     def attach(self, conn, identity, eid):
@@ -270,6 +314,8 @@ class InputJournal:
     def operation(self, method, arguments=None):
         if self.closed:
             raise RuntimeError("operation after input journal close")
+        if self.failure:
+            raise RuntimeError(f"incomplete input journal: {self.failure}")
         if self.active is not None:
             yield
             return
@@ -378,8 +424,16 @@ class InputJournal:
                     gc.callbacks.remove(self._gc_probe)
                     if self.path:
                         try:
-                            self.path.with_suffix(".probe.json").write_bytes(encoded(
-                                {"measurements": self.probe, "gc_intervals": self.gc_intervals}))
+                            try:
+                                self.probe.close()
+                            finally:
+                                self.gc_intervals.close()
+                            with self.path.with_suffix(".probe.json").open("xb") as output:
+                                output.write(b'{"gc_intervals":')
+                                self.gc_intervals.copy_array(output)
+                                output.write(b',"measurements":')
+                                self.probe.copy_array(output)
+                                output.write(b'}')
                         except Exception as exc:
                             self.failure = repr(exc)
                             raise RuntimeError(f"input journal probe write failed: {self.path}: {exc}") from exc

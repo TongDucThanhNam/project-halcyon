@@ -154,9 +154,9 @@ class MovementTimingTests(unittest.TestCase):
                 clock, starts, waits, records = [0.0], [], [], []
                 original = world.advance_simulation
 
-                def advance():
+                def advance(**kwargs):
                     starts.append(clock[0])
-                    original()
+                    original(**kwargs)
                     clock[0] += first_work if len(starts) == 1 else .012
                     if len(starts) == 20:
                         world._stop_event.set()

@@ -17,7 +17,7 @@ class Intent:
 
 
 class Policy:
-    def __init__(self, eid, hero):
+    def __init__(self, eid, hero, *, defend_farm=False):
         self.eid, self.hero = eid, hero
         self.target = None
         self.last_order = None
@@ -26,6 +26,8 @@ class Policy:
         self.retreating = False
         self.recalling_until = 0.0
         self.was_dead = False
+        self.defend_farm = defend_farm
+        self.next_restock = 120.0
 
     def order(self, now, opcode, payload, reason):
         key = opcode,payload
@@ -67,6 +69,7 @@ class Policy:
         items = list(me.inventory.values())
         if at_base:
             self.retreating = False
+            self.next_restock = now + 120.0
             if now >= self.next_shop and me.gold is not None:
                 # Public catalog prices, not an economy accessor. Conservative full
                 # prices are safe even if owned components reduce the actual fee.
@@ -82,9 +85,12 @@ class Policy:
                 return None
         elif me.hp is not None and me.max_hp and me.hp < .25*me.max_hp:
             self.retreating = True
+        if self.defend_farm and not at_base and now >= self.next_restock:
+            self.retreating = True
         if self.retreating:
             nearby = [a for a in actors.values() if a.alive and a.position
-                      and a.team not in (0,me.team) and a.kind in ('hero','minion','structure')
+                      and (a.team not in (0,me.team) and a.kind in ('hero','minion','structure')
+                           or self.defend_farm and a.kind == 'neutral')
                       and math.dist(a.position,me.position) < 12]
             if nearby:
                 return self.move(now,me.spawn,'retreat toward base')
@@ -92,6 +98,8 @@ class Policy:
             self.recalling_until = now+5
             action = ability_wire.hero_action_variant(me.hero_id,'recall')
             return Intent(1041,struct.pack('>IBB',0xffffffff,action,0),'safe recall')
+        if self.defend_farm:
+            return self._defend_farm(actors, me, now)
         structures = [a for a in actors.values() if a.kind == 'structure' and a.alive and a.position]
         enemies = [a for a in structures if a.team != me.team]
         if not enemies:
@@ -125,3 +133,39 @@ class Policy:
             self.target = target.eid
             return self.order(now,1060,roster.build_target_entity(target.eid),'attack '+target.kind)
         return self.move(now,destination,'lane push' if me.team == 1 else 'defend/farm')
+
+    def _defend_farm(self, actors, me, now):
+        """Ordinary orders only: two defenders + one farmer on each team.
+
+        No structure target, enemy-base destination or persistent pursuit across
+        the river. Restocking still uses ordinary walking/Recall and shop input.
+        This intentionally claims stability, never a completed match.
+        """
+        home = -1 if me.team == 1 else 1
+        farmer = self.hero in ('Adagio', 'Amael')
+        own = [a for a in actors.values() if a.kind == 'structure'
+               and a.team == me.team and a.alive and a.position]
+        if not own:
+            return self.move(now, me.spawn, 'soak defend base')
+        front = min(own, key=lambda a: (a.tier, a.eid))
+        destination = ((home * 40.9, 20.3) if farmer
+                       else (front.position[0] - home * 4, front.position[1]))
+        if home * me.position[0] < -4:
+            return self.move(now, destination, 'soak stop cross-river pursuit')
+        candidates = [a for a in actors.values() if a.alive and a.position
+                      and home * a.position[0] >= -4
+                      and math.dist(a.position, me.position) < 18
+                      and (a.kind == 'neutral' and a.archetype in (357,359) if farmer else
+                           a.kind in ('minion','hero') and a.team not in (0,me.team))]
+        active = actors.get(self.target)
+        # Preserve windup for the active category, but defend against a new
+        # wave rather than chasing a hero while its minions pass our tower.
+        priority = min((0 if a.kind == 'minion' else 1 for a in candidates), default=2)
+        if active in candidates and (0 if active.kind == 'minion' else 1) == priority:
+            return None
+        if candidates:
+            target = min(candidates, key=lambda a: (0 if a.kind == 'minion' else 1,
+                          math.dist(a.position, me.position), a.eid))
+            self.target = target.eid
+            return self.order(now,1060,roster.build_target_entity(target.eid),'soak attack '+target.kind)
+        return self.move(now,destination,'soak farm' if farmer else 'soak defend')

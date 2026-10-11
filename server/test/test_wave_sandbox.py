@@ -53,15 +53,17 @@ class TestSandboxComposition(unittest.TestCase):
     def test_jungle_eids_do_not_overlap_lane_after_fifteen_minutes(self):
         director = wave.Director(0, combat=False)
         hero = HeroMovement()
+        observed_eids = set()
         for second in range(0, 1001, 25):
             for minion in director.minions:
                 if minion.alive:
                     director.apply_hero_damage_to_minion(minion.eid, minion.hp, hero)
             director.pump(second)
+            observed_eids.update(m.eid for m in director.minions)
         manager = jungle.JungleManager()
         manager.step(0.05, 1000, {})
-        self.assertFalse({m.eid for m in director.minions} & set(manager.monsters))
-        self.assertGreater(len(director.minions), 400)
+        self.assertFalse(observed_eids & set(manager.monsters))
+        self.assertGreater(len(observed_eids), 400)
 
 
 class TestWaveCombatAndPush(unittest.TestCase):

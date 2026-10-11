@@ -35,7 +35,7 @@ class AllCandidates:
 
 
 class TestWaveIndexes(unittest.TestCase):
-    def test_spawn_death_corpse_removal_and_slot_reuse_preserve_history(self):
+    def test_spawn_death_corpse_removal_and_slot_reuse_preserve_live_identities(self):
         director = wave.Director(0, actor_slots=ActorSlots(capacity=8))
         director._spawn_pair(0, 0)
         first = list(director.minions)
@@ -51,11 +51,11 @@ class TestWaveIndexes(unittest.TestCase):
                          [1073, 1035, 1073, 1035])
         self.assertEqual(list(index.present.values()), [])
         self.assertEqual(director._present_at(4.8), [])
-        self.assertEqual(director.minions, first)
-        self.assertTrue(all(index.actors[m.eid] is m for m in first))
+        self.assertEqual(director.minions, [])
+        self.assertEqual(director._minion_index().actors, {})
         director._spawn_pair(5, 1)
         second = list(director.present_minions())
-        self.assertEqual(second, director.minions[2:])
+        self.assertEqual(second, director.minions)
         self.assertEqual([director.actor_slots.by_eid[m.eid] for m in second], slots)
         self.assertTrue(set(m.eid for m in first).isdisjoint(m.eid for m in second))
         self.assertEqual(director._flush_removals(6), [])

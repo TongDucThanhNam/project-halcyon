@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import sys
 import traceback
@@ -58,23 +59,61 @@ def difference(expected, observed, path="state"):
     return None
 
 
-def read_journal(path):
+class _JournalRecords:
+    """Reiterable disk-backed operations; long replay needs only one at a time."""
+
+    def __init__(self, path, header, footer):
+        self.path, self.header, self.footer = Path(path), header, footer
+
+    def __len__(self):
+        return self.footer["records"]
+
+    def __iter__(self):
+        with self.path.open(encoding="utf-8") as source:
+            if json.loads(next(source)) != self.header:
+                raise ValueError("journal header changed after validation")
+            for sequence in range(1, len(self) + 1):
+                row = json.loads(next(source))
+                _validate_operation(row, sequence)
+                yield row
+            if json.loads(next(source)) != self.footer or next(source, None) is not None:
+                raise ValueError("journal footer changed after validation")
+
+
+def _validate_operation(record, sequence):
+    if type(record.get("seq")) is not int or record["seq"] != sequence:
+        raise ReplayMismatch(record.get("sim_tick", 0), "sequence", sequence, record.get("seq"))
+    if record.get("kind") != "operation":
+        raise ValueError(f"unexpected record kind at sequence {sequence}")
+
+
+def read_journal(path, *, streaming=False):
+    operations = [] if not streaming else None
+    header = footer = last = None
+    count = 0
     with Path(path).open(encoding="utf-8") as source:
-        rows = [json.loads(line) for line in source]
-    if len(rows) < 3 or rows[0].get("kind") != "header" or rows[-1].get("kind") != "footer":
+        for line in source:
+            row = json.loads(line)
+            if header is None:
+                header = row
+                continue
+            if footer is not None:
+                raise ValueError("data after journal footer")
+            if row.get("kind") == "footer":
+                footer = row
+                continue
+            count += 1
+            _validate_operation(row, count)
+            last = row
+            if operations is not None:
+                operations.append(row)
+    if header is None or header.get("kind") != "header" or footer is None or count == 0:
         raise ValueError("incomplete journal: header and successful close footer required")
-    header, footer = rows[0], rows[-1]
-    operations = rows[1:-1]
-    if header.get("version") != 1 or footer["records"] != len(operations):
+    if header.get("version") != 1 or footer["records"] != count:
         raise ValueError("journal version/record count mismatch")
-    for sequence, record in enumerate(operations, 1):
-        if type(record.get("seq")) is not int or record["seq"] != sequence:
-            raise ReplayMismatch(record.get("sim_tick", 0), "sequence", sequence, record.get("seq"))
-        if record.get("kind") != "operation":
-            raise ValueError(f"unexpected record kind at sequence {sequence}")
-    if operations[-1]["method"] != "close" or footer["world_starts"] < 1:
+    if last["method"] != "close" or footer["world_starts"] < 1:
         raise ValueError("journal has no completed WORLD interval")
-    return header, operations, footer
+    return header, _JournalRecords(path, header, footer) if streaming else operations, footer
 
 
 def validate_inputs(header):
@@ -160,7 +199,7 @@ def compare_record(expected, actual):
 def replay(path, output):
     from Tools import run_scenarios as runner
     from server import match_server, navigation, roster
-    header, records, footer = read_journal(path)
+    header, records, footer = read_journal(path, streaming=True)
     validate_inputs(header)
     if header["source_sha256"] != runner.manifest_digest(runner.source_manifest()):
         raise ValueError("live journal source does not match replay source pin")
@@ -274,14 +313,14 @@ def orchestrate(args):
     output = runner.resolve_output_dir(args.output)
     path = Path(args.journal).resolve()
     try:
-        header, records, _ = read_journal(path)
+        header, records, _ = read_journal(path, streaming=True)
         validate_inputs(header)
         snapshot, manifest = runner.pin_sources(output)
         digest = runner.manifest_digest(manifest)
         if digest != header["source_sha256"]:
             raise ValueError("live journal source differs from current source; replay requires the recorded source")
         copied = output / "journal.jsonl"
-        copied.write_bytes(path.read_bytes())
+        shutil.copyfile(path, copied)
     except Exception as exc:
         summary = {"mode": "replay", "overall": "FAIL", "journal": str(path),
                    "live_anchors_equal": False, "error": str(exc),

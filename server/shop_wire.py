@@ -50,12 +50,18 @@ class ShopPresentation:
     The caller also includes StatusManager.snapshot_frames for the icons.
     """
 
-    def __init__(self, status_manager: StatusManager, instance_allocator: Callable[[], int]):
+    def __init__(self, status_manager: StatusManager, instance_allocator: Callable[[], int], *,
+                 monotonic_instances=False):
         if not callable(instance_allocator):
             raise TypeError("shop buff instance allocator must be callable")
         self.status_manager = status_manager
         self._allocate = instance_allocator
         self._allocated: set[int] = set()
+        # Production shares a strictly increasing identity allocator with
+        # other publishers. Keep its high-water mark, not expired permissions.
+        # Arbitrary custom allocators retain full-set uniqueness validation.
+        self._monotonic_instances = monotonic_instances
+        self._last_instance = 0
         self.latest: dict[int, ShopPermission] = {}
         self._eligible: set[int] = set()
         self._last_step_at = -math.inf
@@ -74,9 +80,13 @@ class ShopPresentation:
                 instance = self._allocate()
                 permission = ShopPermission(eid, instance, now)
                 payload = permission.payload(now)  # Validate before recording an instance.
-                if instance == 0 or instance in self._allocated:
+                if (instance == 0 or instance in self._allocated
+                        or self._monotonic_instances and instance <= self._last_instance):
                     raise ValueError("shop allocator returned a zero or reused buff identity")
-                self._allocated.add(instance)
+                if self._monotonic_instances:
+                    self._last_instance = instance
+                else:
+                    self._allocated.add(instance)
                 self.latest[eid] = permission
                 frames.append((buff_wire.BUFF_STATE, payload))
             if (eid, SHOP_ICON_KEY) not in self.status_manager.presentation.active:

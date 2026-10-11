@@ -100,6 +100,7 @@ class Participant:
         self.message_count = 0
         self.record_count = 0
         self.observer = Observer(self.identity)
+        self.neutral_deaths = 0
         self.heroes, self.timers, self.ranks = {}, {}, {}
         self.stages = {name: {"classification": "missing input", "proving_opcodes": [],
                               "inputs": [], "started_at": None}
@@ -201,6 +202,10 @@ class Participant:
 
     def _observe(self, op, p):
         self.eid = self.observer.owner
+        if op == 1072 and len(p) >= 8:
+            actor = self.observer.actors.get(u32(p))
+            if actor is not None and actor.kind == 'neutral':
+                self.neutral_deaths += 1
         if op in (wire.OP.SNAPSHOT_JOIN, wire.OP.SNAPSHOT):
             for index in range(6):
                 start = 8 + index * roster.SNAPSHOT_RECORD_STRIDE
@@ -450,13 +455,14 @@ def reconnect(p):
     p.prove("reconnect", [setup, block, first, ready, later])
 
 
-def full_match(participants, output, *, timeout=2400, stall_seconds=300):
+def full_match(participants, output, *, timeout=2400, stall_seconds=300, soak=False):
     from Tools.protocol_policy import Policy
-    policies = [Policy(p.eid,p.hero) for p in participants]
+    policies = [Policy(p.eid,p.hero,defend_farm=soak) for p in participants]
     start = time.monotonic()
     last_progress, destroyed = start, set()
     reconnect_thread, reconnect_errors = None, []
     reconnect_before = None
+    soak_started = None
     def reconnect_once():
         try:
             reconnect(participants[4])
@@ -467,7 +473,8 @@ def full_match(participants, output, *, timeout=2400, stall_seconds=300):
             while True:
                 now = time.monotonic()
                 if now-start >= timeout:
-                    raise StageFailure('match timeout: no natural result on all six streams')
+                    raise StageFailure('soak timeout: incomplete stability interval' if soak else
+                                       'match timeout: no natural result on all six streams')
                 if reconnect_errors:
                     raise StageFailure('reconnect: '+str(reconnect_errors))
                 if any(p.error for p in participants):
@@ -480,11 +487,28 @@ def full_match(participants, output, *, timeout=2400, stall_seconds=300):
                 if fresh != destroyed:
                     destroyed, last_progress = fresh, now
                     print(f'Match {now-start:.1f}s: destroyed structures {sorted(destroyed)}',flush=True)
-                if now-last_progress > stall_seconds:
+                if not soak and now-last_progress > stall_seconds:
                     snapshot = {p.hero:{eid:vars(a) | {'timers':{tag:str(t) for tag,t in a.timers.items()}}
                                for eid,a in view.items()} for p,view in zip(participants,views)}
                     (output/'stall.json').write_text(json.dumps(snapshot,indent=2),encoding='utf-8')
                     raise StageFailure(f'policy stall: no structure destruction for {stall_seconds}s; inspect stall.json')
+                if soak:
+                    if any(p.observer.result or p.observer.crystal_notice for p in participants):
+                        raise StageFailure('soak ended naturally; required live stability interval not completed')
+                    if soak_started is None and all(p.observer.minion_spawns for p in participants):
+                        # Start from live wave evidence, not menu/tape wall time.
+                        soak_started = now
+                    if soak_started is not None and now-soak_started >= 1800:
+                        if reconnect_thread is None or reconnect_thread.is_alive():
+                            raise StageFailure('soak missing completed mid-match reconnect')
+                        if not all(p.observer.deaths and p.observer.revivals and p.neutral_deaths
+                                   and p.observer.own_purchases and p.observer.own_learns for p in participants):
+                            raise StageFailure('soak missing death/revival/jungle/shop/learn coverage')
+                        return {'claim':'30-minute protocol stability; not a match result',
+                                'match_duration_s':now-start, 'stability_duration_s':now-soak_started,
+                                'termination':'participants stopped after measured interval',
+                                'reconnect_other_stream_frames':{p.hero:p.message_count-reconnect_before[p.hero]
+                                    for p in participants if p is not participants[4]}}
                 if all(p.observer.finished() for p in participants):
                     if reconnect_thread is None or reconnect_thread.is_alive():
                         raise StageFailure('natural finish without completed mid-match reconnect')
@@ -527,7 +551,7 @@ def full_match(participants, output, *, timeout=2400, stall_seconds=300):
                     raise StageFailure('reconnect thread did not stop')
 
 
-def run(host, port, output, *, match_id=MATCH_ID, heartbeat_port=2112, mode="existing-server", inputs=None, lifecycle=False):
+def run(host, port, output, *, match_id=MATCH_ID, heartbeat_port=2112, mode="existing-server", inputs=None, lifecycle=False, soak=False):
     summary = {"source": source_identity(), "host": private_host(host), "port": port,
                "mode": mode, "started_at": time.time(), 'started_monotonic_ns':time.monotonic_ns(), "status": "RUNNING",
                "setup_failures": [], "gameplay_failures": [], "owned_inputs": inputs,
@@ -539,12 +563,12 @@ def run(host, port, output, *, match_id=MATCH_ID, heartbeat_port=2112, mode="exi
     try:
         enter_world(participants)
         entered = True
-        if lifecycle:
+        if lifecycle or soak:
             summary['limits'] = ['Wire-only server/session acceptance, not native rendering or independent gameplay fidelity.',
                                  'Nonhero HP unknown until an HP-bearing snapshot; gold starts at native 600.',
                                  'Hero resources become unknown after implicit 1076 growth until a numeric baseline; no fabricated HP.',
                                  'Tick anchors from journal; per-stream evidence independently received.']
-            summary.update(full_match(participants,output))
+            summary.update(full_match(participants,output,soak=soak))
         else:
             play(participants)
         errors = [f"{p.hero}: {p.error}" for p in participants if p.error]
@@ -566,10 +590,11 @@ def run(host, port, output, *, match_id=MATCH_ID, heartbeat_port=2112, mode="exi
                 summary["status"] = "ERROR"
                 summary["setup_failures"].append(f"cleanup {p.hero}: {exc}")
         summary["participants"] = [p.report() for p in participants]
-        if lifecycle:
+        if lifecycle or soak:
             for report,p in zip(summary['participants'],participants):
                 report['observer'] = p.observer.metrics()
                 report['generation'] = p.generation
+                report['neutral_deaths'] = p.neutral_deaths
         summary["source_stable"] = summary["source"]["manifest_sha256"] == source_identity()["manifest_sha256"]
         if not summary["source_stable"]:
             summary["status"] = "ERROR"
@@ -588,101 +613,72 @@ def main(argv=None):
     parser.add_argument("--match-id", default=MATCH_ID)
     parser.add_argument("--output")
     parser.add_argument("--self-host", action="store_true")
+    parser.add_argument('--server-process', action='store_true',
+                        help='[self-host] isolate production server from participant decoding/policy')
     parser.add_argument("--journal", action="store_true",
                         help="[self-host] record application-order journal and tick-work evidence")
     parser.add_argument('--full-match', action='store_true', help='M3 natural lifecycle, 40-minute wall cap')
+    parser.add_argument('--soak', action='store_true', help='30 minutes after first live wave; defend/farm, no match-result claim')
     parser.add_argument('--telemetry', action='store_true', help='self-host process and queue measurements')
     args = parser.parse_args(argv)
     host = private_host(args.host)
     if args.self_host and not ipaddress.ip_address(host).is_loopback:
         parser.error("--self-host binds loopback only")
+    if args.server_process and not args.self_host:
+        parser.error('--server-process requires --self-host')
     if args.journal and not args.self_host:
         parser.error("--journal requires --self-host")
     if args.telemetry and not args.self_host:
         parser.error('--telemetry requires --self-host')
-    if args.full_match and not (args.self_host and args.journal and args.telemetry):
-        parser.error('--full-match requires --self-host --journal --telemetry')
+    if args.full_match and args.soak:
+        parser.error('--full-match and --soak are mutually exclusive')
+    if (args.full_match or args.soak) and not (args.self_host and args.journal and args.telemetry):
+        parser.error('--full-match/--soak requires --self-host --journal --telemetry')
     output = new_output(args.output)
     print(f"Evidence: {output}", flush=True)
-    gateway = None
+    server = None
     telemetry = None
     inputs = None
-    journal_environment = {name: os.environ.get(name) for name in
-                           ("HALCYON_INPUT_JOURNAL_DIR", "HALCYON_TRACE_MOVEMENT")}
     try:
-        if args.journal:
-            os.environ["HALCYON_INPUT_JOURNAL_DIR"] = str(output)
-            os.environ["HALCYON_TRACE_MOVEMENT"] = "1"
         if args.self_host:
-            from server import gateway as gateway_module, navigation, paths, world_tape
-            # Missing owned inputs must not silently select the no-tape fallback.
-            required = (paths.stack_dir() / "world_tape.bin",
-                        Path(os.environ.get("HALCYON_NAVMESH", navigation.DEFAULT_CLASSIC_NAVMESH)))
-            missing = [str(path) for path in required if not path.is_file()]
-            from Tools.run_scenarios import ISOLATED_ENVIRONMENT
-            from Tools.verification_support import RUNTIME_SWITCHES
-            allowed = {'HALCYON_INPUT_JOURNAL_DIR','HALCYON_TRACE_MOVEMENT','HALCYON_NAVMESH',
-                       'HALCYON_LOCAL_ROOT','HALCYON_STACK_DIR','HALCYON_SPAWN_CORPUS','HALCYON_SKYE_VOLLEY_CORPUS'}
-            overrides = [name for name in set(ISOLATED_ENVIRONMENT) | set(RUNTIME_SWITCHES) | {'HALCYON_NO_TAPE','HALCYON_NO_WAVE'}
-                         if name not in allowed and os.environ.get(name)]
-            failures = [f"missing: {path}" for path in missing] + [f"nonproduction override: {name}" for name in overrides]
-            if not failures:
-                try:
-                    navigation.load_halcyon_navmesh(required[1])
-                    if not world_tape.load_tape(str(required[0]), skip_until_op=wire.OP.ENTITY_DATA):
-                        failures.append(f"empty world tape: {required[0]}")
-                except (ValueError, OSError) as exc:
-                    failures.append(str(exc))
-            if failures:
+            from Tools.protocol_host import LocalServer, ServerProcess, SetupFailure
+            server_type = ServerProcess if args.server_process else LocalServer
+            server = server_type(host, args.match_id, output, journal=args.journal, telemetry=args.telemetry)
+            try:
+                ready = server.start()
+            except Exception as exc:
                 summary = {"status": "SETUP", "source": source_identity(), "mode": "self-host",
                            "host": host, "port": None, "participants": [],
-                           "setup_failures": failures, "gameplay_failures": []}
+                           "setup_failures": exc.failures if isinstance(exc, SetupFailure) else [repr(exc)],
+                           "gameplay_failures": []}
                 (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
                 return 2
-            inputs = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in required}
-            log_lock = threading.Lock()
-            def server_log(line):
-                # Gateway.stop does not join every daemon; late shutdown logs
-                # still have a valid destination, and concurrent lines are atomic.
-                with log_lock, (output / "server.log").open("a", encoding="utf-8") as log:
-                    log.write(f"{time.time():.6f} {line}\n")
-            gateway = gateway_module.Gateway(host, 0, args.match_id, heartbeat_port=0,
-                                             log=server_log)
-            gateway.start()
-            args.port, args.heartbeat_port = gateway.port, gateway.relay.port
-            if args.telemetry:
+            inputs = ready['inputs']
+            args.port, args.heartbeat_port = ready['port'], ready['heartbeat_port']
+            if args.telemetry and args.server_process:
                 from Tools.protocol_telemetry import Telemetry
-                telemetry = Telemetry(gateway,output)
+                telemetry = Telemetry(None, output, role='participants', filename='participant-telemetry.jsonl')
                 telemetry.start()
         summary = run(host, args.port, output, match_id=args.match_id,
-                      heartbeat_port=args.heartbeat_port, mode="self-host" if args.self_host else "existing-server", inputs=inputs,
-                      lifecycle=args.full_match)
+                      heartbeat_port=args.heartbeat_port,
+                      mode='self-host-process' if args.server_process else 'self-host' if args.self_host else 'existing-server', inputs=inputs,
+                      lifecycle=args.full_match, soak=args.soak)
         if telemetry:
             telemetry.close()
-            summary['telemetry_error'] = telemetry.error
+            summary['participant_telemetry_error'] = telemetry.error
             if telemetry.error:
                 summary['status'] = 'ERROR'
-        if args.journal:
-            gateway.stop()
-            journals = []
-            for match in gateway.matches:
-                session = match.session
-                if session is not None:
-                    session.join(timeout=10)
-                    journal = session.journal
-                    entry = {"path": str(journal.path) if journal else None,
-                             "closed": journal.closed if journal else False,
-                             "failure": journal.failure if journal else "missing journal",
-                             "records": journal.sequence if journal else 0,
-                             "checkpoints": journal.checkpoint_count if journal else 0,
-                             "thread_stopped": not session.is_alive()}
-                    journals.append(entry)
-            summary["journals"] = journals
-            if not journals or any(not row["closed"] or row["failure"] or not row["thread_stopped"] for row in journals):
-                summary["status"] = "ERROR"
-                summary["setup_failures"].append("input journal did not close successfully")
+        if server is not None:
+            result = server.close()
+            summary['server_process'] = {'isolated':args.server_process, 'server_pid':result.get('pid'),
+                                         'participant_pid':os.getpid(), 'close_receipt':result}
+            summary['journals'] = result['journals']
+            summary['telemetry_error'] = result.get('telemetry_error')
+            if result['status'] != 'PASS' or args.journal and not result['journals']:
+                summary['status'] = 'ERROR'
+                summary['setup_failures'].extend(result['failures'] or ['missing input journal'])
             (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        if telemetry and not telemetry.error:
+        if args.telemetry and not summary.get('telemetry_error'):
             from Tools.protocol_telemetry import summarize
             summarize(output,summary)
             (output / 'summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
@@ -691,14 +687,8 @@ def main(argv=None):
     finally:
         if telemetry:
             telemetry.close()
-        if gateway:
-            gateway.stop()
-        if args.journal:
-            for name, value in journal_environment.items():
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
+        if server:
+            server.close()
 
 
 if __name__ == "__main__":

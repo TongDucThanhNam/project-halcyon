@@ -33,6 +33,41 @@ class TestShopPresentation(unittest.TestCase):
         self.assertEqual(result.buff.target_eid, result.buff.source_eid)
         return result.buff
 
+    def test_monotonic_history_is_bounded_and_all_frames_equal_set_validation(self):
+        allocate = itertools.count(400000).__next__
+        status = StatusManager(instance_allocator=allocate, monotonic_instances=True)
+        bounded = shop_wire.ShopPresentation(status, allocate, monotonic_instances=True)
+        for i in range(2000):
+            now = i * .5
+            self.assertEqual(bounded.step(now, self.heroes), self.shop.step(now, self.heroes))
+            self.assertEqual(status.drain_frames(), self.status.drain_frames())
+            self.assertEqual(bounded.snapshot_frames(now+.1), self.shop.snapshot_frames(now+.1))
+        self.assertEqual(bounded._allocated, set())
+        self.assertEqual(bounded._last_instance, max(self.shop._allocated))
+        self.assertEqual(len(self.shop._allocated),2000)
+        self.hero.x, self.hero.y = 0, 0
+        self.assertEqual(bounded.step(1002,self.heroes),self.shop.step(1002,self.heroes))
+        self.assertEqual(status.drain_frames(),self.status.drain_frames())
+        self.assertFalse(bounded.latest)
+
+    def test_monotonic_rejects_regression_and_custom_allocator_still_rejects_reuse(self):
+        for monotonic in (False, True):
+            with self.subTest(monotonic=monotonic):
+                allocate = iter((10, 11, 5, 10)).__next__  # permission, icon, permission, reuse
+                status = StatusManager(instance_allocator=allocate)
+                shop = shop_wire.ShopPresentation(status, allocate, monotonic_instances=monotonic)
+                shop.step(0,self.heroes)
+                if monotonic:
+                    with self.assertRaisesRegex(ValueError,'reused buff identity'):
+                        shop.step(.5,self.heroes)
+                    self.assertEqual(shop._last_instance,10)
+                    self.assertEqual(shop._allocated,set())
+                else:
+                    shop.step(.5,self.heroes)
+                    with self.assertRaisesRegex(ValueError,'reused buff identity'):
+                        shop.step(1,self.heroes)
+                    self.assertEqual(shop._allocated,{10,5})
+
     def test_entry_refresh_and_same_tick_do_not_duplicate_icon_or_permission(self):
         first, = self.shop.step(10.0, self.heroes)
         permission = self.permission(first)

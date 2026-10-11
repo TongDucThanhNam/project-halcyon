@@ -35,6 +35,24 @@ def canonical_fixture():
 
 
 class TestCanonicalEncoding(unittest.TestCase):
+    def test_pruned_graph_bytes_equal_uncached_encoder_through_removal(self):
+        from Tools import verify_sandbox as canonical
+        from server import wave, status_effects
+        world = canonical_fixture()
+        world.wave = wave.Director(0)
+        world.statuses = status_effects.StatusManager()
+        world.wave._spawn_pair(0, 3)
+        victim = world.wave.minions[0]
+        world.wave.on_minion_death(victim, 1500, 0)
+        for now in (0, 3.799, 3.8, 4):
+            world.wave._flush_removals(now, world.statuses)
+            world.statuses.presentation.apply('status', 1500, 1500, 268, now, 1)
+            warm = canonical.freeze_state(world, None, 'fixture-mesh', replay=True)
+            with patch.object(canonical, '_value_key', return_value=None), \
+                    patch.object(canonical, '_cached_fragment', return_value=None):
+                cold = canonical.freeze_state(world, None, 'fixture-mesh', replay=True)
+            self.assertEqual(warm, cold)
+
     def test_checkpoint_bytes_match_pre_repair_fixture(self):
         from Tools.verify_sandbox import freeze_state
         from server.input_journal import InputJournal
@@ -172,6 +190,21 @@ class TestApplicationJournal(unittest.TestCase):
         self.assertTrue(any(c["label"] == "periodic" and c["tick"] == 200
                             for r in self.records for c in r["checkpoints"]))
 
+    def test_streaming_reader_matches_full_reader_and_revalidates_footer(self):
+        header, records, footer = journal_replay.read_journal(self.path, streaming=True)
+        self.assertEqual(header, self.header)
+        self.assertEqual(footer, self.footer)
+        self.assertEqual(len(records), len(self.records))
+        self.assertEqual(list(records), self.records)
+        self.assertEqual(list(records), self.records, 'disk-backed evidence must be reiterable')
+        altered = self.output / 'streaming-footer-changed.jsonl'
+        altered.write_bytes(self.path.read_bytes())
+        _, streaming, _ = journal_replay.read_journal(altered, streaming=True)
+        rows = [header, *self.records, dict(footer, records=footer['records']+1)]
+        altered.write_bytes(b'\n'.join(encoded(row) for row in rows)+b'\n')
+        with self.assertRaisesRegex(ValueError, 'footer changed'):
+            list(streaming)
+
     def test_serializer_preserves_connection_keyed_state(self):
         state = self.world.journal.state()
         self.assertIn(b'"connection":["journal-owner",2]', state)
@@ -205,6 +238,43 @@ class TestApplicationJournal(unittest.TestCase):
             self.assertEqual(timing["decode_ms"], 0)
         self.assertTrue(any("row_encode_ms" in row for row in probe["measurements"]))
         self.assertTrue(any("flush_ms" in row for row in probe["measurements"]))
+        self.assertFalse(isinstance(journal.probe, list))
+        self.assertTrue(journal.probe.path.is_file())
+        self.assertTrue(journal.gc_intervals.path.is_file())
+        self.assertFalse(journal.probe.path.match('inputs-*.jsonl'))
+        self.assertFalse(journal.gc_intervals.path.match('inputs-*.jsonl'))
+
+        # Use the actual downstream consumer, not just a naming assertion.
+        from Tools.protocol_telemetry import summarize
+        (directory/'telemetry.jsonl').write_text(json.dumps({
+            'wall_time':0, 'cpu_s':0, 'rss':1, 'private_bytes':1, 'matches':[]})+'\n')
+        (directory/'server.log').write_text('')
+        summary = {'started_at':0, 'started_monotonic_ns':0,
+                   'journals':[{'path':str(journal.path)}]}
+        summarize(directory, summary)
+        self.assertTrue(Path(summary['journal_tick_anchors']).is_file())
+        self.assertEqual(summary['peak_rss'],1)
+
+    def test_partial_probe_open_failure_closes_files_without_registering_callback(self):
+        from server import input_journal
+        directory = self.output / 'probe-open-failure'
+        directory.mkdir()
+        opened = []
+        original = input_journal._ProbeRows
+        def open_probe(path):
+            if opened:
+                raise OSError('injected second probe open failure')
+            rows = original(path)
+            opened.append(rows)
+            return rows
+        before = list(gc.callbacks)
+        with patch.dict(os.environ, {'HALCYON_CHECKPOINT_PROBE':'1'}), \
+                patch.object(input_journal, '_ProbeRows', side_effect=open_probe), \
+                self.assertRaisesRegex(OSError, 'second probe open failure'):
+            initialized_world(directory)
+        self.assertEqual(gc.callbacks,before)
+        self.assertEqual(len(opened),1)
+        self.assertTrue(opened[0].output.closed)
 
     def test_short_replay_is_exact_in_two_independent_processes(self):
         output = self.output / "two-process"

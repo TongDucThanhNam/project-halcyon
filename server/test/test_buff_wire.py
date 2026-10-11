@@ -14,6 +14,33 @@ NATIVE_BUFFS = pc_data_dir() / '55/551BCB541D80053BACD0A897B7993A77'
 
 
 class TestBuffWireValidation(unittest.TestCase):
+    def test_monotonic_allocator_is_bounded_and_rejects_reuse_even_after_expiry(self):
+        import itertools
+        ids = itertools.count(2_000_000, 3)  # shared allocator may consume gaps
+        buffs = buff_wire.BuffLifecycle(lambda: next(ids), monotonic_instances=True)
+        for tick in range(2000):
+            instance = buffs.apply('status', 1500, 1501, 268, tick, .5)
+            buffs.expire(tick+1)
+            self.assertEqual(len(buffs.drain_frames()), 1)
+            self.assertEqual(buffs._allocated, set())
+            self.assertEqual(buffs.active, {})
+        buffs._allocate = lambda: instance
+        with self.assertRaisesRegex(ValueError, 'previously allocated'):
+            buffs.apply('status', 1500, 1501, 268, 2001, .5)
+        buffs._allocate = lambda: instance-1
+        with self.assertRaisesRegex(ValueError, 'previously allocated'):
+            buffs.apply('status', 1500, 1501, 268, 2001, .5)
+
+    def test_arbitrary_allocator_keeps_full_uniqueness_check_and_refresh_frames(self):
+        ids = iter((100, 10, 100))
+        buffs = buff_wire.BuffLifecycle(lambda: next(ids))
+        self.assertEqual(buffs.apply('status', 1500, 1501, 268, 0, 2), 100)
+        self.assertEqual(buffs.apply('status', 1500, 1501, 268, 1, 2), 10)
+        self.assertEqual([op for op, _ in buffs.drain_frames()], [1086,1093,1086])
+        buffs.expire(4)
+        with self.assertRaisesRegex(ValueError, 'previously allocated'):
+            buffs.apply('status', 1500, 1501, 268, 4, 2)
+
     def test_duration_is_half_float_and_instance_starts_at_offset_ten(self):
         payload = buff_wire.build_buff_add(1500, 1515, 1.5, 0x12345678, 268)
         self.assertEqual(len(payload), 22)

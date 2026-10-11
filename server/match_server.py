@@ -303,13 +303,13 @@ class SnapshotStream(threading.Thread):
         # actors. Only actual actors additionally allocate a compact slot.
         self._next_buff_instance = 2_000_000
         self.status_manager = status_effects.StatusManager(
-            instance_allocator=self._allocate_buff_instance)
+            instance_allocator=self._allocate_buff_instance, monotonic_instances=True)
         self.skye_volleys = skye_wire.VolleyPresentation(self.actor_slots, self._allocate_buff_instance)
         self.damage_queue = status_effects.DamageModifierQueue()
         self.economy = economy.EconomyManager()
         self.items = items.ItemManager(self.economy, self.status_manager)
         self.shop_presentation = shop_wire.ShopPresentation(
-            self.status_manager, self._allocate_buff_instance)
+            self.status_manager, self._allocate_buff_instance, monotonic_instances=True)
         self.recall_presentation = recall_wire.RecallPresentation(self.status_manager)
         self.qa = SandboxQA.from_environment()
         self.vision = vision.Vision(actor_slots=self.actor_slots)
@@ -499,7 +499,13 @@ class SnapshotStream(threading.Thread):
             self._last_death_frames[eid] = payload
             self.status_manager.clear_target(eid, now=self.sim_time)
         elif opcode in (wire.OP.ENTITY_REVIVE, wire.OP.DESPAWN) and len(payload) >= 4:
-            self._last_death_frames.pop(struct.unpack_from(">I", payload)[0], None)
+            eid = struct.unpack_from(">I", payload)[0]
+            self._last_death_frames.pop(eid, None)
+            if (opcode == wire.OP.DESPAWN and eid not in self.hero_sims
+                    and eid not in self.jungle.monsters):
+                # Camp respawns have fresh EIDs. In-place objective capture
+                # replacements remain in monsters and keep interruption state.
+                self.status_manager.forget_removed((eid,))
         dead = []
         with self._clients_lock:
             for conn, (_, send_fn) in list(self.clients.items()):
@@ -1219,9 +1225,15 @@ class SnapshotStream(threading.Thread):
                             self.seq_1010 = seq[0]
                             self._jungle_published = True
                         tick_started = time.monotonic() if self.trace_movement_ticks else None
-                        self.advance_simulation()
+                        tick_cpu = time.thread_time_ns() if tick_started is not None else None
+                        timings = {} if tick_started is not None else None
+                        if timings is None:
+                            self.advance_simulation()
+                        else:
+                            self.advance_simulation(phase_timings=timings)
                         if tick_started is not None:
-                            self._trace_movement_tick(next_move_tick, tick_started)
+                            self._trace_movement_tick(next_move_tick, tick_started,
+                                                      cpu_started=tick_cpu, phase_timings=timings)
                     next_move_tick += SIM_TICK
                     catch_up_ticks += 1
 
@@ -1230,15 +1242,23 @@ class SnapshotStream(threading.Thread):
             self._pump(timeout=max(0.0, min(WORLD_PUMP_TICK,
                                            next_move_tick - time.monotonic())))
 
-    def _trace_movement_tick(self, scheduled: float, started: float):
+    def _trace_movement_tick(self, scheduled: float, started: float, *,
+                             cpu_started=None, phase_timings=None):
         """Opt-in diagnostics only; wall-clock data never feeds simulation."""
         finished = time.monotonic()
+        cpu_ms = ((time.thread_time_ns() - cpu_started) / 1e6 if cpu_started is not None else None)
+        wave = self.wave_director
         self.log("[movement-tick] " + json.dumps({
             "match_id": self.match_id, "tick": self.sim_tick,
             "sim_time": self.sim_time, "wall_time": time.time(),
             "started_monotonic": started,
             "late_ms": (started - scheduled) * 1000,
             "work_ms": (finished - started) * 1000,
+            "thread_cpu_ms": cpu_ms,
+            "phase_timings": phase_timings,
+            "population": {"minions_live": sum(m.alive for m in wave.minions) if wave else 0,
+                           "minions_retained": len(wave.minions) if wave else 0,
+                           "actor_slots": len(self.actor_slots.by_eid)},
             "phases_ms": getattr(self, "_movement_phase_ms", {}),
             "heroes": [{"eid": p.eid, "position_fixed": self.hero_sims[p.eid].position_fixed,
                         "moving": self.hero_sims[p.eid].is_moving,
@@ -2048,6 +2068,7 @@ class MatchServer:
                 received = (time.monotonic_ns() if self.session is not None
                             and self.session.journal is not None else None)
                 self.join_sequence.append((opcode, payload))
+                del self.join_sequence[:-256]  # Diagnostic tail; never read by gameplay.
                 self._dispatch(conn, opcode, payload, received_monotonic_ns=received)
         except (wire.WireError, OSError) as exc:
             self.log(f"[match] {peer} closed: {exc!r}")
@@ -2109,6 +2130,7 @@ class MatchServer:
                          f"{payload.hex()})")
                 return
             self.keepalive_ticks.append(tick)
+            del self.keepalive_ticks[:-256]  # Full wire evidence belongs on disk.
             return  # consumed, no reply (§15.8: tick ≈513/s rising)
         if opcode == wire.OP.PLAYER_UUID:
             self.session_uuid = payload.split(b"\x00", 1)[0].decode("ascii", "replace")

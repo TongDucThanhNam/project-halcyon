@@ -36,6 +36,7 @@ class TestActorSlots(unittest.TestCase):
         slots = ActorSlots(reserved_slots=range(33))
         director = wave.Director(0, actor_slots=slots)
         hero = HeroMovement()
+        spawned, removed, previous_owners = set(), set(), {}
         for index in range(300):
             frames = director._spawn_pair(index, 0)
             # Spawn now publishes native max/current HP before its move.
@@ -44,20 +45,38 @@ class TestActorSlots(unittest.TestCase):
             self.assertEqual((len(spawns), len(moves)), (2, 2))
             self.assertEqual([op for op, _ in frames[:10]],
                              [1010, 1052, 1053, 1016, 1070] * 2)
+            pair_eids = []
             for spawn, move in zip(spawns, moves):
                 eid = struct.unpack_from('>I', spawn, 8)[0]
+                self.assertNotIn(eid, spawned)
+                spawned.add(eid)
+                pair_eids.append(eid)
                 self.assertEqual(spawn[116], slots.by_eid[eid])
                 self.assertEqual(move[0], spawn[116])
                 self.assertIn(spawn[116], (33, 34))
+                if spawn[116] in previous_owners:
+                    self.assertIn(previous_owners[spawn[116]], removed)
+                previous_owners[spawn[116]] = eid
             for minion in director.minions[-2:]:
                 death = director.apply_hero_damage_to_minion(minion.eid, minion.hp, hero, now=index * 4)
                 self.assertEqual([op for op, _ in death], [1072])
                 self.assertIn(minion.eid, slots.by_eid)
-            removal = director._flush_removals(index * 4 + director.rules.corpse_duration)
+            deadline = index * 4 + director.rules.corpse_duration
+            self.assertEqual(director._flush_removals(deadline - .001), [])
+            self.assertTrue(all(eid in slots.by_eid for eid in pair_eids))
+            removal = director._flush_removals(deadline)
             self.assertEqual([op for op, _ in removal], [1073, 1035, 1073, 1035])
-            for minion in director.minions[-2:]:
-                self.assertNotIn(minion.eid, slots.by_eid)
-        self.assertEqual(len(director.minions), 600)
+            removed_eids = [struct.unpack_from('>I', body)[0] for op, body in removal if op == 1035]
+            self.assertEqual(removed_eids, pair_eids)
+            removed.update(removed_eids)
+            for eid in pair_eids:
+                self.assertNotIn(eid, slots.by_eid)
+        # The test owns the spawn witness; production does not retain corpses
+        # forever just to count them. Removal assertions above cannot go vacuous
+        # when _flush_removals prunes director.minions.
+        self.assertEqual(len(spawned), 600)
+        self.assertEqual(removed, spawned)
+        self.assertEqual(director.minions, [])
         self.assertEqual(set(slots.by_slot), set(range(33)))
 
     def test_jungle_and_waves_share_slots_and_reconnect_retains_owners(self):
