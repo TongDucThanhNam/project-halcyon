@@ -11,20 +11,23 @@ Optional short diagnostic: --seconds 60 (reported as incomplete coverage).
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, OrderedDict
 import cProfile
 from enum import Enum
+from functools import lru_cache
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import platform
+import marshal
 import pstats
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any
 
@@ -80,83 +83,212 @@ def json_bytes(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
-def freeze_state(world, controller, mesh_digest: str, *, replay=False) -> bytes:
-    """Canonical complete gameplay-object graph, including pending effects.
+@lru_cache(maxsize=4096)
+def _quoted(value):
+    return json.encoder.encode_basestring_ascii(value)
 
-    Navigation geometry is an immutable external dependency identified by its
-    digest. Thread locks, sockets, queues, wall-clock menu deadlines and log
-    callbacks belong to transport/scheduling, outside advance_simulation.
-    Callable rule hooks are identified by their qualified names.
+
+@lru_cache(maxsize=256)
+def _state_slots(cls):
+    names = []
+    for base in cls.__mro__:
+        slots = getattr(base, "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        names.extend(name for name in slots if name not in ("__dict__", "__weakref__"))
+    return tuple(names)
+
+
+_FRAGMENTS = OrderedDict()
+_FRAGMENT_LOCK = threading.Lock()
+
+
+_VALUE_ATOMS = frozenset((type(None), bool, str, int, float, bytes))
+
+
+def _value_key(value, enabled):
+    """Exact C-level value snapshot, never decoded or used as game state.
+
+    marshal rejects custom instances without invoking reducers; it retains
+    list/tuple distinctions, signed zero and nested mutations. Alias differences
+    may cause a cache miss, never a false match. This is only an in-process cache
+    key, NOT the canonical encoding or a persisted/interchange format.
+    """
+    if not enabled:
+        return None
+    try:
+        key = marshal.dumps(value, 4)
+    except ValueError:
+        return None
+    # marshal also accepts buffer providers as bytes. Do not let a bytearray/
+    # memoryview (or any unsupported custom type) alias an eligible bytes value.
+    pending, visited = [value], set()
+    while pending:
+        item = pending.pop()
+        cls = type(item)
+        if cls in _VALUE_ATOMS:
+            continue
+        if cls not in (list, tuple, dict, set, frozenset):
+            return None
+        if id(item) in visited:
+            continue
+        visited.add(id(item))
+        pending.extend(item)
+        if cls is dict:
+            pending.extend(item.values())
+    return key
+
+
+def _remember_fragment(key, value):
+    if key is not None:
+        with _FRAGMENT_LOCK:
+            _FRAGMENTS[key] = value
+            _FRAGMENTS.move_to_end(key)
+            if len(_FRAGMENTS) > 512:
+                _FRAGMENTS.popitem(last=False)
+    return value
+
+
+def _cached_fragment(key):
+    with _FRAGMENT_LOCK:
+        value = _FRAGMENTS.get(key)
+        if value is not None:
+            _FRAGMENTS.move_to_end(key)
+        return value
+
+
+def freeze_state(world, controller, mesh_digest: str, *, replay=False, metrics=None) -> bytes:
+    """Encode the unchanged canonical graph directly, without a parallel JSON tree.
+
+    Object traversal/ref numbering and map/set ordering are the replay contract.
+    Container memoization is local to this synchronous freeze and only reuses a
+    fragment which introduced no object definitions. Thus repeated objects still
+    become refs, and no mutable state is reused across checkpoints.
     """
     from server.navigation import NavMesh
+    from server.hero_movement import HeroMovement
+    from server.wave import Minion
     from server.native_steering import NativeSteeringMesh, SurfacePath
 
-    seen: dict[int, int] = {}
+    seen = {}
+    containers = {}
     journal = getattr(world, "journal", None)
     connections = ({key: list(value) for key, value in journal.connections.items()}
                    if journal is not None else {
                        id(conn): {"uuid": player.uuid, "generation": None, "recipient_index": index}
                        for index, (conn, (player, _)) in enumerate(world.clients.items())})
-    # Legacy nonjournal freezes can identify current recipients, but cannot
-    # invent historical reconnect generations. Replay always requires a journal.
+    # A value-like connection (unusual standalone fixture) must still receive
+    # its connection identity marker rather than a cached primitive encoding.
+    objects = (getattr(journal, "connection_objects", {}) if journal is not None
+               else {id(conn): conn for conn in world.clients})
+    cache_values = (len(objects) == len(connections) and all(
+        _value_key(conn, True) is None for conn in objects.values()))
+    connection_json = {key: '{"connection":' + json_bytes(value).decode() + '}'
+                       for key, value in connections.items()}
 
     def freeze(value):
-        if id(value) in connections:
-            return {"connection": connections[id(value)]}
-        if value is None or isinstance(value, (bool, str, int)):
-            return value
+        identity = id(value)
+        if identity in connection_json:
+            return connection_json[identity]
+        cls = type(value)
+        if value is None:
+            return 'null'
+        if cls is bool:
+            return 'true' if value else 'false'
+        if isinstance(value, str):
+            return _quoted(value)
+        if isinstance(value, int):
+            return int.__repr__(value)
         if isinstance(value, float):
             if math.isnan(value):
                 raise AssertionError("NaN gameplay state value")
-            # Permanent buffs and not-yet-stepped managers deliberately use
-            # infinity sentinels. Preserve them as strings; live resources are
-            # still required to be finite by invariant_checks every tick.
-            return {"float64": value.hex()}
+            return '{"float64":"' + value.hex() + '"}'
         if isinstance(value, Enum):
-            return {"enum": f"{type(value).__module__}.{type(value).__qualname__}.{value.name}"}
+            return '{"enum":' + _quoted(f"{cls.__module__}.{cls.__qualname__}.{value.name}") + '}'
         if isinstance(value, bytes):
-            return {"bytes": value.hex()}
+            return '{"bytes":"' + value.hex() + '"}'
         if isinstance(value, NavMesh):
-            return {"external_navmesh": mesh_digest}
+            return '{"external_navmesh":' + _quoted(mesh_digest) + '}'
         if isinstance(value, NativeSteeringMesh):
-            # Query scratch buffers/pointers and diagnostic counters do not
-            # feed future queries. Pin geometry and native rule implementation.
-            return {"external_navmesh":mesh_digest,
-                    "native_steering":value.source_metadata}
+            return json_bytes({"external_navmesh": mesh_digest,
+                               "native_steering": value.source_metadata}).decode()
         if isinstance(value, SurfacePath):
-            return {"surface_path":[freeze(item) for item in value],
-                    "height_fixed":list(value.height_fixed),
-                    "cursor_height_fixed":value.cursor_height_fixed}
+            return ('{"cursor_height_fixed":' + json_bytes(value.cursor_height_fixed).decode()
+                    + ',"height_fixed":' + json_bytes(list(value.height_fixed)).decode()
+                    + ',"surface_path":[' + ','.join(freeze(item) for item in value) + ']}')
         if isinstance(value, Path):
-            return {"path": str(value)}
+            return '{"path":' + _quoted(str(value)) + '}'
         if callable(value):
-            return {"callable": f"{value.__module__}.{value.__qualname__}"}
+            return '{"callable":' + _quoted(f"{value.__module__}.{value.__qualname__}") + '}'
+        cached = containers.get(identity)
+        if cached is not None:
+            return cached[1]
+        count = len(seen)
+        # Long value arrays (tape/paths) are common repeated subtrees. Their
+        # fresh structural snapshot is cheaper than rebuilding JSON fragments.
+        key = _value_key(value, cache_values) if cls in (list, tuple) and len(value) > 2 else None
+        cached_value = _cached_fragment(key) if key is not None else None
+        if cached_value is not None:
+            return cached_value
         if isinstance(value, dict):
-            return {"map": [[freeze(key), freeze(value[key])]
-                            for key in sorted(value, key=lambda item: (
-                                "connection", repr(connections[id(item)])) if id(item) in connections
-                                else (type(item).__name__, repr(item)))]}
-        if isinstance(value, (list, tuple)):
-            return {type(value).__name__: [freeze(item) for item in value]}
-        if isinstance(value, (set, frozenset)):
-            return {"set": sorted((freeze(item) for item in value), key=json_bytes)}
-        identity = id(value)
-        if identity in seen:
-            return {"ref": seen[identity]}
-        reference = len(seen)
-        seen[identity] = reference
-        attrs = dict(getattr(value, "__dict__", {}))
-        for cls in type(value).__mro__:
-            slots = getattr(cls, "__slots__", ())
-            if isinstance(slots, str):
-                slots = (slots,)
-            for name in slots:
-                if name not in ("__dict__", "__weakref__") and hasattr(value, name):
+            result = '{"map":[' + ','.join('[' + freeze(key) + ',' + freeze(value[key]) + ']'
+                for key in sorted(value, key=lambda item: (
+                    "connection", repr(connections[id(item)])) if id(item) in connections
+                    else (type(item).__name__, repr(item)))) + ']}'
+        elif isinstance(value, (list, tuple)):
+            result = '{' + _quoted(cls.__name__) + ':[' + ','.join(freeze(item) for item in value) + ']}'
+        elif isinstance(value, (set, frozenset)):
+            result = '{"set":[' + ','.join(sorted(freeze(item) for item in value)) + ']}'
+        else:
+            if identity in seen:
+                return '{"ref":' + str(seen[identity]) + '}'
+            reference = len(seen)
+            seen[identity] = reference
+            attrs = dict(getattr(value, "__dict__", {}))
+            for name in _state_slots(cls):
+                if hasattr(value, name):
                     attrs[name] = getattr(value, name)
-        if not attrs:
-            raise TypeError(f"unhandled gameplay state type: {type(value)}")
-        return {"object": f"{type(value).__module__}.{type(value).__qualname__}",
-                "id": reference, "fields": {key: freeze(attrs[key]) for key in sorted(attrs)}}
+            if not attrs:
+                raise TypeError(f"unhandled gameplay state type: {type(value)}")
+            # Field fragments have no object/ref numbering when every child is
+            # a value tree. Keep this namespace distinct from container JSON.
+            value_key = None
+            navigation = attrs.get("navigation")
+            split = "_pursuit" if cls is Minion and "_pursuit" in attrs else None
+            if cls in (HeroMovement, Minion) and (navigation is None or isinstance(navigation, NavMesh)):
+                value_key = _value_key({k: v for k, v in attrs.items()
+                                        if k not in ("navigation", split)}, cache_values)
+            field_key = ("fields", cls, split, "navigation" in attrs,
+                         mesh_digest if navigation is not None else None, value_key) if value_key is not None else None
+            fields = _cached_fragment(field_key) if field_key is not None else None
+            if fields is None:
+                if split is not None and field_key is not None:
+                    # Only value fields are cached. The pursuit object is still
+                    # visited at its original lexical position on every freeze,
+                    # retaining definition/ref numbering even across aliases.
+                    fields = _remember_fragment(field_key, tuple(','.join(
+                        _quoted(k) + ':' + freeze(attrs[k]) for k in sorted(attrs)
+                        if (k < split if before else k > split)) for before in (True, False)))
+                else:
+                    fields = _remember_fragment(field_key, ','.join(
+                        _quoted(key) + ':' + freeze(attrs[key]) for key in sorted(attrs)))
+            if isinstance(fields, tuple):
+                fields = fields[0] + ',"_pursuit":' + freeze(attrs[split]) + ',' + fields[1]
+            return ('{"fields":{' + fields
+                    + '},"id":' + str(reference) + ',"object":' + _quoted(f"{cls.__module__}.{cls.__qualname__}") + '}')
+        if len(seen) == count:
+            # Keep the source alive too: temporary attribute containers may
+            # otherwise reuse an id during this traversal.
+            containers[identity] = (value, result)
+        return _remember_fragment(key, result)
+
+    def finish(state):
+        if metrics is None:
+            return freeze(state).encode()
+        fragments = [(key, freeze(state[key])) for key in sorted(state)]
+        metrics["subtree_bytes"] = {key: len(value.encode()) for key, value in fragments}
+        return ('{"map":[' + ','.join('[' + _quoted(key) + ',' + value + ']'
+                                     for key, value in fragments) + ']}').encode()
 
     try:
         if replay:
@@ -167,8 +299,8 @@ def freeze_state(world, controller, mesh_digest: str, *, replay=False) -> bytes:
             # selection, so preserve it independently of canonical map sorting.
             state["clients"] = [(conn, player) for conn, (player, _) in world.clients.items()]
             state["connection_generations"] = world.journal.generations
-            return json_bytes(freeze(state))
-        return json_bytes(freeze({
+            return finish(state)
+        return finish({
             "counters": {key: getattr(world, key) for key in (
                 "sim_tick", "sim_time", "seq_1010", "world_tick", "hero_x", "hero_y",
                 "hero_facing", "move_target", "_last_position_at", "_match_result_at_tick",
@@ -190,12 +322,13 @@ def freeze_state(world, controller, mesh_digest: str, *, replay=False) -> bytes:
             "economy": world.economy, "items": world.items, "attacks": world.attacks,
             "waves": world.wave_director, "jungle": world.jungle, "structures": world.structures,
             "bots": world.bot_controllers, "script": controller.state,
-        }))
+        })
     finally:
         # Recursive local functions otherwise retain themselves and their seen
         # tables until cyclic GC, even after a checkpoint has been serialized.
         # Traversal is synchronous, so the recursive cell is no longer needed.
         del freeze
+        del finish
 
 
 class ScriptedPlayers:

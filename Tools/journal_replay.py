@@ -14,7 +14,7 @@ import sys
 import traceback
 
 from server.input_journal import (InputJournal, STATE_EXCLUSIONS, EVENT_EXCLUSIONS, FIELD_EXCLUSIONS,
-                                  encoded, file_digest, validate_dependencies)
+                                  CanonicalState, encoded, file_digest, validate_dependencies)
 
 ARTIFACTS = ("events.bin", "recipients.jsonl", "initial-state.json", "final-state.json",
              "state-checkpoints.jsonl", "send-outcomes.jsonl")
@@ -149,7 +149,8 @@ def compare_record(expected, actual):
     for index, (left, right) in enumerate(zip(expected["checkpoints"], actual["checkpoints"])):
         # Compare state before digest to retain the first useful field name.
         for field in ("tick", "label", "state", "sha256"):
-            found = difference(left[field], right[field], f"checkpoints[{index}].{field}")
+            observed = json.loads(right[field]) if isinstance(right[field], CanonicalState) else right[field]
+            found = difference(left[field], observed, f"checkpoints[{index}].{field}")
             if found:
                 raise ReplayMismatch(left["tick"], *found)
     if len(expected["checkpoints"]) != len(actual["checkpoints"]):

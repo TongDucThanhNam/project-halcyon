@@ -6,6 +6,8 @@ claims. All observations come from each participant's decoded s2c stream.
 from __future__ import annotations
 
 import argparse
+from collections import deque
+import copy
 import hashlib
 import ipaddress
 import json
@@ -27,6 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from Tools.verification_support import output_directory
+from Tools.protocol_observer import Observer
 from server import ability_wire, cooldown_wire, hero_catalog, roster, wire
 
 MATCH_ID = "00000000-1111-4222-8333-444455556666"
@@ -68,7 +71,9 @@ def new_output(explicit=None) -> Path:
 
 def source_identity():
     tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
-    names = set(tracked) | {"Tools/protocol_participants.py", "server/test/test_protocol_participants.py"}
+    names = set(tracked) | {str(p.relative_to(ROOT)).replace('\\', '/')
+                            for pattern in ('Tools/protocol_*.py', 'server/test/test_protocol_*.py')
+                            for p in ROOT.glob(pattern)}
     manifest = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                 for name in sorted(names) if name and (ROOT / name).is_file()}
     encoded = json.dumps(manifest, sort_keys=True).encode()
@@ -91,7 +96,10 @@ class Participant:
         self.identity = identity or str(uuid.uuid4())
         self.cipher = wire.MatchCipher(match_id)
         self.eid = self.slot = self.team = None
-        self.messages = []
+        self.messages = deque(maxlen=8192)
+        self.message_count = 0
+        self.record_count = 0
+        self.observer = Observer(self.identity)
         self.heroes, self.timers, self.ranks = {}, {}, {}
         self.stages = {name: {"classification": "missing input", "proving_opcodes": [],
                               "inputs": [], "started_at": None}
@@ -106,8 +114,10 @@ class Participant:
 
     def _record(self, direction, opcode, payload, lane="match"):
         with self.condition:
+            self.record_count += 1
             row = {"direction": direction, "wall_time": time.time(), "opcode": opcode,
-                   "payload_hex": payload.hex(), "lane": lane, "generation": self.generation}
+                   "payload_hex": payload.hex(), "lane": lane, "generation": self.generation,
+                   'record_index':self.record_count}
             self.log.write(json.dumps(row) + "\n")
             self.log.flush()
             return row
@@ -121,6 +131,12 @@ class Participant:
         self.stop_event.clear()
         self.error = None
         self.generation += 1
+        if self.generation > 1:
+            with self.condition:
+                self.observer.reconnect()
+                self.heroes.clear()
+                self.ranks.clear()
+                self.timers.clear()
         self.sock = socket.create_connection((self.host, self.port), timeout=5)
         route = wire.build_route_request(self.host)
         self.sock.sendall(route)
@@ -167,7 +183,10 @@ class Participant:
                             op, payload = wire.decode_body(self.cipher, body)
                             with self.condition:
                                 row = self._record("s2c", op, payload)
+                                self.message_count += 1
+                                row['stream_index'] = self.message_count
                                 self.messages.append((op, payload, row))
+                                self.observer.consume(op, payload, row)
                                 self._observe(op, payload)
                                 self.condition.notify_all()
                 if time.monotonic() >= next_keepalive:
@@ -181,59 +200,43 @@ class Participant:
                     self.condition.notify_all()
 
     def _observe(self, op, p):
-        if op == wire.OP.GAME_SETUP:
-            self.eid = u32(p)
-        elif op in (wire.OP.SNAPSHOT_JOIN, wire.OP.SNAPSHOT):
+        self.eid = self.observer.owner
+        if op in (wire.OP.SNAPSHOT_JOIN, wire.OP.SNAPSHOT):
             for index in range(6):
                 start = 8 + index * roster.SNAPSHOT_RECORD_STRIDE
                 record = p[start:start + roster.SNAPSHOT_RECORD_STRIDE]
                 if record[97:161].split(b"\0", 1)[0].decode("ascii") == self.identity:
                     self.slot, self.team = record[1], record[8]
-        elif op == wire.OP.HERO_BLOCK:
-            eid = u32(p, 8)
-            self.heroes[eid] = {"hero_id": u32(p), "team": u32(p, 12), "slot": p[745],
-                                "position": (struct.unpack_from(">f", p, 18)[0], struct.unpack_from(">f", p, 26)[0]),
-                                "hp": struct.unpack_from(">f", p, 42)[0],
-                                "energy": struct.unpack_from(">f", p, 122)[0],
-                                "points": struct.unpack_from(">f", p, 314)[0],
-                                "gold": 600.0}  # native initial gold baseline; 1053 is additive
+        # Compatibility view for the small M2 stage harness. All arithmetic and
+        # slot interpretation live in the typed observer, not a second decoder.
+        for eid,a in self.observer.actors.items():
+            if a.kind != 'hero':
+                continue
+            self.heroes[eid] = {name:getattr(a,name) for name in
+                ('hero_id','team','slot','position','hp','energy','points','gold')}
             if eid == self.eid:
-                self.slot, self.team = p[745], u32(p, 12)
-        elif op == wire.OP.POSITION and u32(p) in self.heroes:
-            self.heroes[u32(p)]["position"] = struct.unpack_from(">ff", p, 4)
-        elif op == wire.OP.ENTITY_FULL_UPDATE and u32(p) in self.heroes:
-            self.heroes[u32(p)]["position"] = (struct.unpack_from(">f", p, 12)[0], struct.unpack_from(">f", p, 20)[0])
-        elif op == wire.OP.ENTITY_STAT and u32(p) in self.heroes:
-            key = {0: "hp", 2: "energy", 6: "gold"}.get(p[8])
-            if key:
-                self.heroes[u32(p)][key] += struct.unpack_from(">f", p, 4)[0]
-        elif op == wire.OP.COMBAT_DELTA and u32(p) in self.heroes:
-            # 1054 applies combat damage; the server deliberately does not also
-            # send 1053 HP for the same hit (that would subtract it twice).
-            self.heroes[u32(p)]["hp"] += struct.unpack_from(">f", p, 8)[0]
-        elif op == wire.OP.INVENTORY_SLOT:
-            eid, action = struct.unpack_from(">II", p)
-            self.ranks[eid, action] = self.ranks.get((eid, action), 0) + 1
-            if eid in self.heroes:
-                self.heroes[eid]["points"] -= 1
-        elif op == 1076 and u32(p) in self.heroes:
-            self.heroes[u32(p)]["points"] += 1
-        elif op == wire.OP.TIMER_TICK:
-            timer = cooldown_wire.parse_timer_tick(p)
-            self.timers[timer.eid, timer.tag] = timer
+                self.slot,self.team = a.slot,a.team
+        self.ranks = {(a.eid,action):rank for a in self.observer.actors.values()
+                      if a.kind == 'hero' for action,rank in a.ranks.items()}
+        self.timers = {(a.eid,tag):timer for a in self.observer.actors.values()
+                       if a.kind == 'hero' for tag,timer in a.timers.items()}
 
     def mark(self):
         with self.condition:
-            return len(self.messages)
+            return self.message_count
 
     def wait(self, predicate, *, after=0, timeout=8):
         deadline = time.monotonic() + timeout
         with self.condition:
             while True:
-                for op, payload, row in self.messages[after:]:
+                if self.messages and after and after < self.messages[0][2]['stream_index']-1:
+                    raise StageFailure(f'{self.hero}: evidence wait exceeded bounded retention')
+                for op, payload, row in self.messages:
+                    if row['stream_index'] <= after:
+                        continue
                     if predicate(op, payload):
                         return row
-                after = len(self.messages)
+                after = self.message_count
                 if self.error:
                     raise StageFailure(f"{self.hero} receive failure: {self.error}")
                 left = deadline - time.monotonic()
@@ -437,15 +440,96 @@ def reconnect(p):
     setup = p.wait(lambda op, b: op == 1001 and u32(b) == expected[0], after=mark)
     block = p.wait(lambda op, b: op == 1011 and u32(b, 8) == expected[0], after=mark)
     first = p.wait(lambda op, b: op == 1070 and u32(b) == expected[0], after=mark)
+    ready_mark = p.mark()
+    p.input('reconnect', 1134, bytes(6))
+    p.input('reconnect', 1137, roster.build_hero_ready_ack(p.eid))
+    ready = p.wait(lambda op, b: op == 1137 and b == roster.build_hero_ready_ack(p.eid), after=ready_mark)
     later = p.wait(lambda op, b: op == 1116, after=p.mark(), timeout=8)
     if (p.eid, p.slot, p.team) != expected:
         raise StageFailure("reconnect changed identity assignment")
-    p.prove("reconnect", [setup, block, first, later])
+    p.prove("reconnect", [setup, block, first, ready, later])
 
 
-def run(host, port, output, *, match_id=MATCH_ID, heartbeat_port=2112, mode="existing-server", inputs=None):
+def full_match(participants, output, *, timeout=2400, stall_seconds=300):
+    from Tools.protocol_policy import Policy
+    policies = [Policy(p.eid,p.hero) for p in participants]
+    start = time.monotonic()
+    last_progress, destroyed = start, set()
+    reconnect_thread, reconnect_errors = None, []
+    reconnect_before = None
+    def reconnect_once():
+        try:
+            reconnect(participants[4])
+        except Exception as exc:
+            reconnect_errors.append(repr(exc))
+    with (output/'policy.jsonl').open('x',encoding='utf-8') as log:
+        try:
+            while True:
+                now = time.monotonic()
+                if now-start >= timeout:
+                    raise StageFailure('match timeout: no natural result on all six streams')
+                if reconnect_errors:
+                    raise StageFailure('reconnect: '+str(reconnect_errors))
+                if any(p.error for p in participants):
+                    raise StageFailure('receive/EOF: '+str([p.error for p in participants]))
+                views = []
+                for p in participants:
+                    with p.condition:
+                        views.append(copy.deepcopy(p.observer.actors))
+                fresh = set().union(*(p.observer.structure_deaths for p in participants))
+                if fresh != destroyed:
+                    destroyed, last_progress = fresh, now
+                    print(f'Match {now-start:.1f}s: destroyed structures {sorted(destroyed)}',flush=True)
+                if now-last_progress > stall_seconds:
+                    snapshot = {p.hero:{eid:vars(a) | {'timers':{tag:str(t) for tag,t in a.timers.items()}}
+                               for eid,a in view.items()} for p,view in zip(participants,views)}
+                    (output/'stall.json').write_text(json.dumps(snapshot,indent=2),encoding='utf-8')
+                    raise StageFailure(f'policy stall: no structure destruction for {stall_seconds}s; inspect stall.json')
+                if all(p.observer.finished() for p in participants):
+                    if reconnect_thread is None or reconnect_thread.is_alive():
+                        raise StageFailure('natural finish without completed mid-match reconnect')
+                    if not any(p.observer.deaths and p.observer.revivals for p in participants):
+                        raise StageFailure('natural finish missing hero death/1074 coverage')
+                    if not all(p.observer.minion_spawns and p.observer.own_purchases and p.observer.own_learns for p in participants):
+                        raise StageFailure('natural finish missing wave/shop/learn coverage')
+                    winners = {p.observer.result['winner'] for p in participants}
+                    if len(winners) != 1:
+                        raise StageFailure('1009 winner differs between streams')
+                    if any(p.observer.structure_order_errors for p in participants):
+                        raise StageFailure('structure death violates observed vulnerability order')
+                    if not all(sum(a.kind == 'structure' for a in view.values()) == 12 for view in views):
+                        raise StageFailure('incomplete structure registry')
+                    return {'match_duration_s':now-start,'winner':winners.pop(),
+                            'reconnect_other_stream_frames':{p.hero:p.message_count-reconnect_before[p.hero]
+                                for p in participants if p is not participants[4]}}
+                if reconnect_thread is None and now-start > 70 and any(p.observer.minion_spawns for p in participants):
+                    reconnect_before = {p.hero:p.message_count for p in participants}
+                    reconnect_thread = threading.Thread(target=reconnect_once,name='m3-reconnect')
+                    reconnect_thread.start()
+                for index,(p,policy,actors) in enumerate(zip(participants,policies,views)):
+                    if p is participants[4] and reconnect_thread and reconnect_thread.is_alive():
+                        continue
+                    # Owner periodic 1070 is suppressed: borrow only a peer's
+                    # received coordinate, never the peer's simulation object.
+                    peer = views[(index+1)%len(views)].get(p.eid)
+                    if peer and p.eid in actors:
+                        actors[p.eid].position = peer.position
+                    intent = policy.step(actors,now-start)
+                    if intent:
+                        row = p.send(intent.opcode,intent.payload)
+                        log.write(json.dumps({'hero':p.hero,'reason':intent.reason,**row})+'\n')
+                        log.flush()
+                time.sleep(.5)
+        finally:
+            if reconnect_thread:
+                reconnect_thread.join(30)
+                if reconnect_thread.is_alive():
+                    raise StageFailure('reconnect thread did not stop')
+
+
+def run(host, port, output, *, match_id=MATCH_ID, heartbeat_port=2112, mode="existing-server", inputs=None, lifecycle=False):
     summary = {"source": source_identity(), "host": private_host(host), "port": port,
-               "mode": mode, "started_at": time.time(), "status": "RUNNING",
+               "mode": mode, "started_at": time.time(), 'started_monotonic_ns':time.monotonic_ns(), "status": "RUNNING",
                "setup_failures": [], "gameplay_failures": [], "owned_inputs": inputs,
                "limits": ["Protocol/session evidence, not native-client behavior or independent gameplay fidelity.",
                           "One rank-one cast per hero; no complete-kit, full-match or exact-replay claim.",
@@ -455,7 +539,14 @@ def run(host, port, output, *, match_id=MATCH_ID, heartbeat_port=2112, mode="exi
     try:
         enter_world(participants)
         entered = True
-        play(participants)
+        if lifecycle:
+            summary['limits'] = ['Wire-only server/session acceptance, not native rendering or independent gameplay fidelity.',
+                                 'Nonhero HP unknown until an HP-bearing snapshot; gold starts at native 600.',
+                                 'Hero resources become unknown after implicit 1076 growth until a numeric baseline; no fabricated HP.',
+                                 'Tick anchors from journal; per-stream evidence independently received.']
+            summary.update(full_match(participants,output))
+        else:
+            play(participants)
         errors = [f"{p.hero}: {p.error}" for p in participants if p.error]
         if errors:
             raise StageFailure("; ".join(errors))
@@ -475,6 +566,10 @@ def run(host, port, output, *, match_id=MATCH_ID, heartbeat_port=2112, mode="exi
                 summary["status"] = "ERROR"
                 summary["setup_failures"].append(f"cleanup {p.hero}: {exc}")
         summary["participants"] = [p.report() for p in participants]
+        if lifecycle:
+            for report,p in zip(summary['participants'],participants):
+                report['observer'] = p.observer.metrics()
+                report['generation'] = p.generation
         summary["source_stable"] = summary["source"]["manifest_sha256"] == source_identity()["manifest_sha256"]
         if not summary["source_stable"]:
             summary["status"] = "ERROR"
@@ -495,15 +590,22 @@ def main(argv=None):
     parser.add_argument("--self-host", action="store_true")
     parser.add_argument("--journal", action="store_true",
                         help="[self-host] record application-order journal and tick-work evidence")
+    parser.add_argument('--full-match', action='store_true', help='M3 natural lifecycle, 40-minute wall cap')
+    parser.add_argument('--telemetry', action='store_true', help='self-host process and queue measurements')
     args = parser.parse_args(argv)
     host = private_host(args.host)
     if args.self_host and not ipaddress.ip_address(host).is_loopback:
         parser.error("--self-host binds loopback only")
     if args.journal and not args.self_host:
         parser.error("--journal requires --self-host")
+    if args.telemetry and not args.self_host:
+        parser.error('--telemetry requires --self-host')
+    if args.full_match and not (args.self_host and args.journal and args.telemetry):
+        parser.error('--full-match requires --self-host --journal --telemetry')
     output = new_output(args.output)
     print(f"Evidence: {output}", flush=True)
     gateway = None
+    telemetry = None
     inputs = None
     journal_environment = {name: os.environ.get(name) for name in
                            ("HALCYON_INPUT_JOURNAL_DIR", "HALCYON_TRACE_MOVEMENT")}
@@ -517,7 +619,12 @@ def main(argv=None):
             required = (paths.stack_dir() / "world_tape.bin",
                         Path(os.environ.get("HALCYON_NAVMESH", navigation.DEFAULT_CLASSIC_NAVMESH)))
             missing = [str(path) for path in required if not path.is_file()]
-            overrides = [name for name in ("HALCYON_NO_TAPE", "HALCYON_NO_WAVE") if os.environ.get(name)]
+            from Tools.run_scenarios import ISOLATED_ENVIRONMENT
+            from Tools.verification_support import RUNTIME_SWITCHES
+            allowed = {'HALCYON_INPUT_JOURNAL_DIR','HALCYON_TRACE_MOVEMENT','HALCYON_NAVMESH',
+                       'HALCYON_LOCAL_ROOT','HALCYON_STACK_DIR','HALCYON_SPAWN_CORPUS','HALCYON_SKYE_VOLLEY_CORPUS'}
+            overrides = [name for name in set(ISOLATED_ENVIRONMENT) | set(RUNTIME_SWITCHES) | {'HALCYON_NO_TAPE','HALCYON_NO_WAVE'}
+                         if name not in allowed and os.environ.get(name)]
             failures = [f"missing: {path}" for path in missing] + [f"nonproduction override: {name}" for name in overrides]
             if not failures:
                 try:
@@ -543,8 +650,18 @@ def main(argv=None):
                                              log=server_log)
             gateway.start()
             args.port, args.heartbeat_port = gateway.port, gateway.relay.port
+            if args.telemetry:
+                from Tools.protocol_telemetry import Telemetry
+                telemetry = Telemetry(gateway,output)
+                telemetry.start()
         summary = run(host, args.port, output, match_id=args.match_id,
-                      heartbeat_port=args.heartbeat_port, mode="self-host" if args.self_host else "existing-server", inputs=inputs)
+                      heartbeat_port=args.heartbeat_port, mode="self-host" if args.self_host else "existing-server", inputs=inputs,
+                      lifecycle=args.full_match)
+        if telemetry:
+            telemetry.close()
+            summary['telemetry_error'] = telemetry.error
+            if telemetry.error:
+                summary['status'] = 'ERROR'
         if args.journal:
             gateway.stop()
             journals = []
@@ -565,9 +682,15 @@ def main(argv=None):
                 summary["status"] = "ERROR"
                 summary["setup_failures"].append("input journal did not close successfully")
             (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        if telemetry and not telemetry.error:
+            from Tools.protocol_telemetry import summarize
+            summarize(output,summary)
+            (output / 'summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
         print(f"{summary['status']}: {output / 'summary.json'}", flush=True)
         return 0 if summary["status"] == "PASS" else 1
     finally:
+        if telemetry:
+            telemetry.close()
         if gateway:
             gateway.stop()
         if args.journal:

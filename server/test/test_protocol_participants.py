@@ -99,7 +99,7 @@ class TestParticipants(unittest.TestCase):
             self.assertEqual(p.stages["cast"]["proving_opcodes"], [])
             self.assertFalse(any(op == 1053 and pp.u32(body) == p.eid and body[8] == 2
                                  and pp.struct.unpack_from(">f", body, 4)[0] < 0
-                                 for op, body, _ in p.messages[mark:]))
+                                 for op, body, row in p.messages if row['stream_index'] > mark))
         finally:
             for p in players:
                 p.close()

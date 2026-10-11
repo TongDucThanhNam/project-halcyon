@@ -45,6 +45,28 @@ max 19.2/18.6 ms, stream/state/checkpoint hashes unchanged from M2
 (`Local/evidence/halcyon-sandbox-verify-40muyztg`, qualification
 `Local/evidence/m4-verifier-cpu-qualification-20261012`).
 
+**Milestone 3 PASS (natural wire-only match to crystal result, exactly replayed).**
+New `Tools/protocol_observer.py` (s2c-only registry: `1010` EID at +8, `1035` slot
+release, lifecycle, resource pools, progression, inventory, result; bounded frame
+retention) and `Tools/protocol_policy.py` (team 1 pushes with waves, team 2 one
+defender + two farmers; learn/shop/Recall; wait for `1074`). Two acceptance runs, each
+`--self-host --full-match --journal --telemetry` with production defaults:
+`Local/evidence/m3-run-1791742653262-live-1/` (291.2 s, team 1) and, after the
+checkpoint encoder repair, `Local/evidence/m3-run-1791744282869-live-1/` (321.2 s,
+team 1, 14 deaths / 13 revivals, 16 purchases, 46 learns, Adagio gen-2 reconnect with
+ordinary readiness). All six streams observed `1106 → 1072 → 1009` (reason 0, result
+120 ticks after the crystal). Replay `…-replay-1/summary.json`: 6,813 records / 328
+checkpoints / 145,052 events, exact across seeds, live anchors equal, no new
+exclusions. Gameplay receive→apply p95 27.6 ms / max 89.6 ms; peak RSS 100.7 MiB.
+Gates: `--suite all` PASS 1613 / 1585 / 28 skips (`Local/evidence/halcyon-checks-yt0oe5m2`);
+qualified verifier PASS max 27.0/18.6 ms, hashes unchanged
+(`Local/evidence/halcyon-sandbox-verify-b0g0lz5g`).
+**Open (blocks M7 soak):** live checkpoint work still grows ~3.8 ms per simulation
+minute because canonical `wave_director` history retains dead minions (35 KB → 553 KB
+in five minutes); server histories (`join_sequence`, `keepalive_ticks`, buff
+allocations, interruption serials) are also unbounded. Seven non-checkpoint live
+ticks > 50 ms are attributed in `Local/evidence/m3-run-1791744282869-report/report.md`.
+
 ## Entry checkpoint — 2026-10-10
 
 **Session hand-off (operator ended the day after rev8).** Committed state:

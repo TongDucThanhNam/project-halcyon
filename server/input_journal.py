@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import hashlib
+import gc
 import inspect
 import json
 import os
@@ -52,7 +53,22 @@ FIELD_EXCLUSIONS = {
 }
 
 
+class CanonicalState(bytes):
+    """Already encoded by freeze_state, not an arbitrary bytes JSON value."""
+
+
 def encoded(value):
+    if isinstance(value, CanonicalState):
+        return bytes(value)
+    if isinstance(value, dict):
+        if isinstance(value.get("state"), CanonicalState):
+            return b"{" + b",".join(encoded(key) + b":" + encoded(value[key])
+                                     for key in sorted(value)) + b"}"
+        checkpoints = value.get("checkpoints")
+        if isinstance(checkpoints, list) and checkpoints:
+            return b"{" + b",".join(encoded(key) + b":" + (
+                b"[" + b",".join(encoded(row) for row in checkpoints) + b"]"
+                if key == "checkpoints" else encoded(value[key])) for key in sorted(value)) + b"}"
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
@@ -123,6 +139,10 @@ class InputJournal:
         self.failure = None
         self.checkpoint_count = 0
         self.world_start_count = 0
+        # Separate, opt-in measurements never enter the replay contract.
+        self.probe = [] if os.environ.get("HALCYON_CHECKPOINT_PROBE") == "1" else None
+        self.gc_intervals = []
+        self.gc_started = None
         if header is None:
             from Tools.run_scenarios import source_manifest, manifest_digest, ISOLATED_ENVIRONMENT
             from Tools.verification_support import RUNTIME_SWITCHES
@@ -155,14 +175,32 @@ class InputJournal:
             self.header["initial_attachment"] = ({"seq": 0, "sim_tick": world.sim_tick,
                 "phase": world.phase, **self.identity(world.conn)} if world.conn is not None else None)
         self.write(self.header)
+        if self.probe is not None:
+            gc.callbacks.append(self._gc_probe)
 
     def write(self, row):
         if self.output is not None:
             try:
-                self.output.write(encoded(row) + b"\n")
+                started = time.perf_counter_ns()
+                data = encoded(row) + b"\n"
+                serialized = time.perf_counter_ns()
+                self.output.write(data)
+                if getattr(self, "probe", None) is not None and row.get("kind") == "operation" and row["checkpoints"]:
+                    self.probe.append({"seq": self.sequence, "tick": self.world.sim_tick,
+                        "row_encode_ms": (serialized-started)/1e6,
+                        "write_ms": (time.perf_counter_ns()-serialized)/1e6, "row_bytes": len(data)})
             except Exception as exc:
                 self.failure = repr(exc)
                 raise RuntimeError(f"input journal write failed: {self.path}: {exc}") from exc
+
+    def _gc_probe(self, phase, info):
+        if phase == "start":
+            self.gc_started = time.monotonic_ns()
+        elif self.gc_started is not None:
+            self.gc_intervals.append({"start_ns": self.gc_started,
+                                      "end_ns": time.monotonic_ns(),
+                                      "generation": info["generation"]})
+            self.gc_started = None
 
     def attach(self, conn, identity, eid):
         generation = self.generations.get(identity, 0) + 1
@@ -204,16 +242,26 @@ class InputJournal:
                 raise
         return publish
 
-    def state(self):
+    def state(self, *, metrics=None):
         from Tools.verify_sandbox import freeze_state
         mesh = self.header["inputs"][self.header["input_environment"]["HALCYON_NAVMESH"]]
-        return freeze_state(self.world, None, mesh, replay=True)
+        return freeze_state(self.world, None, mesh, replay=True, metrics=metrics)
 
     def checkpoint(self, label):
-        state = self.state()
+        monotonic_started = time.monotonic_ns()
+        started = time.perf_counter_ns()
+        metrics = {} if self.probe is not None else None
+        state = CanonicalState(self.state(metrics=metrics))
+        serialized = time.perf_counter_ns()
+        digest = hashlib.sha256(state).hexdigest()
+        hashed = time.perf_counter_ns()
         self.active["checkpoints"].append({"tick": self.world.sim_tick, "label": label,
-                                            "sha256": hashlib.sha256(state).hexdigest(),
-                                            "state": json.loads(state)})
+                                            "sha256": digest, "state": state})
+        if self.probe is not None:
+            self.probe.append({"seq": self.sequence, "tick": self.world.sim_tick, "label": label,
+                "start_ns": monotonic_started, "end_ns": time.monotonic_ns(),
+                "serialize_ms": (serialized-started)/1e6, "hash_ms": (hashed-serialized)/1e6,
+                "decode_ms": 0, "state_bytes": len(state), **metrics})
         self.checkpoint_count += 1
         if label == "world-start":
             self.world_start_count += 1
@@ -243,9 +291,15 @@ class InputJournal:
             if method not in ("world_batch", "advance_simulation", "_broadcast_snapshot"):
                 self.checkpoint("operation-end")
             self.last = self.active
+            write_started = time.perf_counter_ns()
             self.write(self.active)
+            flush_started = time.perf_counter_ns()
             if self.output is not None and self.active["checkpoints"]:
                 self.output.flush()
+            if self.probe is not None and self.active["checkpoints"]:
+                self.probe.append({"seq": self.sequence, "tick": world.sim_tick,
+                                   "flush_ms": (time.perf_counter_ns()-flush_started)/1e6,
+                                   "operation_write_ms": (time.perf_counter_ns()-write_started)/1e6})
         except Exception as exc:
             self.failure = repr(exc)
             raise
@@ -313,6 +367,20 @@ class InputJournal:
                 self.output.flush()
         finally:
             self.closed = True
-            if self.output:
-                self.output.close()
+            try:
+                if self.output:
+                    self.output.close()
+            except Exception as exc:
+                self.failure = repr(exc)
+                raise RuntimeError(f"input journal close failed: {self.path}: {exc}") from exc
+            finally:
+                if self.probe is not None:
+                    gc.callbacks.remove(self._gc_probe)
+                    if self.path:
+                        try:
+                            self.path.with_suffix(".probe.json").write_bytes(encoded(
+                                {"measurements": self.probe, "gc_intervals": self.gc_intervals}))
+                        except Exception as exc:
+                            self.failure = repr(exc)
+                            raise RuntimeError(f"input journal probe write failed: {self.path}: {exc}") from exc
 
