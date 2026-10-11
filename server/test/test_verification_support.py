@@ -11,6 +11,22 @@ from Tools import verification_support as support, verify_sandbox
 
 
 class EvidenceBoundaries(unittest.TestCase):
+    def test_default_and_explicit_local_evidence_preserve_source_boundary(self):
+        with tempfile.TemporaryDirectory(prefix='halcyon-relocation-test-') as temporary:
+            root = Path(temporary) / 'checkout'
+            root.mkdir()
+            default = support.output_directory(root=root)
+            self.assertEqual(default.parent, root / 'Local/evidence')
+            self.assertNotEqual(default, support.output_directory(root=root))
+            explicit = root / 'Local/evidence/explicit'
+            self.assertEqual(support.output_directory(explicit, root=root), explicit)
+            (explicit / 'receipt.json').write_text('preserved', encoding='utf-8')
+            with self.assertRaises(support.OutputPathError):
+                support.output_directory(explicit, root=root)
+            for forbidden in (root, root / 'Local', root / 'server/evidence'):
+                with self.subTest(path=forbidden), self.assertRaises(support.OutputPathError):
+                    support.output_directory(forbidden, root=root)
+
     def test_repository_nonempty_and_file_destinations_are_refused_without_overwrite(self):
         with self.assertRaises(support.OutputPathError):
             support.output_directory(support.ROOT / 'audit-output-must-not-exist')

@@ -1,5 +1,24 @@
 # Reproduce the Windows development environment
 
+**2026-10-11 storage update:** the operator's checkout is now
+`D:\project-halcyon` (formerly `D:\Games\project-halcyon`). Keep related private
+files inside its ignored `Local/` tree. New verification output defaults to
+unique `Local/evidence/` directories; explicit QA directories under `Local/`
+are supported. Source directories, symlinks/junctions and nonempty output
+destinations remain protected. Historical absolute paths in old receipts and
+manifests are provenance, not current output destinations.
+
+Consolidated destinations:
+- `D:\HalcyonEvidence` → `Local/evidence/HalcyonEvidence`.
+- `%LOCALAPPDATA%/halcyon-evidence` and `halcyon-observer` →
+  `Local/appdata-archive/` with the original names.
+- Halcyon-specific entries in system TEMP → `Local/temp-archive/`.
+
+The per-root relocation journal is `Local/manifests/relocation-20261011.jsonl`;
+only `MOVED_SHA256_VERIFIED` entries confirm cross-drive source removal.
+Entries reporting retained sources require resolution of their recorded errors.
+Do not publish any part of `Local/`.
+
 Reviewed **2026-09-13**. This guide covers the original Android CE client,
 LDPlayer, local inputs, Python server, local routing, and verification. Run
 PowerShell commands from the project root unless a step says otherwise.
@@ -28,7 +47,7 @@ There are two parts to the working project:
 Do not publish `Local/` or include it in a shared source ZIP. Each developer
 needs their own authorized game installation and the documented owned inputs.
 The local import does not create rights to redistribute the game or its data.
-Keep fresh QA evidence outside the checkout; preserve existing journals.
+Keep fresh QA evidence in ignored `Local/evidence/`; preserve existing journals.
 
 ### Downloads and installations
 
@@ -78,6 +97,9 @@ project-halcyon/
     answers.example.json       # tracked; synthetic identity placeholder
     local-inputs.json          # tracked sizes, SHA-256 and provenance only
   Local/                       # completely ignored by Git
+    evidence/                  # unique QA runs and relocated HalcyonEvidence
+    appdata-archive/            # preserved Halcyon AppData trees
+    temp-archive/               # preserved Halcyon TEMP trees
     downloads/                 # optional tool/install archives
     tools/platform-tools/      # optional portable ADB installation
     vainglory/
@@ -226,7 +248,7 @@ legacy Downloads/TEMP directories remain fallback locations for older setups.
 | `HALCYON_NAVMESH` | Override the exact A001 file. |
 | `HALCYON_SPAWN_CORPUS` | Windows semicolon-separated directories with creation records; needs all required neutral/static templates, including Kraken. |
 | `HALCYON_SKYE_VOLLEY_CORPUS` | Directory with the exact `.32.vgr` and `.36.vgr` anchors. |
-| `HALCYON_QA_DIR` | Separate, unique **external** directory for an explicitly prepared live QA run. |
+| `HALCYON_QA_DIR` | Separate, unique absolute directory under ignored `Local/evidence/` for an explicitly prepared live QA run. |
 
 To require the project-local layout for this shell:
 
@@ -475,16 +497,16 @@ For the fast inner loop and complete diagnostics, use the venv explicitly:
 .venv/Scripts/python.exe -B Tools/Teardown/verify_native_health.py --grid
 ```
 
-Each run creates unique external evidence and retains full logs, per-test
+Each run creates unique ignored `Local/evidence/` output and retains full logs, per-test
 timings, failures and skip reasons. A subset PASS is not a full test PASS.
 The [audit workflow](../Plan/one-week-acceleration.md) records currently red
 legacy-client and performance gates; do not use historical green counts.
 The native pilot covers one pool-splitting component, not whole-game fidelity.
 
-Create a unique external evidence directory:
+Create a unique private evidence directory:
 
 ```powershell
-$run = Join-Path $env:LOCALAPPDATA ('halcyon-evidence\setup-' + [guid]::NewGuid().ToString('N'))
+$run = Join-Path $PWD ('Local\evidence\setup-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $run | Out-Null
 git status --short
 git diff --stat
@@ -508,9 +530,9 @@ They use unique external fixtures and retain a result record.
 For rendered scenarios, use the shipped path
 `Tools/run_scenarios.py --mode client`; start with
 [the scenario commands and declared-fixture contract](../Plan/solo-sandbox-scenarios.md#rendered-client-driver-toolsscenario_clientpy).
-Set an external `HALCYON_QA_DIR` **before** launching a dedicated QA stack,
-enable `HALCYON_TRACE_WIRE=1`, retain the external trace path printed by the
-server (`%TEMP%/halcyon_stack/wire-*.jsonl`), choose the matching client profile, and let the script
+Set an absolute `HALCYON_QA_DIR` under `Local/evidence/` **before** launching a dedicated QA stack,
+enable `HALCYON_TRACE_WIRE=1`, retain the private trace path printed by the
+server (`Local/runtime/halcyon_stack/wire-*.jsonl`), choose the matching client profile, and let the script
 own the time-sensitive input sequence. QA preparation/forced state is not proof
 of ordinary player behavior. Do not introduce another scenario engine or
 manually interrupt a short hit→cast sequence with reasoning/tool round trips.
@@ -547,7 +569,7 @@ acceptance remain open; this setup work does not close them.
 | Port bind failure | Inspect `Get-NetTCPConnection -State Listen` and the owning PID. Stop only your prior stack; record unrelated conflicts. |
 | Missing data after moving to another drive | Set `HALCYON_LOCAL_ROOT` to your new `Local` path and recheck. Do not carry old absolute environment overrides into a new checkout. |
 | New CA but TLS still fails | Reapply `guest_setup` with the certificate for the running host. The actual mounted PEM must match; a foreign mount containing an old CA reports `CONFLICT` instead of success. Preserve the mount listing and restore the dedicated test instance's known setup before continuing. |
-| Scenario output path rejected | Use a new directory outside the checkout, without a symlink/junction, and leave existing output intact. |
+| Scenario output path rejected | Use a new directory under ignored `Local/evidence/`, without a symlink/junction, and leave existing output intact. |
 
 ## 12. LAN and multiple clients
 

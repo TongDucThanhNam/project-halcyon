@@ -198,7 +198,7 @@ class SandboxQA:
         }
         requested = Path(directory)
         if not requested.is_absolute():
-            raise ValueError("HALCYON_QA_DIR must be an absolute external path")
+            raise ValueError("HALCYON_QA_DIR must be an absolute private path")
         for parent in (requested, *requested.parents):
             if parent.exists() or parent.is_symlink():
                 attributes = parent.lstat()
@@ -206,8 +206,9 @@ class SandboxQA:
                     raise ValueError("QA directory must not traverse a symlink or junction")
         self.directory = requested.resolve()
         repository = Path(__file__).resolve().parents[1]
-        if self.directory == repository or repository in self.directory.parents:
-            raise ValueError("HALCYON_QA_DIR must stay outside the repository")
+        if ((self.directory == repository or repository in self.directory.parents)
+                and repository / "Local" not in self.directory.parents):
+            raise ValueError("HALCYON_QA_DIR must stay outside the repository or under Local/")
         self.directory.mkdir(parents=True, exist_ok=True)
         self.consumed = self.directory / "consumed"
         self.consumed.mkdir(exist_ok=True)

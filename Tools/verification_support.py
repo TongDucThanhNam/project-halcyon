@@ -31,14 +31,22 @@ def reject_link_traversal(path: Path) -> None:
 
 def output_directory(explicit=None, *, root=ROOT, prefix="halcyon-check-",
                      allow_existing_empty=True) -> Path:
-    """Create unique external evidence; never overwrite a prior nonempty run."""
+    """Create private evidence under Local/evidence; never overwrite a run."""
     repository = Path(root).resolve()
-    base = (Path(os.path.abspath(explicit)) if explicit
-            else Path(tempfile.mkdtemp(prefix=prefix)))
+    if explicit:
+        base = Path(os.path.abspath(explicit))
+    else:
+        evidence = repository / "Local" / "evidence"
+        reject_link_traversal(evidence)
+        evidence.mkdir(parents=True, exist_ok=True)
+        base = Path(tempfile.mkdtemp(prefix=prefix, dir=evidence))
     reject_link_traversal(base)
     resolved = base.resolve()
-    if resolved == repository or repository in resolved.parents:
-        raise OutputPathError(f"output directory must stay outside the repository: {resolved}")
+    private = repository / "Local"
+    if ((resolved == repository or repository in resolved.parents)
+            and private not in resolved.parents):
+        raise OutputPathError(
+            f"output directory must stay outside the repository or under Local/: {resolved}")
     if resolved.exists():
         if not resolved.is_dir():
             raise OutputPathError(f"output path is not a directory: {resolved}")

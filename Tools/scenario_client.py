@@ -73,7 +73,7 @@ WIRE ANCHORS (verified against current builders, see scenario doc)
 Not every 1037 projectile, 1010 actor or 1054 damage inside a broad window
 belongs to the skill under test: each is classified explicitly below.
 
-All artifacts stay outside this repository under unique directories; old
+All artifacts stay under ignored Local/ in unique directories; old
 records are never deleted. This driver stops only capture processes it
 created itself.
 """
@@ -5649,12 +5649,18 @@ def read_state(qa_dir: str) -> dict:
 
 def verify_session(qa: QaSession, *, timeout: float) -> dict:
     """Owned paths, WORLD phase, progressing simulation via read-only snapshots."""
+    from Tools.verification_support import OutputPathError, reject_link_traversal
     qa_dir = qa.qa_dir
+    try:
+        reject_link_traversal(Path(qa_dir))
+    except OutputPathError as exc:
+        raise ClientStageFailure("SETUP", "FAIL", str(exc)) from exc
     resolved = Path(qa_dir).resolve()
     repository = ROOT.resolve()
-    if resolved == repository or repository in resolved.parents:
+    if ((resolved == repository or repository in resolved.parents)
+            and repository / "Local" not in resolved.parents):
         raise ClientStageFailure("SETUP", "FAIL",
-                                 f"QA directory must stay outside the repository: {resolved}")
+                                 f"QA directory must stay outside the repository or under Local/: {resolved}")
     if not Path(qa_dir).is_dir():
         raise ClientStageFailure("SETUP", "FAIL", f"QA directory does not exist: {qa_dir}")
     # Native HUD/bootstrap may become observable just before the first WORLD

@@ -1,5 +1,9 @@
 # Project Halcyon
 
+**Local storage (2026-10-11):** checkout at `D:\project-halcyon`; private inputs,
+runtime files and QA output stay inside ignored `Local/` (new runs:
+`Local/evidence/`). See the [relocation guide](Docs/Setup/windows-local-development.md).
+
 > **Authoritative, Deterministic, Self-Hosted Game Server for Vainglory (4.13.4, build 147219)**  
 > Built from pure reverse-engineering research and clean-room protocol reimplementation.
 
@@ -140,8 +144,8 @@ python -B -m server.platform.live_up --bind-host 127.0.0.1 --match-host 127.0.0.
 
 The live helper restarts prior local stack processes and applies guest routing.
 Follow **PLAY → SOLO BOTS → 3V3 → VERY EASY**, select an implemented hero such
-as Skye, lock in and choose **Manual Build** when offered. Keep QA output outside
-the checkout. A passing headless run establishes internal repeatability;
+as Skye, lock in and choose **Manual Build** when offered. Keep QA output under
+ignored `Local/evidence/`. A passing headless run establishes internal repeatability;
 independent reference remains `UNAVAILABLE` without a supplied reference fixture.
 
 ---

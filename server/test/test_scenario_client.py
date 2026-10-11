@@ -623,6 +623,15 @@ class TestSessionPreconditions(unittest.TestCase):
             sc.verify_session(qa, timeout=1.0)
         self.assertIn("outside the repository", caught.exception.detail)
 
+    def test_local_qa_directory_passes_the_storage_boundary(self):
+        with mock.patch.object(sc, 'ROOT', self.base):
+            directory = self.base / 'Local/evidence/qa'
+            directory.mkdir(parents=True)
+            (directory / 'state.json').write_text('{"tick":100}', encoding='utf-8')
+            qa = sc.QaSession(str(directory), submit=self.harness.qa.submit)
+            session = sc.verify_session(qa, timeout=1)
+            self.assertGreater(session['tick'], 100)
+
     def test_stale_session_is_refused_and_blocks_ui_mutation(self):
         self.harness.qa.state["phase"] = "world"
         # Freeze the world: snapshots never advance the tick.

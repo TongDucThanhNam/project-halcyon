@@ -10,7 +10,7 @@ an explicit root never silently falls back to a legacy directory. Set
 
 All public helpers return absolute pathlib Paths without creating directories.
 Relative environment overrides are resolved against the project, not the
-process working directory. QA output should keep its existing external paths.
+process working directory. New QA output belongs under ignored Local/evidence/.
 """
 from __future__ import annotations
 

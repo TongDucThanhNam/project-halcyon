@@ -223,7 +223,7 @@ def pin_sources(directory: Path) -> tuple[Path, dict[str, str]]:
 def resolve_output_dir(explicit: str | None, *, allow_existing_empty: bool = True) -> Path:
     """Validate and create the run directory before any simulation starts.
 
-    The directory must stay outside this repository, must not traverse a
+    The directory must stay under Local/ or outside this repository, must not traverse a
     symlink/junction, and an explicitly requested non-empty directory is never
     overwritten. Existing files anywhere on the path are preserved.
     """
@@ -1739,8 +1739,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", default="all",
                         help="scenario name or comma-separated list, or 'all'")
     parser.add_argument("--output", default=None,
-                        help="explicit output directory (must be outside the repo, "
-                             "never overwritten; default a unique temp directory)")
+                        help="explicit output directory (under Local/ or outside the repo, "
+                             "never overwritten; default unique Local/evidence directory)")
     parser.add_argument("--navmesh", default=None,
                         help="owned navmesh file (default HALCYON_NAVMESH or "
                              "the production baked Classic mesh)")

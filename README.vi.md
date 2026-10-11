@@ -1,5 +1,9 @@
 # Project Halcyon
 
+**Lưu trữ cục bộ (11/10/2026):** repo tại `D:\project-halcyon`; dữ liệu riêng,
+runtime và kết quả kiểm thử đặt trong `Local/` được Git bỏ qua (lần chạy mới:
+`Local/evidence/`). Xem [hướng dẫn di chuyển](Docs/Setup/windows-local-development.md).
+
 > **Authoritative, Deterministic, Self-Hosted Game Server for Vainglory (4.13.4, build 147219)**  
 > Được xây dựng từ nghiên cứu kỹ thuật đảo ngược (clean-room reverse engineering) và tái hiện giao thức độc lập.
 
@@ -139,8 +143,8 @@ python -B -m server.platform.live_up --bind-host 127.0.0.1 --match-host 127.0.0.
 
 The live helper restarts prior local stack processes and applies guest routing.
 Follow **PLAY → SOLO BOTS → 3V3 → VERY EASY**, select an implemented hero such
-as Skye, lock in and choose **Manual Build** when offered. Keep QA output outside
-the checkout. A passing headless run establishes internal repeatability;
+as Skye, lock in and choose **Manual Build** when offered. Keep QA output under
+ignored `Local/evidence/`. A passing headless run establishes internal repeatability;
 independent reference remains `UNAVAILABLE` without a supplied reference fixture.
 
 ---

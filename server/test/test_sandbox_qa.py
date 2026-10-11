@@ -112,13 +112,23 @@ class TestSandboxQA(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertIn('WORLD', result['error'])
 
-    def test_default_is_disabled_and_external_absolute_directory_is_required(self):
+    def test_default_is_disabled_and_private_absolute_directory_is_required(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(sandbox_qa.SandboxQA.from_environment())
         with self.assertRaises(ValueError):
             sandbox_qa.SandboxQA('relative-qa')
         with self.assertRaises(ValueError):
             sandbox_qa.SandboxQA(Path(__file__).resolve().parents[2])
+
+    def test_local_qa_directory_is_allowed_but_local_root_is_not(self):
+        with tempfile.TemporaryDirectory(prefix='halcyon-qa-path-test-') as temporary:
+            root = Path(temporary).resolve()
+            with patch.object(sandbox_qa, '__file__', str(root / 'server/sandbox_qa.py')):
+                qa = sandbox_qa.SandboxQA(root / 'Local/evidence/qa')
+                self.assertEqual(qa.directory, root / 'Local/evidence/qa')
+                self.assertTrue(qa.consumed.is_dir())
+                with self.assertRaises(ValueError):
+                    sandbox_qa.SandboxQA(root / 'Local')
 
     def test_sorted_requests_execute_once_and_restart_cannot_replay_a_consumed_identity(self):
         self.queue({'command': 'resources', 'eid': 1500, 'gold': 3000}, 'z')
