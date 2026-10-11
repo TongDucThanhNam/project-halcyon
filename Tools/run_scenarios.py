@@ -112,6 +112,7 @@ TICK_SECONDS = 0.05
 SEEDS = (11, 7919)
 CHECKPOINT_CADENCE_TICKS = 20
 ISOLATED_ENVIRONMENT = (
+    "HALCYON_INPUT_JOURNAL_DIR",
     "HALCYON_QA_DIR", "HALCYON_BOTS", "HALCYON_NO_WAVE", "HALCYON_HERO_1010",
     "HALCYON_SPARSE_1070", "HALCYON_HERO_KEEPALIVE", "HALCYON_HERO_SPAWN_X",
     "HALCYON_HERO_SPAWN_Y", "HALCYON_TEAM_ALLOCATION", "HALCYON_EXPERIMENTAL_CAPTURE",
@@ -122,6 +123,7 @@ ISOLATED_ENVIRONMENT = (
 # runtime imports only snapshot files (script path and sys.path both resolve
 # inside the snapshot) and the worker asserts that before simulating.
 PINNED_TOOLS = ("Tools/run_scenarios.py", "Tools/scenario_client.py",
+                "Tools/journal_replay.py",
                 "Tools/nonvisual_entry.py", "Tools/native_ui.py", "Tools/Teardown/client_input_state.js",
                 "Tools/verification_support.py",
                 "Tools/verify_sandbox.py", "Tools/classic_client.py",
@@ -1610,6 +1612,26 @@ def identical_files(left: Path, right: Path) -> bool:
     return True
 
 
+def seeded_workers(snapshot: Path, out_dir: Path, pinned_digest: str,
+                   environment: dict, arguments: list[str]):
+    """Shared source-pinned, independent-process lane for scenarios and replay."""
+    for seed in SEEDS:
+        run_dir = out_dir / f"run-seed{seed}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(environment)
+        env["PYTHONHASHSEED"] = str(seed)
+        command = [sys.executable, "-B", str(snapshot / "Tools" / "run_scenarios.py"),
+                   "--worker", "--seed", str(seed), *arguments,
+                   "--output", str(run_dir),
+                   "--expect-manifest", pinned_digest]
+        print(f"Starting independent process seed={seed}", flush=True)
+        completed = subprocess.run(command, env=env, cwd=ROOT, capture_output=True,
+                                   text=True)
+        (run_dir / "process-stdout.log").write_text(completed.stdout or "", encoding="utf-8")
+        (run_dir / "process-stderr.log").write_text(completed.stderr or "", encoding="utf-8")
+        yield seed, run_dir, {"returncode": completed.returncode, "command": command}
+
+
 def run_headless(names: list[str], out_dir: Path, navmesh_path: Path,
                  reference_path: Path | None) -> dict:
     """Pin source, run two independent seeded processes, compare exact bytes."""
@@ -1617,29 +1639,15 @@ def run_headless(names: list[str], out_dir: Path, navmesh_path: Path,
     pinned_digest = manifest_digest(pinned)
     runs: dict[int, dict[int, dict]] = {seed: {} for seed in SEEDS}
     processes = {}
-    for seed in SEEDS:
-        run_dir = out_dir / f"run-seed{seed}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ)
-        # Workers execute a source-only snapshot outside the checkout. Resolve
-        # owned inputs here so Local/ is not mistaken for a snapshot-relative path.
-        env.update(owned_input_environment())
-        for name in ISOLATED_ENVIRONMENT:
-            env.pop(name, None)
-        env["HALCYON_NO_TAPE"] = "1"
-        env["PYTHONHASHSEED"] = str(seed)
-        command = [sys.executable, "-B", str(snapshot / "Tools" / "run_scenarios.py"),
-                   "--worker", "--seed", str(seed),
-                   "--scenario", ",".join(names),
-                   "--output", str(run_dir),
-                   "--navmesh", str(navmesh_path),
-                   "--expect-manifest", pinned_digest]
-        print(f"Starting independent process seed={seed}", flush=True)
-        completed = subprocess.run(command, env=env, cwd=ROOT, capture_output=True,
-                                   text=True)
-        (run_dir / "process-stdout.log").write_text(completed.stdout or "", encoding="utf-8")
-        (run_dir / "process-stderr.log").write_text(completed.stderr or "", encoding="utf-8")
-        processes[seed] = {"returncode": completed.returncode, "command": command}
+    env = dict(os.environ)
+    # Resolve owned inputs before entering the source-only snapshot.
+    env.update(owned_input_environment())
+    for name in ISOLATED_ENVIRONMENT:
+        env.pop(name, None)
+    env["HALCYON_NO_TAPE"] = "1"
+    arguments = ["--scenario", ",".join(names), "--navmesh", str(navmesh_path)]
+    for seed, run_dir, process in seeded_workers(snapshot, out_dir, pinned_digest, env, arguments):
+        processes[seed] = process
         for name in names:
             path = run_dir / name / "result.json"
             if path.is_file():
@@ -1732,12 +1740,13 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--mode", choices=["headless", "client", "compare-pair"],
+    parser.add_argument("--mode", choices=["headless", "client", "compare-pair", "replay"],
                         default="headless",
                         help="execution mode (default: headless); "
                              "compare-pair judges two client results")
     parser.add_argument("--scenario", default="all",
                         help="scenario name or comma-separated list, or 'all'")
+    parser.add_argument("--journal", help="[replay] completed application-order journal JSONL")
     parser.add_argument("--output", default=None,
                         help="explicit output directory (under Local/ or outside the repo, "
                              "never overwritten; default unique Local/evidence directory)")
@@ -1766,6 +1775,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--result-b", default=None,
                         help="[compare-pair] second serialized client result")
     args = parser.parse_args(argv)
+
+    if args.mode == "replay":
+        if not args.journal:
+            parser.error("--mode replay requires --journal")
+        from Tools.journal_replay import worker, orchestrate
+        return worker(args) if args.worker else orchestrate(args)
 
     if args.mode == "compare-pair":
         if not args.result_a or not args.result_b:

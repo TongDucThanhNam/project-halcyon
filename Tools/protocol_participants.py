@@ -493,15 +493,24 @@ def main(argv=None):
     parser.add_argument("--match-id", default=MATCH_ID)
     parser.add_argument("--output")
     parser.add_argument("--self-host", action="store_true")
+    parser.add_argument("--journal", action="store_true",
+                        help="[self-host] record application-order journal and tick-work evidence")
     args = parser.parse_args(argv)
     host = private_host(args.host)
     if args.self_host and not ipaddress.ip_address(host).is_loopback:
         parser.error("--self-host binds loopback only")
+    if args.journal and not args.self_host:
+        parser.error("--journal requires --self-host")
     output = new_output(args.output)
     print(f"Evidence: {output}", flush=True)
     gateway = None
     inputs = None
+    journal_environment = {name: os.environ.get(name) for name in
+                           ("HALCYON_INPUT_JOURNAL_DIR", "HALCYON_TRACE_MOVEMENT")}
     try:
+        if args.journal:
+            os.environ["HALCYON_INPUT_JOURNAL_DIR"] = str(output)
+            os.environ["HALCYON_TRACE_MOVEMENT"] = "1"
         if args.self_host:
             from server import gateway as gateway_module, navigation, paths, world_tape
             # Missing owned inputs must not silently select the no-tape fallback.
@@ -536,11 +545,37 @@ def main(argv=None):
             args.port, args.heartbeat_port = gateway.port, gateway.relay.port
         summary = run(host, args.port, output, match_id=args.match_id,
                       heartbeat_port=args.heartbeat_port, mode="self-host" if args.self_host else "existing-server", inputs=inputs)
+        if args.journal:
+            gateway.stop()
+            journals = []
+            for match in gateway.matches:
+                session = match.session
+                if session is not None:
+                    session.join(timeout=10)
+                    journal = session.journal
+                    entry = {"path": str(journal.path) if journal else None,
+                             "closed": journal.closed if journal else False,
+                             "failure": journal.failure if journal else "missing journal",
+                             "records": journal.sequence if journal else 0,
+                             "checkpoints": journal.checkpoint_count if journal else 0,
+                             "thread_stopped": not session.is_alive()}
+                    journals.append(entry)
+            summary["journals"] = journals
+            if not journals or any(not row["closed"] or row["failure"] or not row["thread_stopped"] for row in journals):
+                summary["status"] = "ERROR"
+                summary["setup_failures"].append("input journal did not close successfully")
+            (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(f"{summary['status']}: {output / 'summary.json'}", flush=True)
         return 0 if summary["status"] == "PASS" else 1
     finally:
         if gateway:
             gateway.stop()
+        if args.journal:
+            for name, value in journal_environment.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 if __name__ == "__main__":

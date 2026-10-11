@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 from functools import lru_cache, wraps
+from contextlib import nullcontext
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -170,8 +171,22 @@ def _state_locked(method):
     @wraps(method)
     def locked(self, *args, **kwargs):
         with self._state_lock:
+            journal = getattr(self, "journal", None)
+            if journal is not None and not journal.closed:
+                return journal.call(method, args, kwargs)
             return method(self, *args, **kwargs)
     return locked
+
+
+def _journal_locked(method):
+    """Journal wall publications without changing their default-off path."""
+    @wraps(method)
+    def traced(self, *args, **kwargs):
+        if self.journal is None or self.journal.closed:
+            return method(self, *args, **kwargs)
+        with self._state_lock:
+            return self.journal.call(method, args, kwargs)
+    return traced
 
 
 class SnapshotStream(threading.Thread):
@@ -179,7 +194,8 @@ class SnapshotStream(threading.Thread):
 
     PICK, LOCKED, FINAL, WORLD = "pick", "locked", "final", "world"
 
-    def __init__(self, conn, players, match_id, send, log=print, *, navigation_mesh=None):
+    def __init__(self, conn, players, match_id, send, log=print, *, navigation_mesh=None,
+                 journal_directory=None):
         super().__init__(daemon=True)
         self.conn = conn
         self.players = players
@@ -316,13 +332,22 @@ class SnapshotStream(threading.Thread):
         self.wave_director = None
         self._last_snapshot_at = 0.0
         self._pick_deadline = time.monotonic() + PICK_COUNTDOWN_START
+        self.journal = None
+        journal_directory = journal_directory or os.environ.get("HALCYON_INPUT_JOURNAL_DIR")
+        if journal_directory:
+            from server.input_journal import open_journal
+            self.journal = open_journal(self, journal_directory)
 
     def stop(self):
         self._stop_event.set()
 
-    def submit(self, opcode, payload, conn=None):
-        self.events.put((opcode, payload, conn))
+    def submit(self, opcode, payload, conn=None, *, received_monotonic_ns=None):
+        event = (opcode, payload, conn)
+        if self.journal is not None:
+            event += (received_monotonic_ns if received_monotonic_ns is not None else time.monotonic_ns(),)
+        self.events.put(event)
 
+    @_state_locked
     def add_client(self, conn, session_uuid: str, send):
         """Attach a client connection to this match session.
         Handles both new player slot allocation and reconnection."""
@@ -572,6 +597,7 @@ class SnapshotStream(threading.Thread):
                         self._resource_catchup.pop(conn, None)
         return False
 
+    @_journal_locked
     def _broadcast_snapshot(self, countdown):
         self._last_snapshot_at = time.monotonic()
         self._broadcast(wire.OP.SNAPSHOT_JOIN,
@@ -583,7 +609,7 @@ class SnapshotStream(threading.Thread):
     # -- event handlers -----------------------------------------------------
 
     @_state_locked
-    def _apply_event(self, opcode, payload, conn=None, bot_eid=None):
+    def _apply_event(self, opcode, payload, conn=None, bot_eid=None, *, received_monotonic_ns=None):
         try:
             return self._apply_event_impl(opcode, payload, conn, bot_eid)
         finally:
@@ -1126,7 +1152,8 @@ class SnapshotStream(threading.Thread):
         next_ping = time.monotonic() + 1.0
         next_full_update = None       # armed when the live layer starts
         while not self._stop_event.is_set():
-            with self._state_lock:
+            with self._state_lock, (self.journal.operation("world_batch")
+                                   if self.journal is not None else nullcontext()):
                 now = time.monotonic()
                 if not self.clients and self.zero_clients_since is not None:
                     timeout = 15.0 if self.world_had_clients else 25.0
@@ -1171,6 +1198,8 @@ class SnapshotStream(threading.Thread):
                                                 self.seq_1010, hsim.facing))
                     if now >= next_ping:
                         next_ping = now + 1.0
+                        if self.journal is not None:
+                            self.journal.active["wall_ping"] = True
                         self._broadcast(wire.OP.SLOT_FLAGS_PING,
                                         roster.build_slot_flags(self.players))
 
@@ -1807,16 +1836,16 @@ class SnapshotStream(threading.Thread):
     def _pump(self, timeout):
         """Process queued c2s events; block up to `timeout` for the first."""
         try:
-            opcode, payload, conn = self.events.get(timeout=timeout)
+            event = self.events.get(timeout=timeout)
         except queue.Empty:
             return
-        self._apply_event(opcode, payload, conn)
+        self._apply_event(*event[:3], received_monotonic_ns=event[3] if len(event) == 4 else None)
         while True:
             try:
-                opcode, payload, conn = self.events.get_nowait()
+                event = self.events.get_nowait()
             except queue.Empty:
                 return
-            self._apply_event(opcode, payload, conn)
+            self._apply_event(*event[:3], received_monotonic_ns=event[3] if len(event) == 4 else None)
 
     def run(self):
         try:
@@ -1857,6 +1886,13 @@ class SnapshotStream(threading.Thread):
             import traceback
             self.log(f"[match] SnapshotStream unhandled error: {exc!r}\n{traceback.format_exc()}")
         finally:
+            if self.journal is not None:
+                try:
+                    with self._state_lock:
+                        self.journal.close()
+                except Exception as exc:
+                    self.journal.failure = repr(exc)
+                    self.log(f"[match] INPUT JOURNAL FAILED: {exc!r}")
             with self._clients_lock:
                 for c in list(self.clients.keys()):
                     try:
@@ -2009,8 +2045,10 @@ class MatchServer:
                     key_named = True
                     self.log(f"[match] {peer} key candidate matched: {named!r}")
                 opcode, payload = wire.decode_body(self.cipher, body)
+                received = (time.monotonic_ns() if self.session is not None
+                            and self.session.journal is not None else None)
                 self.join_sequence.append((opcode, payload))
-                self._dispatch(conn, opcode, payload)
+                self._dispatch(conn, opcode, payload, received_monotonic_ns=received)
         except (wire.WireError, OSError) as exc:
             self.log(f"[match] {peer} closed: {exc!r}")
         finally:
@@ -2057,7 +2095,7 @@ class MatchServer:
         self.cipher = wire.MatchCipher(self.match_id)
         return "<none — dispatch garbage>"
 
-    def _dispatch(self, conn, opcode, payload):
+    def _dispatch(self, conn, opcode, payload, *, received_monotonic_ns=None):
         self._trace_frame("c2s", conn, opcode, payload)
         if opcode == wire.OP.KEEPALIVE:
             try:
@@ -2086,7 +2124,11 @@ class MatchServer:
                       wire.OP.SHOP_BUY, wire.OP.ITEM_USE):
             stream = self._streams_by_conn.get(conn)
             if stream is not None:
-                stream.submit(opcode, payload, conn=conn)
+                if received_monotonic_ns is None:
+                    stream.submit(opcode, payload, conn=conn)
+                else:
+                    stream.submit(opcode, payload, conn=conn,
+                                  received_monotonic_ns=received_monotonic_ns)
         # Join handshakes (1112/1118/1123/1131/1119/1134/1137/1133/1157/1081…)
         # and gameplay verbs without a slice yet (1041/1078) are logged above;
         # semantic replies are T3 work.

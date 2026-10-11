@@ -28,6 +28,23 @@ identical to the failing run, and the qualified rerun passes (max 17.6 / 21.2 ms
 `Local/evidence/halcyon-sandbox-verify-i9ofyrwi/`). Retained objects are not
 pruned; memory growth over 30 minutes remains an M3 measurement.
 
+**Milestone 4 PASS (exact replay of a six-participant live session).** Opt-in
+`server/input_journal.py` records application order inside `_apply_event`
+(tick, sequence, uuid, EID, connection generation, payload, receive/apply
+times) plus lifecycle transitions and live checkpoints; journal off leaves all
+56 headless artifacts byte-identical. `Tools/run_scenarios.py --mode replay
+--journal <path>` replays through production dispatch in two processes: 1,508
+records / 93 checkpoints / 27,309 recipient events byte-identical and every
+live anchor equal. Exclusions (wall-paced `1113`/`1116`, thread/lock/scheduler
+fields) are listed with reasons in `Local/evidence/m4-run-1791739138078-replay-final/summary.json`.
+Open for M3: receive→apply latency p50 17.8 / p95 534.8 / max 687.8 ms (72
+inputs) and live socket tick work up to ~56–61 ms with or without the journal.
+Candidate gates: `--suite all` PASS 1592 run / 1564 executed / 28 reviewed skips
+(`Local/evidence/halcyon-checks-p17001r4`); CPU-qualified default verifier PASS,
+max 19.2/18.6 ms, stream/state/checkpoint hashes unchanged from M2
+(`Local/evidence/halcyon-sandbox-verify-40muyztg`, qualification
+`Local/evidence/m4-verifier-cpu-qualification-20261012`).
+
 ## Entry checkpoint — 2026-10-10
 
 **Session hand-off (operator ended the day after rev8).** Committed state:

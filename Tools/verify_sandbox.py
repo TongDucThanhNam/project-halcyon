@@ -80,7 +80,7 @@ def json_bytes(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
-def freeze_state(world, controller, mesh_digest: str) -> bytes:
+def freeze_state(world, controller, mesh_digest: str, *, replay=False) -> bytes:
     """Canonical complete gameplay-object graph, including pending effects.
 
     Navigation geometry is an immutable external dependency identified by its
@@ -92,8 +92,17 @@ def freeze_state(world, controller, mesh_digest: str) -> bytes:
     from server.native_steering import NativeSteeringMesh, SurfacePath
 
     seen: dict[int, int] = {}
+    journal = getattr(world, "journal", None)
+    connections = ({key: list(value) for key, value in journal.connections.items()}
+                   if journal is not None else {
+                       id(conn): {"uuid": player.uuid, "generation": None, "recipient_index": index}
+                       for index, (conn, (player, _)) in enumerate(world.clients.items())})
+    # Legacy nonjournal freezes can identify current recipients, but cannot
+    # invent historical reconnect generations. Replay always requires a journal.
 
     def freeze(value):
+        if id(value) in connections:
+            return {"connection": connections[id(value)]}
         if value is None or isinstance(value, (bool, str, int)):
             return value
         if isinstance(value, float):
@@ -124,7 +133,9 @@ def freeze_state(world, controller, mesh_digest: str) -> bytes:
             return {"callable": f"{value.__module__}.{value.__qualname__}"}
         if isinstance(value, dict):
             return {"map": [[freeze(key), freeze(value[key])]
-                            for key in sorted(value, key=lambda item: (type(item).__name__, repr(item)))]}
+                            for key in sorted(value, key=lambda item: (
+                                "connection", repr(connections[id(item)])) if id(item) in connections
+                                else (type(item).__name__, repr(item)))]}
         if isinstance(value, (list, tuple)):
             return {type(value).__name__: [freeze(item) for item in value]}
         if isinstance(value, (set, frozenset)):
@@ -148,6 +159,15 @@ def freeze_state(world, controller, mesh_digest: str) -> bytes:
                 "id": reference, "fields": {key: freeze(attrs[key]) for key in sorted(attrs)}}
 
     try:
+        if replay:
+            from server.input_journal import STATE_EXCLUSIONS
+            state = {key: value for key, value in vars(world).items()
+                     if key not in STATE_EXCLUSIONS}
+            # Socket callbacks are transport; insertion order controls recipient
+            # selection, so preserve it independently of canonical map sorting.
+            state["clients"] = [(conn, player) for conn, (player, _) in world.clients.items()]
+            state["connection_generations"] = world.journal.generations
+            return json_bytes(freeze(state))
         return json_bytes(freeze({
             "counters": {key: getattr(world, key) for key in (
                 "sim_tick", "sim_time", "seq_1010", "world_tick", "hero_x", "hero_y",
