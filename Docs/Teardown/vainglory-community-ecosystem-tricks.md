@@ -1,5 +1,181 @@
 # Community Ecosystem Tricks & Leads (VGNA, HackedGlory, VGReborn)
 
+## Unmodified-phone deployment review — 2026-10-23
+
+**Operator direction:** prefer a VPN-based deployment for ordinary Android and
+iOS installations; do not make repacking/Gadget a player prerequisite. The
+earlier Android repack preparation stopped after an isolated decode, before
+patching, signing, installation or launch. This direction is not a claim that
+full unmodified-phone gameplay acceptance is already qualified. The follow-up
+does establish original-Android bootstrap/session and match transport on one
+owned phone, with native scalar/HUD acceptance still open.
+
+**Source review, not a live service test.** VGReborn revision
+`cabcbfba39d419b83325560dfe0e21efad77d12e` separates VPN transport from TLS:
+
+- [Installer](https://github.com/VaingloryReborn/VGReborn/blob/cabcbfba39d419b83325560dfe0e21efad77d12e/mitm-monitor/install.sh):
+  provisions WireGuard and mitmproxy, redirects tunnel TCP/443 to the proxy,
+  and explicitly requires the client to trust its CA. Its `--ssl-insecure`
+  option concerns the proxy's upstream verification, not the game's trust.
+  Do not run this installer: its external forwarding and trust policy are not
+  Halcyon's own-server-only design.
+- [Monitor](https://github.com/VaingloryReborn/VGReborn/blob/cabcbfba39d419b83325560dfe0e21efad77d12e/mitm-monitor/src/index.ts):
+  consumes RPC response logs and associates them with players. This is not an
+  implementation of the authoritative simulation or cross-platform admission
+  evidence for our exact clients.
+- [WireGuard](https://www.wireguard.com/install/) offers Android and iOS
+  clients. That establishes a shared transport candidate, not compatibility
+  with Vainglory's certificate verifier.
+
+**Trust boundary.** VPN/DNS/NAT can select a destination but cannot make an
+untrusted certificate valid for the HTTPS hostname. The owned Android discovery
+reports native CAPATH `/system/etc/security/cacerts`, peer verification enabled
+and hostname verification enabled. Installing a user CA is therefore not an
+established solution for this binary. Android's
+[default user-CA policy](https://developer.android.com/privacy-and-security/security-config)
+also must not be mistaken for proof of how a native TLS implementation behaves.
+iOS supports [explicit trust for an installed certificate profile](https://support.apple.com/en-us/102390),
+but the exact iOS client's trust/pinning behavior remains unmeasured.
+
+### Preferred bounded experiment: own-domain bootstrap, no TLS interception
+
+Selected flow (one Android's session/match transport verified below; iOS open):
+
+```text
+Original CE client -> owned WireGuard tunnel -> private DNS/bootstrap service
+  HTTP preauth status-redirect -> rpc.<operator-owned-domain>:443
+  HTTPS RPC with a publicly trusted certificate for that exact hostname
+  session/notify URLs -> owned services
+  announced gateway/heartbeat -> owned tunnel addresses
+```
+
+The local mobile record already establishes an HTTP preauth request and a raw
+`host:port` bootstrap reply. `server/platform/local_stack.py:Handler._dispatch`
+can serve that body. This justifies testing a different hostname; it does NOT
+prove absence of client restrictions or later hard-coded fallbacks.
+The legacy default in `_create_guest_player` is `https://rpc.kindred-live.net`;
+session/notify/platform URLs also need coherent configuration. The new opt-in
+`server/platform/endpoints.py` rewrites these named fields while preserving
+tokens, paths and response shape. Changing only DNS or bootstrap is insufficient.
+
+A certificate for an owned domain avoids impersonating the original RPC
+domain. [ACME DNS-01](https://letsencrypt.org/docs/challenge-types/#dns-01-challenge)
+allows certificate issuance without exposing the game service publicly.
+The certificate chain and TLS negotiation require exact-client positive and
+negative controls; the follow-up distinguishes what was actually measured.
+
+Next gates, in order:
+
+1. Prepare owned tunnel/DNS/firewall isolation, including IPv6, DNS escape and
+   tunnel-loss behavior; do not use community/live game backends as upstreams.
+2. On the unchanged Android client, prove bootstrap chooses the owned hostname
+   and a valid-certificate RPC succeeds; wrong-host/wrong-CA controls must fail.
+   Preserve network/server evidence without screenshots or in-process hooks.
+3. Prove fresh-guest/session/notify and match admission, then phone-attributed
+   ordinary input/outcomes. Keep native presentation acceptance separate.
+4. Repeat on an identified owned iOS build; Android success is not iOS evidence.
+5. Only then package per-player VPN configuration and private-server setup.
+   Do not distribute game payloads or add a custom VPN app before the shared
+   transport is qualified. Gadget remains a separate research option, not the
+   selected player deployment route.
+
+### Owned Android execution — 2026-10-23
+
+**Observed, not a release claim:** unchanged CE Android 4.13.4/build 147219
+on the unrooted Redmi Note 11 `af339028` reached the owned platform through
+WireGuard. No APK/OBB modification, uninstall, injected library, user CA,
+system-CA/hosts edit, screenshot or video was used. Google Play sign-in was
+cancelled through its identified Android UI controls; it is not an upstream
+dependency for this test. Native game menu controls expose no accessibility
+labels, so ordinary menu entry needs operator assistance, not guessed taps.
+
+- Operator-owned RPC name: `rpc.halcyon.tongducthanhnam.id.vn`. A public
+  Let's Encrypt RSA certificate was issued with DNS-01 using lego 5.5.2;
+  staging first, then production. Temporary TXT records were cleaned. No
+  game-facing public A/CNAME record, Cloudflare tunnel or Internet listener
+  was added. Existing Cloudflare applications were left unchanged.
+- Certificate issuer YR2; expires **2027-01-21 03:22:06 UTC**. Renewal is not
+  scheduled. Certificate/key/account material stays under ignored
+  `Local/runtime/phone-acme/`; never put private keys into documentation/Git.
+- `server/platform/phone_vpn.py` uses the optional pinned `mitmproxy_rs`
+  **userspace WireGuard transport API**, not its TLS-intercepting proxy.
+  One peer, host `192.168.1.3:51820/UDP`, virtual service `10.77.0.1`, phone
+  `10.77.0.2`/`fd77::2`; both default routes go into VPN. Only local DNS and
+  TCP 80/443/7100/2112 can reach fixed loopback services. Unknown DNS and all
+  other destinations are refused; there is no upstream Internet forwarding.
+- Live integration caught a wrong API assumption: `original_dst` is the
+  **outer** WireGuard UDP destination; `sockname` is the inner application
+  destination. The initial run denied valid traffic (failed closed). The
+  corrected run records both and successfully serves DNS/opaque TLS. Tests
+  now distinguish these addresses instead of assuming they are identical.
+- Android's secure settings show WireGuard always-on, lockdown `1`, empty
+  bypass whitelist. Connectivity reports both default routes, private DNS
+  `10.77.0.1`, `bypassable=false`, UID range `0-99999` including game UID 10290.
+  With the tunnel deliberately off, shell TCP attempts to the owned LAN host
+  and virtual service both failed immediately with `Permission denied`.
+  After restoration, the own-domain HTTPS check succeeded. This is a bounded
+  observed/configuration check, not exhaustive per-app leak certification.
+- Android system `curl` verified the public chain with
+  `/system/etc/security/cacerts`, including TLS 1.2/ECDHE-RSA-AES128-SHA.
+  A wrong hostname was rejected (exit 60); unknown DNS was rejected (exit 6).
+  Host checks additionally reject a wrong CA. These negative controls are
+  **not** measurements of Vainglory's native verifier on deliberately bad
+  certificates; that exact-client negative-control gate remains open.
+- In the first bounded launch, the actual game used HTTP preauth, then
+  `getPlayerForGuestAccount`, `startSessionForPlayer`, `getPlayerInfo`,
+  `getSkinManifest`, `getTalentsData` and `update` on the owned hostname's
+  TLS listener 9443. WebSocket `/notify` upgraded and sent replies. The game
+  remained alive; a Google Play dialog temporarily backgrounded it. A saved
+  guest was used: **fresh-guest UI admission has not been demonstrated**.
+- After operator-assisted ordinary menu entry, `joinLobby` reached the same
+  owned TLS listener. Gateway 7100 routed the phone's connection to a loopback
+  match; selected hero 265 is Skye, owner EID 1500/slot 0, tagged identity
+  `devtag:a73f79d8ba28`. The server observed roster lock, readiness 1134/1137,
+  world initialization, build-select close 1133, then progressing simulation
+  ticks. Its application journal records ordinary movement 1012 and shop
+  requests 1081 from that connection. The operator separately reported entry
+  into the match. This establishes **phone-attributed local match transport**,
+  not a native HUD/scalar guard, smooth movement, combat fidelity or a completed
+  match. The logged donor 1011 stats for Skye remain an explicit measurement
+  gap; they were not altered to obtain transport success.
+
+Evidence: ignored `Local/evidence/phone-vpn-domain-20261023-110956/`:
+`public-certificate-check.json`, `phone-transport-check.json`,
+`phone-public-tls12.txt`, `phone-wrong-host-rejected.txt`,
+`phone-tunnel-down-owned-lan.txt`, `phone-tunnel-down-virtual.txt`,
+`connectivity-before-game.txt`, `original-launch.json`,
+`original-launch-rpc.jsonl`, `vpn-inner.jsonl`, and `summary.json`. Live match
+inputs are in `input-journals/inputs-7776661c7b444fd89e908d7ac7a56b2d.jsonl`;
+the follow-up below closes and exactly replays this artifact.
+The initial `vpn.jsonl`
+is retained as failed-closed evidence, not replaced. Raw journals may contain
+session material and remain local. `Local/runtime/phone-stack/` is separate
+from the emulator runtime. All platform/gateway listeners bind loopback.
+
+Remaining gates: native nonvisual WORLD/HUD acceptance and phone-attributed
+gameplay outcomes; fresh-guest flow; exact-client bad-certificate controls;
+iOS client/version and containment;
+per-player profiles/multi-peer service; off-LAN hosting, renewal and operational
+packaging. Transport success is not deterministic-gameplay or fidelity acceptance.
+
+**Closed-session follow-up, same day:** after the operator confirmed the phone
+worked, the game was deliberately stopped and the existing match lifecycle
+closed its journal with a successful footer. No source changes occurred during
+recording/replay. The existing command
+`python Tools/run_scenarios.py --mode replay --journal <closed-journal>` passed
+both independent seeds: 10,780 operations, 374 live checkpoints, 54,488 events,
+final tick 9,855; all six event/state/recipient/send-outcome artifacts are exact.
+Evidence: `Local/evidence/phone-vpn-journal-1792731479464021600/` (`close.json`,
+`replay/summary.json`, `semantic-audit-v2.json`, `skye-a-cancel-test.txt`).
+There were zero recipient send errors before the recorded client removal;
+2,698 afterward during shutdown are retained, not counted as in-play loss.
+The native Skye A cancel input is `1041` with null target/action 1 and uses
+`1045`, not the ground-cast `1046` echo; the initial audit's classification was
+corrected without changing gameplay or weakening a check. The session lasted
+about 538 seconds from first recorded operation to close, not a complete
+natural match or a 30-minute stability claim. Native presentation/fidelity and
+the remaining deployment gates above stay open.
+
 ## Research direction correction — 2026-09-12
 
 The operator requested structural understanding of the client and server,

@@ -1,0 +1,3 @@
+# Optional userspace WireGuard ingress. No mitmproxy TLS interception or driver use.
+mitmproxy_rs==0.12.15
+dnslib==0.9.26

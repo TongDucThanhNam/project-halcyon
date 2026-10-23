@@ -1,5 +1,43 @@
 # Current implementation and validation status
 
+## Unmodified physical Android — 2026-10-23
+
+**One owned phone's transport and recorded-input replay PASS; not native
+gameplay acceptance.** Unrooted Redmi Note 11 `af339028`, original Android CE
+4.13.4/build 147219, official WireGuard, owned-domain public TLS: HTTP preauth,
+HTTPS guest/session RPC, WebSocket notify, gateway, Skye draft/readiness and
+WORLD transport were observed. No APK/OBB change, CA installation, root, client
+hooks or image/video capture. Operator-assisted game menu entry supplied the
+ordinary inputs; see the
+[deployment evidence and containment limits](../Teardown/vainglory-community-ecosystem-tricks.md#owned-android-execution--2026-10-23).
+
+The ~538-second recorded session was deliberately closed through ADB, then
+replayed via the existing `Tools/run_scenarios.py --mode replay --journal ...`
+path. Both independent seeds pass: **10,780 operations, 374 checkpoints,
+54,488 events, final tick 9,855**; all six comparison artifacts are byte-identical
+and every live anchor matches. Source remained unchanged throughout recording
+and replay. Evidence:
+`Local/evidence/phone-vpn-journal-1792731479464021600/replay/summary.json`.
+
+The phone supplied 321 applied inputs, including 266 moves, 18 attack orders,
+9 ground casts, 4 learns and 12 shop requests. Server acknowledgements cover
+all 9 ground casts, 4 learns and 6 purchases; the other shop requests are not
+automatically classified as gameplay regressions. Skye's one null-target
+`1041/action 1` was **A cancellation**, acknowledged by `1045` plus `1093` and
+an empty barrage state, not an unacknowledged new cast. Its existing production
+regression test passes. Receive→apply latency: median 0.187 / p95 0.246 /
+max 24.436 ms, not end-to-end client latency. Zero recorded send errors precede
+`remove_client`; all 2,698 failed recipient events occur afterward during
+shutdown. `semantic-audit-v2.json` retains these distinctions; its earlier
+draft's wrong `1041` echo assumption is explicitly superseded.
+
+This is not a natural completed match, 30-minute soak, independent fidelity,
+or a replacement for native HUD/scalar WORLD guards. Fresh-guest UI, exact-client
+bad-certificate controls, iOS, multiple VPN peers and remaining M5/M7 gates are
+open. The game was closed for replay; the owned stack and VPN remain running.
+No simulation changes or commits were made in this follow-up. The previous
+round's 93 targeted platform/VPN tests are not a new full-suite qualification.
+
 ## M5 phase C live — 2026-10-21
 
 **M5 step C PASS** — 2026-10-23. One CE plus five protocol participants; corrected conditions below.

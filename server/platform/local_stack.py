@@ -45,6 +45,7 @@ else:
     from .. import gateway
 
 from server.paths import stack_dir
+from server.platform import endpoints as client_endpoints
 
 STACK_DIR = str(stack_dir())
 LOG_PATH = os.path.join(STACK_DIR, "http_log.txt")
@@ -202,7 +203,7 @@ def _mint_token(player_id: str, region: str = "sg") -> str:
     return f"{header}.{body}.{sig}"
 
 
-def _create_guest_player(params, device_tag: str = "") -> dict:
+def _create_guest_player(params, device_tag: str = "", *, endpoints=None) -> dict:
     """Real response shape (HackedGlory mitm capture 2026-04-03): the
     returnValue's 'playerUUID' field carries a freshly minted session
     TOKEN whose player_id becomes the new guest's identity.
@@ -214,6 +215,8 @@ def _create_guest_player(params, device_tag: str = "") -> dict:
     On a tagged device listener the hwid is IGNORED (cloned images share
     it — 8/8 identical calls across two emulators) and the mint keys on
     the listener tag instead."""
+    if endpoints is None:
+        endpoints = client_endpoints.from_environment()
     hwid = params[-1] if isinstance(params, list) and params else "unknown"
     static_token = ""
     if os.environ.get("HALCYON_MINT_IDENTITY") == "0" and not device_tag:
@@ -239,7 +242,7 @@ def _create_guest_player(params, device_tag: str = "") -> dict:
         "sessionToken": "",
         "returnValue": {
             "playerUUID": token,
-            "startSessionUrl": "https://rpc.kindred-live.net",
+            "startSessionUrl": endpoints.rpc_origin if endpoints else "https://rpc.kindred-live.net",
         },
         "code": 0,
     }
@@ -516,6 +519,11 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _dispatch(self, method: str) -> None:
+        try:
+            endpoints = client_endpoints.from_environment()
+        except ValueError:
+            self._send_json(503, {"halcyon": "invalid client endpoint configuration"})
+            return
         if self._is_ws_upgrade():
             self._handle_ws_notify()
             return
@@ -529,6 +537,9 @@ class Handler(BaseHTTPRequestHandler):
         answers = _answers()
 
         if "status-redirect" in path:
+            if endpoints is not None:
+                self._send(200, endpoints.bootstrap_authority.encode("ascii"), ctype="text/plain")
+                return
             cfg = answers.get("status_redirect", DEFAULT_ANSWERS["status_redirect"])
             mode = cfg.get("mode", "302")
             if mode == "302":
@@ -560,7 +571,7 @@ class Handler(BaseHTTPRequestHandler):
             if rpc_method == "createGuestPlayer":
                 # Fresh install: mint this device's identity from its hwid
                 # (or from the listener tag — cloned images share the hwid).
-                answer = _create_guest_player(payload.get("params"), device_tag)
+                answer = _create_guest_player(payload.get("params"), device_tag, endpoints=endpoints)
             elif key in answers:
                 answer = answers[key]
             elif rpc_method in answers:
@@ -590,6 +601,12 @@ class Handler(BaseHTTPRequestHandler):
             fsm_on_rpc(rpc_method, client_key=client_key)
             if rpc_method == "update":
                 answer = client_update(client_key, answer)
+            if endpoints is not None:
+                try:
+                    answer = endpoints.rewrite(answer)
+                except ValueError:
+                    self._send_json(503, {"halcyon": "invalid client transport URL in response"})
+                    return
             # Retain the listener and normalized identity, not another copy of
             # session tokens. The wire token may be the client's truncated JWT.
             identities = [guest_id]
@@ -669,6 +686,20 @@ def build_tls_context(cert_path, key_path):
     return ctx
 
 
+def configured_tls_context(config, endpoints):
+    """Keep legacy defaults; an owned-domain deployment must not fall back to HTTP."""
+    cert = os.environ.get("HALCYON_PLATFORM_CERT")
+    key = os.environ.get("HALCYON_PLATFORM_KEY")
+    if (cert is None) != (key is None) or cert == "" or key == "":
+        raise ValueError("HALCYON_PLATFORM_CERT and HALCYON_PLATFORM_KEY must be set together")
+    cert = cert or os.path.join(STACK_DIR, "platform_cert.pem")
+    key = key or os.path.join(STACK_DIR, "platform_key.pem")
+    ctx = build_tls_context(cert, key) if config.get("_tls443", True) else None
+    if endpoints is not None and ctx is None:
+        raise ValueError("owned-domain endpoints require TLS and an existing certificate/key pair")
+    return ctx
+
+
 class TLSServer(ThreadingHTTPServer):
     """ThreadingHTTPServer whose TLS handshakes cannot kill the serve loop."""
 
@@ -704,6 +735,10 @@ def main(argv=None) -> None:
     ap.add_argument("--same-hero", action="store_true",
                     help="Sandbox: all six slots mirror the host's hero and skin at lock")
     args = ap.parse_args(argv)
+    try:
+        endpoints = client_endpoints.from_environment()
+    except ValueError as exc:
+        ap.error(str(exc))
     if args.same_hero:
         os.environ["HALCYON_SAME_HERO"] = "1"
 
@@ -722,6 +757,11 @@ def main(argv=None) -> None:
 
     # Gateway ports and hosts are configurable:
     cfg = _answers()
+    # Validate before starting any gateway/listener or rewriting the FSM.
+    try:
+        ctx = configured_tls_context(cfg, endpoints)
+    except (ValueError, OSError) as exc:
+        ap.error(str(exc))
     bind_host = args.bind_host or cfg.get("_bind_host", "0.0.0.0")
     match_host = args.match_host or cfg.get("_match_host", "127.0.0.1")
     gw_port = args.gw_port if args.gw_port is not None else int(cfg.get("_gw_port", 7100))
@@ -761,11 +801,6 @@ def main(argv=None) -> None:
     print(f"[stack] rpc journal {RPC_LOG_PATH}")
     print(f"[stack] answers {ANSWERS_PATH} (hot-reloaded)")
     print(f"[stack] T2 gateway {bind_host}:{gw.port} (announced: {match_host}) + heartbeat :{gw.relay.port}")
-
-    cert = os.path.join(STACK_DIR, "platform_cert.pem")
-    key = os.path.join(STACK_DIR, "platform_key.pem")
-    use_tls = bool(_answers().get("_tls443", True))
-    ctx = build_tls_context(cert, key) if use_tls else None
 
     try:
         if ctx is not None:

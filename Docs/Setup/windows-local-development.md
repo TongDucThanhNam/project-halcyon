@@ -348,6 +348,54 @@ push to `/data/local/tmp/` and copy to the same final path using `su -c` in your
 owned rooted instance; verify the final size. Do not uninstall an existing game
 to bypass a signature error without first preserving the instance/data you need.
 
+### Physical Android/iOS without modifying the game — 2026-10-23 direction
+
+The operator prefers **original game + VPN configuration**, not a repacked APK
+or injected library as the player installation contract. Original-Android
+bootstrap/session and match transport are now observed on one phone; gameplay
+acceptance and iOS deployment are not qualified. Do not apply the rooted
+emulator `guest_setup` procedure to a non-root phone, or uninstall its original
+game to prepare this experiment.
+
+The selected research candidate is WireGuard/private DNS routing of the HTTP
+preauth bootstrap to an owned service, followed by an operator-owned HTTPS
+RPC hostname with a publicly trusted certificate. VPN alone does not solve
+TLS trust; VGReborn's VPN/MITM example still requires client CA trust.
+Read the [source review and bounded admission gates](../Teardown/vainglory-community-ecosystem-tricks.md#unmodified-phone-deployment-review--2026-10-23)
+before provisioning. Its follow-up records the owned-phone experiment and
+remaining gates. Existing emulator acceptance and nonvisual instrumentation
+guards are unchanged.
+
+Implemented opt-ins (absent settings preserve the emulator contract):
+
+- `HALCYON_PLATFORM_ORIGIN=https://<owned-rpc-name>` coherently advertises
+  bootstrap, guest/session and platform URLs. `HALCYON_NOTIFY_ORIGIN` defaults
+  to `ws://<owned-rpc-name>` inside the private tunnel; WSS is not qualified.
+- Set both `HALCYON_PLATFORM_CERT` (public full chain) and
+  `HALCYON_PLATFORM_KEY` (matching private key). Owned-origin mode requires
+  TLS; it does not silently fall back to HTTP. Validate hostname/chain/expiry
+  separately before launch. Use a publicly trusted certificate, not Cloudflare
+  Origin CA, and arrange renewal before calling this deployable.
+- Use a separate `HALCYON_STACK_DIR`, bind the stack to `127.0.0.1`, and
+  announce `10.77.0.1` as its match host. Do not run a competing stack on the
+  same ports. The userspace ingress sends TCP 80/443 to host 9080/9443 and
+  TCP 7100/2112 to the corresponding loopback ports.
+- Install optional `requirements-phone-vpn.txt` in an isolated environment.
+  `python -m server.platform.phone_vpn --help` describes `init`/`serve`.
+  Initialization requires a private LAN endpoint and new key/profile paths
+  under `Local/`; it refuses overwrites. Serve requires a new evidence journal.
+  The current implementation is **one peer only**, not a public VPN service.
+- Import the private profile into official WireGuard, enable Android always-on
+  and block-without-VPN, and verify dual-stack routes/DNS/UID containment and
+  tunnel-loss behavior before launching the game. This full-tunnel pilot
+  intentionally blocks the phone's ordinary Internet access. To return to
+  normal use, close the game first, disable block-without-VPN/always-on, then
+  disable this tunnel. Merely turning the tunnel off leaves lockdown active.
+
+Actual certificate/profile/runtime/evidence paths and expiry are recorded in
+the linked follow-up. No proprietary payloads or VPN/certificate private keys
+belong in Git. Passing Android transport does not establish iOS compatibility.
+
 ## 7. Generate configuration and check all prerequisites
 
 If you restored a matching certificate/key and working answers file, initialization
