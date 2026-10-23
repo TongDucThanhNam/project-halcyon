@@ -139,6 +139,22 @@ class TestPlayerInfo1006(unittest.TestCase):
         self.assertEqual(gamma[210], 2)          # team byte at +210
         self.assertEqual(bot[210], 1)
 
+    def test_human_teams_agree_across_draft_finalization_and_world(self):
+        players = _players()
+        for p in players:
+            p.is_bot = False
+            p.hero_id = 265
+            p.uuid = f"human-{p.slot}"
+        snapshot = roster.build_snapshot(players)
+        for p in players:
+            with self.subTest(slot=p.slot):
+                info = roster.build_player_info(p, MATCH_ID)
+                block = roster.build_hero_block(p)
+                self.assertEqual(info[210], snapshot[8 + p.slot * 161 + 8])
+                self.assertEqual(info[210], struct.unpack_from(">I", block, 12)[0])
+                self.assertEqual(info[212:216], b"\x00\x00\x00\x01")
+                self.assertEqual(info[176:204], struct.pack(">I", roster.FNVL_EMPTY) * 7)
+
 
 class TestJoinHandshakes(unittest.TestCase):
     def test_1118_hero_selection_matches_observed_pair(self):

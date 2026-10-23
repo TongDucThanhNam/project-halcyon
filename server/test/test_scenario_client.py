@@ -6133,6 +6133,17 @@ class TestProofMatrix(unittest.TestCase):
 
 
 class TestRunClientRefusals(unittest.TestCase):
+    def test_mixed_cli_requires_both_files_and_enabled_entry_before_adb(self):
+        from unittest.mock import patch
+        for flags in ({'mixed_draft_ready': 'ready'}, {'mixed_world_release': 'release'},
+                      {'mixed_draft_ready': 'ready', 'mixed_world_release': 'release'}):
+            output = Path(tempfile.mkdtemp(prefix='mixed-cli-', dir=Path(sc.__file__).resolve().parents[1]/'Local/evidence'))/'client'
+            with self.subTest(flags=flags), patch.object(sc, 'Adb') as adb:
+                result = sc.run_client('movement-walk', self._args(output=str(output), **flags))
+            self.assertEqual(result['first_failed_stage'], 'SETUP')
+            self.assertIn('mixed flags require', result['failure_detail'])
+            adb.assert_not_called()
+
     def _args(self, **overrides):
         namespace = {"adb_serial": "emulator-5554", "qa_dir": "Z:/nope",
                      "wire_trace": "Z:/nope.jsonl", "timeout": 1.0,

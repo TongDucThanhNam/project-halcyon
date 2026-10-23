@@ -206,8 +206,9 @@ def main(argv=None):
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--duration', type=float, default=120)
     args = parser.parse_args(argv)
-    if args.output.resolve().is_relative_to(ROOT):
-        parser.error('QA evidence must be outside the checkout')
+    destination = args.output.resolve()
+    if destination.is_relative_to(ROOT) and not destination.is_relative_to(ROOT / 'Local'):
+        parser.error('QA evidence must be outside the checkout or under Local/')
     if not args.remote_pcap.startswith('/sdcard/') or any(c not in '/._-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' for c in args.remote_pcap):
         parser.error('expected an explicit owned /sdcard capture file')
     if not 1 <= args.duration <= 600:

@@ -1775,11 +1775,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="[client] specific trace connection id to own")
     parser.add_argument("--client-profile", default=None,
                         help="[client] explicit client profile JSON (default built-in 960x540)")
+    parser.add_argument('--mixed-draft-ready', help='[client] opt-in fresh participant draft barrier JSON')
+    parser.add_argument('--mixed-world-release', help='[client] opt-in owner-bound native WORLD release JSON')
+    parser.add_argument('--mixed-timeout', type=float, default=120,
+                        help='[client] bounded draft barrier wait, seconds (0,600]')
     parser.add_argument("--result-a", default=None,
                         help="[compare-pair] first serialized client result")
     parser.add_argument("--result-b", default=None,
                         help="[compare-pair] second serialized client result")
     args = parser.parse_args(argv)
+    if (args.mixed_draft_ready or args.mixed_world_release) and (
+            args.mode != 'client' or not (args.mixed_draft_ready and args.mixed_world_release)):
+        parser.error('mixed coordination requires client mode and both barrier paths')
 
     if args.mode == "replay":
         if not args.journal:

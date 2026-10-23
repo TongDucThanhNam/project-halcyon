@@ -82,6 +82,49 @@ class NonvisualMovementTests(unittest.TestCase):
         self.driver.adb.tap.assert_not_called()
         self.assertEqual(len(self.driver.observations['native_ui_guards'][0]['loading_wait']), 2)
 
+    def test_back_to_settings_or_surviving_build_fails_setup_without_retry(self):
+        for labels in (['Settings'], ['Choose a Build']):
+            with self.subTest(labels=labels):
+                self.driver.adb.back.reset_mock()
+                self.observer.ui_state.side_effect = [{'labels': ['Choose a Build']}, {'labels': labels}]
+                with self.assertRaises(sc.ClientStageFailure) as caught:
+                    self.driver._guard_nonvisual_movement_ui(self.observer, dismiss_build=True)
+                self.assertEqual(caught.exception.stage, 'SETUP')
+                self.driver.adb.back.assert_called_once_with()
+                self.assertEqual(self.driver.observations['native_ui_guards'][-1]['after']['labels'], labels)
+
+    def test_stale_future_or_nonfinite_build_read_sends_zero_back(self):
+        for age in (1.500001, -1, float('nan'), float('inf')):
+            with self.subTest(age=age), patch.object(sc.time, 'monotonic', return_value=100):
+                self.observer.ui_state.return_value = {'labels': ['Choose a Build'], 'host_read_started': 100-age}
+                with self.assertRaisesRegex(sc.ClientStageFailure, 'stale BUILD') as caught:
+                    self.driver._guard_nonvisual_movement_ui(self.observer, dismiss_build=True)
+                self.assertEqual(caught.exception.stage, 'SETUP')
+                self.driver.adb.back.assert_not_called()
+                self.assertEqual(self.driver.gestures, [])
+
+    def test_hud_sends_no_back_and_gameplay_panel_does_not_opt_into_dismissal(self):
+        self.driver._guard_nonvisual_movement_ui(self.observer, dismiss_build=True)
+        self.driver.adb.back.assert_not_called()
+        self.observer.ui_state.return_value = {'labels': ['Choose a Build']}
+        with self.assertRaises(sc.ClientStageFailure) as caught:
+            self.driver._guard_nonvisual_movement_ui(self.observer)
+        self.assertEqual(caught.exception.stage, 'SETUP')
+        self.driver.adb.back.assert_not_called()
+
+    def test_fresh_boundary_back_records_read_age_send_and_after(self):
+        self.observer.ui_state.side_effect = [
+            {'labels': ['Choose a Build', '0:11'], 'host_read_started': 98.5},
+            {'labels': ['BUY:', '0:13']}]
+        with patch.object(sc.time, 'monotonic', return_value=100):
+            self.driver._guard_nonvisual_movement_ui(self.observer, dismiss_build=True)
+        row = self.driver.observations['native_ui_guards'][0]
+        self.assertEqual(row['gating_read_age_s'], 1.5)
+        self.assertEqual(row['gating_read']['host_read_started'], 98.5)
+        self.assertLessEqual(row['send_at'], row['returned_at'])
+        self.assertLessEqual(row['returned_at'], row['after_at'])
+        self.assertEqual(self.driver.gestures[0]['match_clock'], ['0:11'])
+
     def test_loading_wait_is_bounded_and_never_taps(self):
         self.observer.ui_state.return_value = {'labels': ['Pro Tip: loading']}
         with patch.object(sc.time, 'monotonic', side_effect=[0, 26]):

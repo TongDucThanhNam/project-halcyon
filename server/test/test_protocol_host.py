@@ -95,7 +95,8 @@ class TestServerProcess(unittest.TestCase):
         # Short integration fixture, NOT a shortened acceptance soak. The real
         # production bootstrap and six sockets run in the separate child. Only
         # this test's parent play sequence is bounded to one ordinary input.
-        def short_play(players):
+        def short_play(players, *, reconnect_identity=None):
+            self.assertIsNone(reconnect_identity)
             p = players[0]
             p.send(1012, pp.struct.pack('>ff6x',25,40))
             deadline, offset, observed = time.monotonic()+90, 0, 0
@@ -108,7 +109,16 @@ class TestServerProcess(unittest.TestCase):
                     return
                 time.sleep(.1)
             raise pp.StageFailure('integration fixture never observed production live ticks')
-        with patch.dict(os.environ,{'HALCYON_CHECKPOINT_PROBE':'1'}), patch.object(pp,'play',short_play):
+        # This is a process/journal grammar fixture, not native CE evidence.
+        # Ringo/Gwen have no retained ordinary hash yet; production refuses
+        # them instead of sending zero. Use explicitly synthetic test inputs
+        # here, as in TestParticipants; keep every integration assertion below.
+        measured = pp.selection_hashes
+        def fixture_hashes(hid):
+            return ((0x11223344, 0x55667788, 'synthetic offline wire fixture, not CE evidence')
+                    if hid in (243, 395) else measured(hid))
+        with patch.dict(os.environ,{'HALCYON_CHECKPOINT_PROBE':'1'}), patch.object(pp,'play',short_play), \
+                patch.object(pp,'selection_hashes',side_effect=fixture_hashes):
             code = pp.main(['--self-host','--server-process','--journal','--telemetry','--output',str(output)])
         summary = json.loads((output/'summary.json').read_text())
         (output/'unit-test-contract.json').write_text(json.dumps({

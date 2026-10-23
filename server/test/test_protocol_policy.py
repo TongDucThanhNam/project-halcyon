@@ -1,7 +1,12 @@
 import unittest
 
 from Tools.protocol_observer import Actor
-from Tools.protocol_policy import Policy
+from Tools.protocol_policy import Policy, MixedRendezvous, mixed_structure_zones
+
+
+def mixed_mesh():
+    from server.navigation import NavMesh
+    return NavMesh([(-100, -40), (100, -40), (100, 40), (-100, 40)], [(0, 1, 2), (0, 2, 3)])
 
 
 def scene():
@@ -11,6 +16,171 @@ def scene():
 
 
 class TestPolicy(unittest.TestCase):
+    def test_per_team_stage_points_have_margin_mesh_and_own_structure_direction(self):
+        import math
+        from dataclasses import replace
+        from server.structures import STRUCTURE_TEMPLATES
+        from Tools.protocol_policy import MIXED_CLEAN_RADIUS
+        for structures in (STRUCTURE_TEMPLATES,
+                           [replace(s, team=3-s.team) for s in STRUCTURE_TEMPLATES]):
+            r = MixedRendezvous(mixed_mesh(), structures=structures)
+            self.assertNotEqual(r.stage_point(1), r.stage_point(2))
+            for team in (1, 2):
+                point = r.stage_point(team)
+                own = next(s for s in structures if s.team == team and s.tier == 1)
+                self.assertGreater((point[0]-r.point[0])*(own.x-r.point[0]), 0)
+                self.assertTrue(r.mesh.contains(point))
+                self.assertLessEqual(math.dist(point, r.point), MIXED_CLEAN_RADIUS-1)
+                self.assertEqual(r.evidence()['stages'][team]['point'], point)
+                self.assertEqual(len(r.evidence()['stages'][team]['structures']), len(structures))
+        from unittest.mock import Mock
+        mesh = Mock(contains=lambda p: p[0] == 0)
+        with self.assertRaisesRegex(ValueError, 'stage point off-mesh'):
+            MixedRendezvous(mesh)
+
+    def test_mixed_structure_geometry_uses_production_range_plus_two_and_segments(self):
+        self.assertEqual(mixed_structure_zones((17.06+10.5, 1.93), teams=(2,))[0]['eid'], 3539)
+        self.assertFalse(mixed_structure_zones((17.06, -20), teams=(2,)))
+        self.assertTrue(mixed_structure_zones((17.06, 20), teams=(2,), start=(17.06, -20)))
+        self.assertFalse(mixed_structure_zones((0, -2)))
+        self.assertIn(3544, [z['eid'] for z in mixed_structure_zones((76.12, 19.9))])
+        with self.assertRaisesRegex(ValueError, 'finite'):
+            mixed_structure_zones((float('nan'), 0))
+
+    def test_mixed_opponent_engages_only_when_both_inside_clean_disk(self):
+        import struct
+        a = scene()
+        a[1500].position = (-2, -2)
+        a[1517] = Actor(1517, 'hero', 2, 3, position=(2, -2), spawn=(78, 1), hp=700, max_hp=700)
+        p = Policy(1517, 'Baptiste', opponent_eid=1500, mixed_pair=(1500, 1517),
+                   rendezvous=MixedRendezvous(mixed_mesh()))
+        self.assertEqual(p.step(a, 1).opcode, 1060)
+        for pos, who in (((17.06, 1.93), 1517), ((-17.06, 1.93), 1500), ((-6, -2), 1500)):
+            a[1500].position, a[1517].position = (-2, -2), (2, -2)
+            a[who].position = pos
+            p.last_order, p.next_action = None, 0
+            with self.subTest(who=who):
+                intent = p.step(a, 3)
+                self.assertEqual(intent.opcode, 1012)
+                self.assertEqual(struct.unpack_from('>ff', intent.payload), (1.5, -2))
+                self.assertEqual(p.engagement['phase'], 'staging')
+        a[1500].position, a[1517].position = (-2, -2), (2, -2)
+        self.assertEqual(p.step(a, 5).opcode, 1060)
+
+    def test_mixed_low_health_does_not_leave_rendezvous_for_a_turret_or_recall(self):
+        import struct
+        a = scene()
+        a[1517] = Actor(1517, 'hero', 2, 3, position=(5, 2), spawn=(78, 1), hp=20, max_hp=700)
+        p = Policy(1517, 'Baptiste', opponent_eid=1500, mixed_pair=(1500, 1517),
+                   rendezvous=MixedRendezvous(mixed_mesh()))
+        intent = p.step(a, 1)
+        self.assertEqual(intent.opcode, 1012)
+        goal = struct.unpack_from('>ff', intent.payload)
+        self.assertEqual(goal, (1.5, -2))
+        self.assertFalse(mixed_structure_zones(goal))
+        self.assertNotEqual(goal, a[1517].spawn)
+
+    def test_rendezvous_derived_from_structures_refuses_offmesh_and_inzone_candidates(self):
+        from dataclasses import replace
+        from server.structures import STRUCTURE_TEMPLATES
+        mesh = mixed_mesh()
+        r = MixedRendezvous(mesh)
+        self.assertEqual(r.point, (0, -2))
+        self.assertGreater(min(s['clearance'] for s in r.clearances), 7)
+        self.assertTrue(mesh.contains(r.point))
+        with self.assertRaisesRegex(ValueError, 'off-mesh'):
+            MixedRendezvous(mesh, candidate=(0, -41))
+        for point in ((17.06, 1.93), (0, 1.93)):
+            with self.subTest(point=point), self.assertRaisesRegex(ValueError, 'expanded structure zone'):
+                MixedRendezvous(mesh, candidate=point)
+        # Synthetic structure translation must translate R; this is not a
+        # hard-coded point accepted irrespective of production templates.
+        shifted = [replace(s, x=s.x+1) for s in STRUCTURE_TEMPLATES]
+        self.assertEqual(MixedRendezvous(mesh, structures=shifted).point, (1, -2))
+
+    def test_staging_never_pursues_far_ce_or_targets_ce_side_turrets(self):
+        import struct
+        r = MixedRendezvous(mixed_mesh())
+        for ce in ((-78.18, .88), (-54, 2.92), (-6, -2), (80, 30)):
+            a = scene()
+            a[1500].position = ce
+            a[1517] = Actor(1517, 'hero', 2, 3, position=(79.66, -.91), hp=700, max_hp=700)
+            p = Policy(1517, 'Baptiste', opponent_eid=1500, mixed_pair=(1500, 1517), rendezvous=r)
+            goal = struct.unpack_from('>ff', p.step(a, 0).payload)
+            self.assertEqual(goal, r.stage_point(2))
+            previous = a[1517].position
+            for step in r.route(previous, 2):
+                self.assertFalse(mixed_structure_zones(step, teams=(1,), start=previous))
+                previous = step
+
+    def test_enemy_crossing_nav_step_refused_even_with_safe_final_target(self):
+        from unittest.mock import Mock
+        mesh = Mock(contains=lambda p: True)
+        mesh.find_path.return_value = [(-17.06, 1.93), (1.5, -2)]
+        with self.assertRaisesRegex(ValueError, 'enemy structure zone'):
+            MixedRendezvous(mesh).route((79.66, -.91), 2)
+
+    def test_leaving_clean_zone_cancels_attack_before_pacing_deadline(self):
+        a = scene()
+        a[1500].position = (-2, -2)
+        a[1517] = Actor(1517, 'hero', 2, 3, position=(2, -2), hp=700, max_hp=700)
+        p = Policy(1517, 'Baptiste', opponent_eid=1500, mixed_pair=(1500, 1517),
+                   rendezvous=MixedRendezvous(mixed_mesh()))
+        self.assertEqual(p.step(a, 0).opcode, 1060)
+        a[1500].position = (-3.01, -2)
+        self.assertEqual(p.step(a, .1).opcode, 1012)
+        self.assertIsNone(p.target)
+        self.assertEqual(p.engagement['phase'], 'staging')
+
+    def test_4q_initial_positions_reach_r_on_synthetic_route_without_enemy_zone_targets(self):
+        from Tools.classic_client import path_step
+        r = MixedRendezvous(mixed_mesh())
+        # b4bc3c08: CE spawn and opponent spawn before the failed pursuit.
+        for team, initial in ((1, (-78.18, .88)), (2, (79.66, -.91))):
+            position, steps = initial, 0
+            while position != r.stage_point(team):
+                r.route(position, team)
+                target = path_step(r.mesh, position, r.stage_point(team))
+                self.assertFalse(mixed_structure_zones(target, teams=(3-team,), start=position))
+                position = target
+                steps += 1
+                self.assertLess(steps, 30)
+            self.assertTrue(r.contains(position))
+
+    def test_mixed_other_participants_keep_lane_orders_without_attacking_pair(self):
+        import struct
+        a = scene()
+        a[1517] = Actor(1517, 'hero', 2, 3, position=(5, 2))
+        a[1515] = Actor(1515, 'hero', 1, 1, position=(-30, 2), spawn=(-78, 1), hp=700, max_hp=700)
+        a[3545] = Actor(3545, 'structure', 1, 6, position=(-17.06, 1.93), tier=1)
+        a[4000] = Actor(4000, 'minion', 2, 9, position=(-25, 2))
+        p = Policy(1515, 'Catherine', mixed_pair=(1500, 1517))
+        attack = p.step(a, 1)
+        self.assertEqual(attack.opcode, 1060)
+        self.assertEqual(struct.unpack_from('>I', attack.payload)[0], 4000)
+        a[1517].position = (-25, 2)
+        p.next_action = 0
+        intent = p.step(a, 3)
+        self.assertEqual(intent.opcode, 1012, 'cancel approach rather than interfere with the pair')
+        self.assertEqual(struct.unpack_from('>ff', intent.payload), (-78, 1))
+        self.assertIn('non-interference', p.hold['reason'])
+
+    def test_declared_opponent_uses_observed_team_and_eid_not_index_or_nearest(self):
+        import struct
+        a = scene()
+        a[1517] = Actor(1517, 'hero', 2, 3, position=(5, 2))
+        a[1519] = Actor(1519, 'hero', 2, 5, position=(1, 2))
+        p = Policy(1500, 'Skye', opponent_eid=1517)
+        intent = p.step(a, 1)
+        self.assertEqual(intent.opcode, 1060)
+        self.assertEqual(struct.unpack_from('>I', intent.payload)[0], 1517)
+        self.assertIsNone(p.step(a, 3), 'retain a legal target rather than reset windup')
+        a[1517].alive = False
+        self.assertEqual(p.step(a, 5).opcode, 1012, 'dead opponent cancels the previous order')
+        a[1517].team = 1
+        with self.assertRaisesRegex(ValueError, 'opposing hero'):
+            p.step(a, 7)
+
     def test_soak_never_orders_structure_attacks_or_cross_river_pursuit(self):
         import struct
         for team, home in ((1,-1),(2,1)):

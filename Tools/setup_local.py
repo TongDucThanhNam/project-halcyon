@@ -53,6 +53,15 @@ def initialize() -> None:
         print(f"KEEP config: {target}")
 
 
+def check_answer_methods(config):
+    """Read-only schema coverage; metadata/default port keys are not RPCs."""
+    example = json.loads((ROOT / 'Config/answers.example.json').read_text(encoding='utf-8'))
+    missing = sorted(k for k in example if not k.startswith('_') and k not in config)
+    if missing:
+        raise ValueError('answers.json missing method rows defined in Config/answers.example.json: '
+                         + ', '.join(missing) + '; restore explicitly (check never edits configuration)')
+
+
 def check(profile: str, serial: str | None) -> int:
     failures = []
 
@@ -111,6 +120,7 @@ def check(profile: str, serial: str | None) -> int:
         def platform():
             directory = paths.stack_dir()
             config = json.loads((directory / "answers.json").read_text(encoding="utf-8"))
+            check_answer_methods(config)
             for method in ("getPlayerForGuestAccount", "startSessionForPlayer"):
                 value = config[method]["returnValue"]
                 if not value.get("sessionToken") or "__HALCYON_" in value["sessionToken"]:

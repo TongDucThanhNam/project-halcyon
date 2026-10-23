@@ -8204,6 +8204,7 @@ class ClientDriver:
         """Wait for known loading, dismiss one identified build panel, prove HUD."""
         try:
             read_state = state_reader or observer.ui_state
+            wall_read_started = time.time()
             state = read_state()
             record = {'before': state}
             self.observations.setdefault('native_ui_guards', []).append(record)
@@ -8214,18 +8215,48 @@ class ClientDriver:
                     raise ClientStageFailure('SETUP', 'FAIL',
                         'native loading/countdown still active; no movement attempted')
                 time.sleep(1.0)
+                wall_read_started = time.time()
                 state = read_state()
                 record.setdefault('loading_wait', []).append({'at': time.time(), 'state': state})
             if 'Choose a Build' in state['labels'] and dismiss_build:
-                self.adb.back()
-                self.gesture('native-ui-back', reason='code-anchored Choose a Build title')
+                from contextlib import nullcontext
+                entry = getattr(self, '_build_entry', None)
+                if (self.profile.get('nonvisual_entry') or {}).get('enabled') is True and entry is None:
+                    raise ClientStageFailure('SETUP', 'FAIL', 'BUILD input lease unavailable; no BACK')
+                record['gating_read'] = state
+                with entry.input_window() if entry is not None else nullcontext():
+                    if entry is not None:
+                        entry.record('BUILD_DISMISS', input_receipt={'title': 'Choose a Build'}, native=state)
+                        if check := getattr(entry, '_input_check', None):
+                            check()
+                    age = (time.monotonic() - state['host_read_started']
+                           if 'host_read_started' in state else None)
+                    record['gating_read_age_s'] = age
+                    record['gating_read_wall_started'] = wall_read_started
+                    record['gating_read_wall_age_s'] = time.time() - wall_read_started
+                    if age is not None and not 0 <= age <= 1.5:
+                        raise ClientStageFailure('SETUP', 'FAIL', f'stale BUILD gating read ({age:.3f}s); no BACK')
+                    before = time.time()
+                    record['send_at'] = before
+                    self.gesture('native-ui-back', reason='code-anchored Choose a Build title',
+                                 wall_before=before, gating_read_age_s=age,
+                                 match_clock=[s for s in state['labels'] if re.fullmatch(r'\d+:\d{2}', s)])
+                    self.adb.back()
+                    record['returned_at'] = time.time()
+                    if entry is not None:
+                        entry.record('BUILD_DISMISS', input_transport='returned', wall_before=before,
+                                     gating_read_age_s=age)
                 time.sleep(2.0)
                 state = read_state()
                 record['after'] = state
+                record['after_at'] = time.time()
+                if entry is not None:
+                    entry.record('BUILD_DISMISS_AFTER', native=state)
             # "Item Shop" also exists alongside the gameplay HUD, so its
             # text alone is not a qualified modal-panel discriminator.
             blocking = {'Choose a Build', 'Settings'}.intersection(state['labels'])
             if blocking:
+                record['blocked_at'] = time.time()
                 raise ClientStageFailure('SETUP', 'FAIL',
                     f'known native panel blocks walking: {sorted(blocking)}; no blind retry')
             if ('BUY:' not in state['labels'] or
@@ -9542,6 +9573,12 @@ def run_client(scenario: str, args) -> dict:
             raise ClientStageFailure("SETUP", "FAIL",
                                      f"unsupported client scenario: {scenario!r}")
         profile = load_client_profile(getattr(args, "client_profile", None))
+        if getattr(args, 'mixed_draft_ready', None) or getattr(args, 'mixed_world_release', None):
+            if not (getattr(args, 'mixed_draft_ready', None) and getattr(args, 'mixed_world_release', None)
+                    and (profile.get('nonvisual_entry') or {}).get('enabled') is True):
+                raise ClientStageFailure('SETUP', 'FAIL', 'mixed flags require both paths and enabled nonvisual entry')
+            profile['nonvisual_entry'].update(mixed_draft_ready=args.mixed_draft_ready,
+                mixed_world_release=args.mixed_world_release, mixed_timeout_s=getattr(args, 'mixed_timeout', 120))
         import hashlib as _hashlib
         profile_source_path = getattr(args, "client_profile", None)
         if profile_source_path:
@@ -9550,6 +9587,8 @@ def run_client(scenario: str, args) -> dict:
         else:
             profile_digest = _hashlib.sha256(json.dumps(
                 DEFAULT_PROFILE, sort_keys=True).encode()).hexdigest()
+        if getattr(args, 'mixed_draft_ready', None):
+            profile_digest = _hashlib.sha256(json.dumps(profile, sort_keys=True, allow_nan=False).encode()).hexdigest()
         serial = getattr(args, "adb_serial", None)
         if not serial:
             raise ClientStageFailure("SETUP", "FAIL",

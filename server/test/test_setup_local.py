@@ -14,6 +14,36 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class SetupLocalTests(unittest.TestCase):
+    def test_check_requires_every_example_method_but_not_metadata_and_never_repairs(self):
+        from Tools.setup_local import check_answer_methods
+        config = json.loads((ROOT/'Config/answers.example.json').read_text(encoding='utf-8'))
+        methods = {k: v for k, v in config.items() if not k.startswith('_')}
+        check_answer_methods(methods)
+        for method in methods:
+            partial = dict(methods)
+            del partial[method]
+            before = json.dumps(partial, sort_keys=True)
+            with self.subTest(method=method), self.assertRaisesRegex(ValueError, method):
+                check_answer_methods(partial)
+            self.assertEqual(json.dumps(partial, sort_keys=True), before)
+
+    def test_check_reports_missing_join_lobby_without_editing_runtime_answers(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'Local/evidence', prefix='setup-check-') as temporary:
+            folder = Path(temporary)
+            self.assertEqual(self.initialize(folder).returncode, 0)
+            target = folder/'runtime/halcyon_stack/answers.json'
+            config = json.loads(target.read_text(encoding='utf-8'))
+            del config['joinLobby']
+            target.write_text(json.dumps(config), encoding='utf-8')
+            before = target.read_bytes()
+            result = subprocess.run([sys.executable, '-B', str(ROOT/'Tools/setup_local.py'), '--check'],
+                env=dict(os.environ, HALCYON_STACK_DIR=str(target.parent)), cwd=ROOT,
+                capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('MISSING/INVALID platform configuration: answers.json missing method rows', result.stdout)
+            self.assertIn('joinLobby', result.stdout)
+            self.assertEqual(target.read_bytes(), before)
+
     def initialize(self, directory):
         env = dict(os.environ, HALCYON_LOCAL_ROOT=str(directory),
                    HALCYON_STACK_DIR=str(directory / "runtime/halcyon_stack"))

@@ -6,7 +6,9 @@ explicit listener/guest to connections; ordering never substitutes for identity.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections import Counter
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -16,6 +18,126 @@ from Tools import native_ui
 from Tools.android_input_health import (qualify_owned_ldplayer, require_owned_window,
                                        wait_launch_ready, wait_native_input_ready)
 from Tools.Teardown.observe_client_movement import ClientMovementObserver
+
+
+class MixedCoordination:
+    """Opt-in one-CE barrier; no UI receipt survives the bounded hold."""
+    def __init__(self, plan):
+        from Tools.protocol_participants import MIXED_HEROES, bounded_seconds
+        from server import hero_catalog
+        from Tools.verification_support import reject_link_traversal
+        self.ready = Path(plan['mixed_draft_ready'])
+        self.release = Path(plan['mixed_world_release'])
+        self.after = plan['not_before']
+        if type(self.after) not in (int, float) or not math.isfinite(self.after) or not 0 < self.after <= time.time():
+            raise ValueError('mixed coordination requires a finite past run epoch')
+        self.timeout = bounded_seconds(plan.get('mixed_timeout_s', 120))
+        root = Path(__file__).resolve().parents[1] / 'Local/evidence'
+        for path in (self.ready, self.release):
+            reject_link_traversal(path)
+            if root not in path.resolve().parents:
+                raise ValueError('mixed coordination files must be under Local/evidence')
+        if self.release.resolve() == self.ready.resolve():
+            raise ValueError('mixed coordination requires distinct barrier paths')
+        if self.release.exists() or self.ready.exists():
+            raise ValueError('mixed coordination requires initially absent run files')
+        self.assignment = None
+        self.connection = None
+        # Optional explicit slot-ordered composition for the measured bot-hero
+        # bisection. Absent this field, retain the original six-hero contract.
+        heroes = plan.get('mixed_heroes_by_slot')
+        self.heroes_by_slot = None
+        if heroes is not None:
+            if (not isinstance(heroes, list) or len(heroes) != 6
+                    or any(not isinstance(h, str) or h not in MIXED_HEROES for h in heroes)):
+                raise ValueError('mixed draft: explicit six-hero slot composition required')
+            ids = [hero_catalog.resolve_hero_id(h) for h in heroes]
+            if ids[0] != 265 or len(set(ids)) != 6:
+                raise ValueError('mixed draft: distinct heroes and CE Skye in slot0 required')
+            self.heroes_by_slot = ids
+
+    def validate(self, value, binding, rows):
+        from Tools.protocol_participants import HEROES, EIDS, SLOTS, selections
+        from server import hero_catalog, roster
+        verified = value.get('verified_at')
+        if (value.get('match_id') != binding['match_id'] or value.get('not_before') != self.after
+                or type(verified) not in (int, float) or not math.isfinite(verified)
+                or not self.after <= verified <= time.time()):
+            raise ValueError('mixed draft: wrong match/start epoch or stale receipt')
+        assigned = value.get('assignments', {})
+        six = list(assigned.values())
+        if (len(six) != 6 or {r['slot'] for r in six} != set(range(6))
+                or (any(r['hero_id'] != self.heroes_by_slot[r['slot']] for r in six)
+                    if self.heroes_by_slot is not None else
+                    {r['hero_id'] for r in six} != {hero_catalog.resolve_hero_id(h) for h in HEROES})
+                or any(k != r['identity'] or not k or k == roster.BOT_UUID_SENTINEL for k, r in assigned.items())
+                or any((r['eid'], r['team'], r['flags']) !=
+                       (dict(zip(SLOTS, EIDS))[r['slot']], 1 if r['slot'] < 3 else 2,
+                        roster.PICK_FLAG_SELECTED) for r in six)):
+            raise ValueError('mixed draft: all six selected human assignments required')
+        own = assigned.get(binding['identity'])
+        if not own or any(own[k] != binding[k] for k in ('eid', 'slot', 'team')) or own['hero_id'] != 265:
+            raise ValueError('mixed draft: CE owner/selection mismatch')
+        streams = value.get('streams', [])
+        if len(streams) != 5 or {s['identity'] for s in streams} != set(assigned)-{binding['identity']}:
+            raise ValueError('mixed draft: five participant streams required (one CE only)')
+        for stream in streams:
+            snapshot = stream['snapshot']
+            if (snapshot['direction'] != 's2c' or snapshot['opcode'] != 1113
+                    or not self.after <= snapshot['wall_time'] <= verified
+                    or {r['identity']: r for r in selections(bytes.fromhex(snapshot['payload_hex']))} != assigned):
+                raise ValueError('mixed draft: participant snapshot disagrees')
+        latest = [r for r in rows if r.get('connection') == binding['connection']
+                  and r.get('direction') == 's2c' and r.get('opcode') == 1113
+                  and r['time'] >= self.after]
+        if not latest:
+            raise ValueError('mixed draft: no current CE roster')
+        current = {r['identity']: r for r in selections(bytes.fromhex(latest[-1]['payload']))}
+        if (set(current) != set(assigned) or any(any(current[i][k] != a[k]
+                for k in ('eid', 'slot', 'team', 'hero_id')) for i, a in assigned.items())
+                or any(r['flags'] not in (roster.PICK_FLAG_SELECTED, roster.PICK_FLAG_LOCKED)
+                       for r in current.values())
+                or current[binding['identity']]['flags'] != roster.PICK_FLAG_SELECTED):
+            raise ValueError('mixed draft: current CE roster changed or CE already locked')
+        return own
+
+    def hold(self, entry, binding):
+        entry.record('MIXED_HOLD', path=str(self.ready))
+        def ready():
+            if not self.ready.exists():
+                return None
+            value = json.loads(self.ready.read_text(encoding='utf-8'))
+            entry.d.tail.poll()
+            self.assignment = self.validate(value, binding, entry.d.tail.records)
+            self.connection = binding['connection']
+            return value
+        receipt = entry.wait('mixed draft-ready', ready, timeout=self.timeout)
+        entry.record('MIXED_DRAFT_READY', receipt=receipt)
+
+    def publish(self, binding, qualified):
+        if (self.assignment is None or binding['connection'] != self.connection
+                or any(binding[k] != self.assignment[k] for k in ('eid', 'slot', 'team', 'identity'))):
+            raise ValueError('mixed release: owner changed after hold')
+        if (qualified.get('stage') != 'QUALIFIED_WORLD'
+                or any(qualified[k] != binding[k] for k in ('eid', 'slot', 'connection')) or qualified['hero_id'] != 265
+                or type(qualified.get('at')) not in (int, float) or not math.isfinite(qualified['at'])
+                or not self.after <= qualified['at'] <= time.time()):
+            raise ValueError('mixed release: native qualification owner mismatch')
+        value = {'match_id': binding['match_id'], 'qualified_at': qualified['at'],
+                 'clients': [{**{k: binding[k] for k in ('identity', 'connection', 'eid', 'slot', 'team')},
+                              'hero_id': qualified['hero_id'], 'qualified_world': True}]}
+        if self.release.exists():
+            raise ValueError('mixed release already exists')
+        pending = self.release.with_name(self.release.name + '.' + uuid.uuid4().hex + '.pending')
+        with pending.open('x', encoding='utf-8') as output:
+            output.write(json.dumps(value, allow_nan=False))
+            output.flush()
+            os.fsync(output.fileno())
+        # Windows rename refuses an existing destination; never overwrite a release.
+        if self.release.exists():
+            raise ValueError('mixed release already exists')
+        pending.rename(self.release)
+        return value
 
 
 def guest_binding(rows, device, after):
@@ -80,6 +202,34 @@ def admission_roster(rows, guests, after):
                    and r.get('opcode') == 1118 and r['time'] >= b['time'] for r in rows) for b in bindings):
         return None
     return bindings
+
+
+def bound_roster_handles(rows, binding, after):
+    """Latest s2c1113 on this admitted CE connection, never accumulated frames."""
+    from Tools.protocol_participants import selections
+    from server import roster
+    if binding is None:
+        return None
+    connection = binding['connection']
+    if (binding.get('direction') != 'identity' or binding['time'] < after
+            or binding not in rows or any(r.get('connection') == connection
+                                         and r.get('direction') == 'disconnect' for r in rows)):
+        return None
+    snapshots = [r for r in rows if r.get('connection') == connection
+                 and r.get('direction') == 's2c' and r.get('opcode') == 1113
+                 # _serve_join logs identity AFTER sending the opener. The
+                 # connection binding, not trace-row order, identifies it.
+                 and r.get('time', 0) >= after]
+    if not snapshots:
+        return None
+    payload = bytes.fromhex(snapshots[-1]['payload'])
+    players = selections(payload)
+    own = [p for p in players if p['identity'] == binding['identity']]
+    if len(own) != 1 or any(own[0][k] != binding[k] for k in ('slot', 'eid', 'team')):
+        raise ValueError('draft handles: bound CE identity/owner differs from 1113')
+    return Counter(payload[roster.SNAPSHOT_RECORD_BASE + p['slot'] * roster.SNAPSHOT_RECORD_STRIDE + 17:
+                           roster.SNAPSHOT_RECORD_BASE + p['slot'] * roster.SNAPSHOT_RECORD_STRIDE + 97]
+                   .split(b'\0', 1)[0].decode('ascii') for p in players)
 
 
 @contextmanager
@@ -161,10 +311,18 @@ class NonvisualEntry:
         self.java = native_ui.ClientInputState(self.observer, driver.out_dir, self.plan['java_bridge'])
         self.events = driver.observations.setdefault('nonvisual_entry', [])
         self.guest = None
+        self.binding = None
         self.admission_guests = None
+        self._scroll_returned = None
+        self._transition_pending = None
         from Tools.scenario_client import TraceTail
         self.rpc = TraceTail(self.plan['rpc_journal'])
         self.tails = {}
+        self.mixed = (MixedCoordination(self.plan) if
+                      'mixed_draft_ready' in self.plan or 'mixed_world_release' in self.plan else None)
+        # Reuse this entry's input lease and evidence writer for a late BUILD
+        # at mixed setup, after the entry observer has stopped.
+        self.d._build_entry = self
 
     def record(self, stage, **detail):
         row = {'stage': stage, 'at': time.time(), **detail}
@@ -182,13 +340,20 @@ class NonvisualEntry:
     def record_read(self, state):
         """Retain each completed read and measured per-screen resource maxima."""
         metrics = state['traversal']
-        stage = native_ui.screen(state)
+        stage = self.screen(state)
         self.record('UI_READ', native_stage=stage, traversal=metrics)
         summary = self.d.observations.setdefault('entry_ui_maxima', {}).setdefault(stage,
             {'reads': 0, 'visited': 0, 'active': 0, 'duration_ms': 0})
         summary['reads'] += 1
         for field in ('visited', 'active', 'duration_ms'):
             summary[field] = max(summary[field], metrics[field])
+
+    def screen(self, state):
+        handles = None
+        if self.binding is not None and 'Waiting for Players...' in state['labels']:
+            self.d.tail.poll()
+            handles = bound_roster_handles(self.d.tail.records, self.binding, self.after)
+        return native_ui.screen(state, roster_handles=handles)
 
     def wait(self, name, predicate, *, timeout=None):
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
@@ -203,11 +368,32 @@ class NonvisualEntry:
     def wait_screen(self, wanted, previous, *, transitions=()):
         stable = None
         last = None
+        unknown_since = None
+        unknown_count = 0
         def check():
-            nonlocal stable, last
+            nonlocal stable, last, unknown_since, unknown_count
             state = self.read()
             native_ui.complete_tree(state)
-            stage = native_ui.screen(state)
+            stage = self.screen(state)
+            if stage == 'UNKNOWN':
+                now = time.monotonic()
+                if unknown_since is None:
+                    unknown_since = now
+                unknown_count += 1
+                stable = last = None
+                duration = now - unknown_since
+                self.record('TRANSIENT_UNKNOWN', expected=wanted, previous=previous,
+                            count=unknown_count, continuous_s=duration, native=state)
+                # Step3/3b/3c HARD/roster frames and step4d d922fd52
+                # boot-1/entry/entry-stages.jsonl:114 (missing SEC) were
+                # retained 0.11-0.35s after transition input. 3s/15 reads are
+                # orchestrator-chosen margins, NOT measured settling times.
+                # This wait sends no input; control qualification is unchanged.
+                if duration > 3.0 or unknown_count > 15:
+                    raise ValueError(f'{previous}->{wanted}: transient UNKNOWN bound exceeded '
+                                     f'({duration:.3f}s continuous, {unknown_count} total reads)')
+                return None
+            unknown_since = None
             permitted = (wanted, previous, 'LOADING', *transitions) + (('BOOTSTRAP',) if wanted == 'MENU' else ())
             if stage not in permitted:
                 self.record('UNEXPECTED_SCREEN', expected=wanted, previous=previous, native=state)
@@ -226,6 +412,7 @@ class NonvisualEntry:
             # gesture separately protects the full selected ancestry and region.
             return state if settled else None
         state = self.wait(f'{previous}->{wanted}', check)
+        self._transition_pending = None
         self.record(wanted, native=state)
         return state
 
@@ -271,7 +458,9 @@ class NonvisualEntry:
             self._input_check = None
 
     def control_pair(self, label, stage, *, hero_id=None, scroll=False):
-        """At most 20 pre-receipt pairs; never retry a prepared input."""
+        """Window every DRAFT control; never retry a prepared input."""
+        if stage == 'DRAFT':
+            return self.draft_control_pair(label, stage, hero_id=hero_id, scroll=scroll)
         ancestry_failures = 0
         for attempt in range(20):
             before, after = self.read(), self.read()
@@ -293,7 +482,62 @@ class NonvisualEntry:
                 self.record('CONTROL_PAIR', receipt=receipt, before=before, after=after)
                 return after, receipt
 
-    def act(self, label, stage, *, hero_id=None, scroll=False):
+    def draft_control_pair(self, label, stage, *, hero_id=None, scroll=False):
+        """Exact structural span followed by a fresh adjacent input pair."""
+        # ba0ea6b2: last protected changes at 3.10/3.09/1.88s, stable tails
+        # 34..43 reads (5.0..6.3s). Historical censored floor 3.388s + chosen
+        # 0.5s margin => T=3.888s; median read-start cadence .147s => N=28
+        # (ceil(T/cadence)+1). These are margins, not a settling guarantee.
+        # e72b7c5e: the first control's revalidation changed six ancestors by
+        # 0x2 only 1.11s after DRAFT_OPEN. Apply the same window to opening,
+        # every scroll, hero selection and LOCK IN, not just post-scroll.
+        # Preserve the scroll-return budget; otherwise start a new per-control
+        # budget here. Each call collects its own span, never a cached receipt.
+        started = self._scroll_returned if self._scroll_returned is not None else time.monotonic()
+        deadline = started + 15
+        signature, first, previous, count = None, None, None, 0
+        while time.monotonic() < deadline:
+            state = self.read()
+            current, pulse_nodes = native_ui.protected_signature(state, label, stage,
+                hero_id=hero_id, allow_offscreen=scroll, include_pulse_nodes=True)
+            changed = signature != current
+            if previous is not None and not changed:
+                # Equal structural signatures prove every protected field is
+                # identical except pulse bit 2 and rev4 descendant leaf flags.
+                # Only pulse-maskable nodes are logged as PULSE_0x2 below.
+                # This is historical
+                # evidence, NOT a receipt: no freshness checks until the final
+                # adjacent qualify_pair and the single revalidation below.
+                pulses = [{**d, 'classification': 'PULSE_0x2', 'xor': 2, 'changed_bits': [1]}
+                          for d in native_ui.tree_differences(previous, state)
+                          if d['address'] in pulse_nodes]
+                if pulses:
+                    self.record('PULSE_0x2', label=label, differences=pulses,
+                        before_started=previous['host_read_started'], before_ended=previous['host_read_ended'],
+                        after_started=state['host_read_started'], after_ended=state['host_read_ended'])
+            if changed:
+                first, count = state['host_read_started'], 0
+            count += 1
+            span = state['host_read_started'] - first
+            self.record('DRAFT_CONTROL_WINDOW', native=state, label=label, scroll=scroll,
+                protected_signature=current, restarted=changed, reads=count, span_s=span,
+                scroll_returned=self._scroll_returned, window_started=started, deadline=deadline)
+            if time.monotonic() >= deadline:
+                break
+            if count >= 28 and span >= 3.888:
+                # Last two adjacent reads belong to the identical-signature
+                # window. Old span endpoints are NEVER qualified as receipts.
+                receipt = native_ui.qualify_pair(previous, state, label, stage,
+                    hero_id=hero_id, allow_offscreen=scroll)
+                self.record('CONTROL_PAIR', receipt=receipt, before=previous, after=state)
+                self._scroll_returned = None
+                return state, receipt
+            signature, previous = current, state
+        raise ValueError(f'{stage}: structural window exhausted 15s budget; no input')
+
+    def act(self, label, stage, *, hero_id=None, scroll=False, transition=False):
+        if pending := getattr(self, '_transition_pending', None):
+            raise ValueError(f'{stage}: input refused; prior transition {pending} not yet qualified')
         with self.input_window():
             health = self.health()
             state, receipt = self.control_pair(label, stage, hero_id=hero_id, scroll=scroll)
@@ -340,6 +584,7 @@ class NonvisualEntry:
             self.record(stage, input_receipt=receipt, health=health, host_window=host, wall_before=before)
             if scroll:
                 self.d.adb.swipe(*start, *end, duration_ms=500)
+                self._scroll_returned = time.monotonic()
             else:
                 x, y = receipt['center']
                 self.d.adb.swipe(x, y, x, y, duration_ms=180)
@@ -355,7 +600,11 @@ class NonvisualEntry:
                         context_stable=(after_a['root'] == after_b['root']
                             and native_ui.screen_context(after_a) == native_ui.screen_context(after_b)))
             if 'UNKNOWN' in (native_ui.screen(after_a), native_ui.screen(after_b)):
-                raise ValueError(f'{stage}: unknown post-input screen; no further gestures')
+                if not transition or 'Settings' in after_a['labels'] or 'Settings' in after_b['labels']:
+                    raise ValueError(f'{stage}: unknown post-input screen; no further gestures')
+                self.record('POST_INPUT_TRANSIENT', input_stage=stage, label=label, before=after_a, after=after_b,
+                            reason='post-input UNKNOWN deferred to bounded wait_screen')
+                self._transition_pending = stage
         return before, receipt
 
     def poll_wire(self):
@@ -378,6 +627,7 @@ class NonvisualEntry:
         if not matching:
             return None
         tail, binding = matching[0]
+        self.binding = binding
         self.d.tail, self.d.connection = tail, binding['connection']
         self.record('WORLD_BINDING' if world else 'DRAFT_BINDING', guest=self.guest,
                     device_serial=self.d.adb.serial, binding=binding, wire_trace=str(tail.path))
@@ -465,7 +715,7 @@ class NonvisualEntry:
             self.wait_screen('MENU', 'MENU')
             for label, stage, target in (('PLAY', 'MENU', 'MODE'), ('SOLO BOTS', 'MODE', 'MAP'),
                                          ('3V3', 'MAP', 'DIFFICULTY')):
-                self.act(label, stage)
+                self.act(label, stage, transition=True)
                 try:
                     transition = self.wait_screen(target, stage)
                 except ValueError as exc:
@@ -477,7 +727,7 @@ class NonvisualEntry:
                 if label == 'PLAY' and self.plan.get('require_background_play'):
                     self.record('BACKGROUND_PLAY_PROOF', consumed=True, native=transition,
                                 server_acceptance='pending ordinary joinLobby after mode/map/difficulty')
-            before, _ = self.act('VERY EASY', 'DIFFICULTY')
+            before, _ = self.act('VERY EASY', 'DIFFICULTY', transition=True)
             def joined():
                 rows = [r for r in self.rpc_rows() if r.get('t', 0) >= before and r.get('method') == 'joinLobby'
                         and r.get('device_tag') == self.device['device_tag']
@@ -499,8 +749,10 @@ class NonvisualEntry:
             self.select()
             if self.draft_observation_reads:
                 self.observe_draft_only()
+            if self.mixed is not None:
+                self.mixed.hold(self, draft)
             self.admission()
-            before, _ = self.act('LOCK IN', 'DRAFT')
+            before, _ = self.act('LOCK IN', 'DRAFT', transition=True)
             self.record('LOCK_INPUT', server_acceptance=self.wait('1123 lock acknowledgment',
                 lambda: self.server_ops([1123], before)))
             self.wait_screen('LOCKED', 'DRAFT')
@@ -512,22 +764,21 @@ class NonvisualEntry:
             if (world['eid'], world['slot'], world['match_id']) != (draft['eid'], draft['slot'], draft['match_id']):
                 raise ValueError('WORLD: owner/slot/match changed at draft handoff')
             self.wait('WORLD: ready echo', lambda: self.server_ops([1137], before))
-            # Qualified panel control, never the legacy build/back gesture.
+            # Never the ungated roster-era BACK (before-run-04/07). A fresh
+            # WORLD BUILD title may gate one BACK: retained movement-consumer
+            # short-patched-guarded and reference-oracle ce-short-second/fourth
+            # reach HUD afterward (run-1791786914358-020cdcb8/PHASE1.md).
             state = self.wait('loading/build/native HUD', lambda: self._ready_screen())
-            if native_ui.screen(state) == 'BUILD':
-                self.act('OPEN SHOP', 'BUILD')
-                self.wait_screen('SHOP', 'BUILD')
-                # Shop's identified native CLOSE label must be present; never
-                # replace a missing control with a guessed screen coordinate.
-                self.act(self.plan.get('shop_close_label', 'CLOSE'), 'SHOP')
-                self.wait_screen('HUD', 'SHOP')
-            self.d._guard_nonvisual_movement_ui(self.observer, state_reader=self.read)
+            self.leave_build(state)
+            self.d._guard_nonvisual_movement_ui(self.observer, dismiss_build=True, state_reader=self.read)
             eid, slot, hero = self.d._qualify_nonvisual_world({'hero_id': self.hero})
             self.d.profile['local_player_eid'] = eid
             self.record('QUALIFIED_WORLD', eid=eid, slot=slot, hero_id=hero, connection=self.d.connection,
                         native=self.read(), provenance=self.d.provenance_frame())
             self.d.observations['entry_binding'] = {'guest': self.guest, 'draft': draft, 'world': world,
                                                    'device_serial': self.d.adb.serial}
+            if self.mixed is not None:
+                self.record('MIXED_WORLD_RELEASE', receipt=self.mixed.publish(world, self.events[-1]))
             self.d.stage('SETUP', 'PASS', 'ordinary nonvisual menu/draft -> identity-bound WORLD with native HUD')
         except ClientStageFailure:
             raise
@@ -537,6 +788,37 @@ class NonvisualEntry:
             self.java.stop()
             self.observer.stop()
             self.d.artifact(self.d.out_dir / 'entry-stages.jsonl')
+
+    def leave_build(self, state):
+        """Dismiss only a freshly identified BUILD, or use the explicit shop plan."""
+        if native_ui.screen(state) == 'HUD':
+            return
+        native_ui.complete_tree(state)
+        if native_ui.screen(state) != 'BUILD':
+            raise ValueError(f'BUILD exit: unexpected native screen {native_ui.screen(state)}')
+        if 'shop_close_label' not in self.plan:
+            self.d._guard_nonvisual_movement_ui(self.observer, dismiss_build=True, state_reader=self.read)
+            return
+        # No default: retained 4j SHOP trees qualify neither Shop nor Item Shop.
+        # CLOSE is unevidenced and remains available only as an explicit
+        # shop_close_label plan option, still subject to ordinary act guards.
+        label = self.plan.get('shop_close_label')
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError('BUILD: no evidence-qualified shop exit candidate; no shop input')
+        self.act('OPEN SHOP', 'BUILD', transition=True)
+        self.wait_screen('SHOP', 'BUILD')
+        self.act(label, 'SHOP')
+        # Unlike a generic transition wait, any non-HUD outcome is terminal.
+        before = self.read()
+        after = self.read()
+        for current in (before, after):
+            native_ui.complete_tree(current)
+            if native_ui.screen(current) != 'HUD':
+                self.record('BUILD_EXIT_REFUSED', native=current)
+                raise ValueError(f'SHOP exit: expected HUD, got {native_ui.screen(current)}')
+        if before['root'] != after['root'] or native_ui.screen_context(before) != native_ui.screen_context(after):
+            raise ValueError('SHOP exit: HUD pair changed')
+        self.record('BUILD_EXIT_HUD', before=before, after=after)
 
     def _ready_screen(self):
         before, state = self.read(), self.read()

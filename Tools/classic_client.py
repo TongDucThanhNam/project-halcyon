@@ -13,6 +13,236 @@ import time
 
 from Tools.Teardown.client_projection import world_to_screen
 
+PICK_CLEARANCE_WORLD = 1.5
+
+
+def mixed_pick_risk(camera, destination, xy, actors):
+    """Pick geometry may extend offscreen; the actual tap stays central-guarded."""
+    from server.hitboxes import segment_distance
+    def clip(xyz):
+        vector = list(xyz)+[1]
+        for matrix in (camera['view'], camera['projection']):
+            vector = [sum(matrix[4*j+i]*vector[j] for j in range(4)) for i in range(4)]
+        return vector
+    def project(vector, minimum_w=1e-6):
+        if vector[3] <= minimum_w:
+            return None  # A capsule wholly behind the camera cannot be picked.
+        return ((vector[0]/vector[3]+1)*camera['dimensions'][0]/2,
+                (1-vector[1]/vector[3])*camera['dimensions'][1]/2)
+    for actor in actors:
+        ground = actor['position_xyz']
+        center = actor['selection_center_xyz']
+        top = [center[0], center[1]+.5*actor['selection_height'], center[2]]
+        horizontal = [center[0]+PICK_CLEARANCE_WORLD, center[1], center[2]]
+        anchors = list(map(clip, (ground, top, center, horizontal)))
+        ground_xy, top_xy, center_xy, horizontal_xy = (project(v, 0) for v in anchors)
+        p = camera['projection']
+        perspective = (all(math.isfinite(v) for v in p) and p[0] > 0 and p[5] > 0
+                       and p[10] < -1 and p[11] == -1 and p[14] < 0
+                       and all(p[i] == 0 for i in (1, 2, 3, 4, 6, 7, 12, 13, 15)))
+        n = p[14]/(p[10]-1) if perspective else float('nan')
+        branch = 'all-projected'
+        if perspective and math.isfinite(n) and n > 0 and all(v[3] >= n for v in anchors):
+            r_px = math.dist(center_xy, horizontal_xy)
+            capsule = segment_distance(xy, ground_xy, top_xy) <= r_px
+        else:
+            r_px, capsule = None, True  # Unknown capsule is not permission to tap.
+            branch = 'unknown'
+            if perspective:
+                if math.isfinite(n) and n > 0:
+                    branch = 'clipped'
+                    a, b = sorted(anchors[:2], key=lambda v: v[3])
+                    r_px, capsule = 0, False
+                    if b[3] >= n:
+                        if a[3] < n:
+                            t = (n-a[3])/(b[3]-a[3])
+                            a = [x+t*(y-x) for x, y in zip(a, b)]
+                            a[3] = n
+                        r_px = PICK_CLEARANCE_WORLD*p[0]*camera['dimensions'][0]/2/a[3]
+                        capsule = segment_distance(xy, project(a, 0), project(b, 0)) <= r_px
+        near = math.dist(destination, (ground[0], ground[2])) < PICK_CLEARANCE_WORLD
+        if near or capsule:
+            return dict(actor_eid=actor['eid'], destination=destination, screen_point=xy,
+                        r_px=r_px, reason='world clearance' if near else 'screen pick capsule', branch=branch,
+                        position_xyz=ground, selection_center_xyz=center, selection_height=actor['selection_height'],
+                        camera={k: camera[k] for k in ('view', 'projection', 'dimensions')},
+                        clip_w=dict(zip(('ground', 'top', 'center', 'horizontal'), (v[3] for v in anchors))))
+    return None
+
+
+def wire_payload_hex(payload):
+    """Server traces precede encryption; socket receipts retain cipher padding."""
+    raw = bytes.fromhex(payload)
+    return (raw + bytes((-2-len(raw)) % 8)).hex()
+
+
+def participant_receipt_binding(receipt, peer_records, records, expected):
+    """Bind a peer generation to its ordinary handshake and server identity.
+
+    Never pin the initial connection across reconnect, or accept another log
+    merely because every peer receives the same broadcast damage payload.
+    """
+    generation, at = receipt.get('generation'), receipt.get('wall_time', 0)
+    if type(generation) is not int or generation < 1:
+        return None
+    identities = [r for r in records if r.get('direction') == 'identity'
+                  and r.get('identity') == expected['identity']]
+    identities.sort(key=lambda r: r['time'])
+    if len(identities) < generation:
+        return None
+    identity = identities[generation-1]
+    keys = ('identity', 'eid', 'slot', 'team', 'match_id')
+    if (any(identity.get(k) != expected[k] for k in keys) or identity['time'] > at
+            or len({r['connection'] for r in identities}) != len(identities)
+            or any(r['time'] <= at for r in identities[generation:])):
+        return None
+    # New logs carry these fields; old retained logs are bound below through
+    # their 1000/1001/1011 handshake, not through an invented identity label.
+    if any(k in receipt and receipt[k] != expected[k] for k in keys):
+        return None
+    rows = [r for r in peer_records if r.get('generation') == generation and r.get('wall_time', 0) <= at]
+    joins = [r for r in rows if r.get('direction') == 'c2s' and r.get('opcode') == 1000]
+    owners = [r for r in rows if r.get('direction') == 's2c' and r.get('opcode') == 1001]
+    blocks = [r for r in rows if r.get('direction') == 's2c' and r.get('opcode') == 1011
+              and len(r.get('payload_hex', '')) >= 24
+              and int(r['payload_hex'][16:24], 16) == expected['eid']]
+    if len(joins) != 1 or len(owners) != 1 or len(blocks) != 1:
+        return None
+    join = bytes.fromhex(joins[0]['payload_hex']).split(b'\0', 1)[0]
+    owner, block = bytes.fromhex(owners[0]['payload_hex']), bytes.fromhex(blocks[0]['payload_hex'])
+    if (join != expected['identity'].encode('ascii') or len(owner) < 4 or len(block) < 746
+            or int.from_bytes(owner[:4], 'big') != expected['eid']
+            or int.from_bytes(block[12:16], 'big') != expected['team'] or block[745] != expected['slot']):
+        return None
+    # Match both bootstrap receipts byte-for-byte (including canonical padding)
+    # on this connection. Identity/EID reuse in another match cannot qualify.
+    for peer in (owners[0], blocks[0]):
+        anchors = [r for r in records if r.get('connection') == identity['connection']
+                   and r.get('direction') == 's2c' and r.get('opcode') == peer['opcode']
+                   and r.get('time', 0) <= at
+                   and wire_payload_hex(r.get('payload', '')) == peer['payload_hex']]
+        if len(anchors) != 1:
+            return None
+    return {k: identity[k] for k in (*keys, 'connection')} | {'generation': generation}
+
+
+def native_damage_window(before, after, records, *, connection, source, victim,
+                         participant_records, participant_binding, require_basic_input=False):
+    """Conservative time-bracketed correlation, not a server-output oracle.
+
+    Replay *all* resource deltas onto the measured native baseline, including
+    regen/healing and barrier/fortified absorption. Reject ambiguous lifetimes,
+    read-boundary events, implicit growth, other attackers and missing peer
+    receipts. Float32 accumulation error is bounded from the actual operands;
+    it is not a gameplay tolerance. Unknown windows remain UNVERIFIED.
+    """
+    from collections import Counter
+    from Tools.protocol_observer import Actor, Observer
+    result = {'classification': 'missing input', 'source': source, 'victim': victim,
+              'before': {'actors': {victim: before['actors'].get(victim)}, 'tick': before.get('tick')},
+              'after': {'actors': {victim: after['actors'].get(victim)}, 'tick': after.get('tick')},
+              'damage': [], 'resource_events': []}
+    def unknown(reason):
+        result['unknown'] = reason
+        return result
+    a, b = before['actors'].get(victim), after['actors'].get(victim)
+    if not a or not b:
+        return unknown('native actor missing')
+    start, end = a['host_before'], b['host_after']
+    if not start <= a['host_after'] < b['host_before'] <= end or end-start > 5:
+        return unknown('native sampling bracket invalid or longer than five seconds')
+    fields = ('hp', 'max_hp', 'barrier', 'fortified')
+    if any(type(r.get(k)) not in (int, float) or not math.isfinite(r[k]) or r[k] < 0
+           for r in (a, b) for k in fields):
+        return unknown('native resource values invalid')
+    if (any(r.get('eid') != victim or type(r.get('generation')) is not int for r in (a, b))
+            or a['generation'] != b['generation'] or a['max_hp'] != b['max_hp']):
+        return unknown('native lifetime/max HP changed')
+    rows = [r for r in records if r.get('connection') == connection and start <= r.get('time', 0) <= end]
+    damage, resource = [], []
+    for r in rows:
+        if r.get('direction') != 's2c':
+            continue
+        op, p = r.get('opcode'), bytes.fromhex(r.get('payload', ''))
+        if len(p) < 4 or int.from_bytes(p[:4], 'big') != victim:
+            continue
+        if op in (1052, 1076, 1072, 1074, 1035):
+            return unknown('implicit growth/lifecycle change inside measurement')
+        if op == 1054:
+            if len(p) < 12:
+                return unknown('truncated damage payload')
+            delta = struct.unpack_from('>f', p, 8)[0]
+            if not math.isfinite(delta):
+                return unknown('nonfinite damage')
+            if delta < 0:
+                damage.append(r)
+            resource.append(r)
+        elif op == 1053:
+            if len(p) < 9:
+                return unknown('truncated resource payload')
+            if p[8] in (0, 4, 5):
+                if not math.isfinite(struct.unpack_from('>f', p, 4)[0]):
+                    return unknown('nonfinite resource delta')
+                resource.append(r)
+    selected = [r for r in damage if int(r['payload'][8:16], 16) == source]
+    result.update(damage=selected, resource_events=resource)
+    if not selected:
+        return unknown('no source-bound 1054 in native bracket')
+    result['classification'] = 'authoritative outcome observed; CE-native effect unverified'
+    if any(r['time'] <= a['host_after'] or r['time'] >= b['host_before'] for r in resource):
+        return unknown('resource event overlaps native accessor read')
+    if len(selected) != len(damage):
+        return unknown('other attackers confound HP attribution')
+    expected = Counter(wire_payload_hex(r['payload']) for r in selected)
+    peer = [r for r in participant_records if r.get('direction') == 's2c' and r.get('opcode') == 1054
+            and start <= r.get('wall_time', 0) <= end and r.get('payload_hex') in expected]
+    if Counter(r['payload_hex'] for r in peer) != expected:
+        return unknown('participant damage receipts absent/ambiguous in same bracket')
+    bindings = [participant_receipt_binding(r, participant_records, records, participant_binding) for r in peer]
+    if not all(bindings):
+        return unknown('participant receipt identity/generation/bootstrap absent or ambiguous')
+    result['participant_receipts'] = peer
+    result['participant_receipt_bindings'] = bindings
+    if require_basic_input:
+        first = selected[0]['time']
+        inputs = [r for r in records if r.get('connection') == connection and r.get('direction') == 'c2s'
+                  and r.get('opcode') == 1060 and len(r.get('payload', '')) == 12
+                  and int(r['payload'][:8], 16) == victim and r['time'] <= first]
+        if not inputs:
+            return unknown('CE ordinary 1060 not observed')
+        request = inputs[-1]
+        intervening = [r for r in records if r.get('connection') == connection and r.get('direction') == 'c2s'
+                       and request['time'] < r['time'] <= first and r.get('opcode') in (1012, 1060, 1041, 1042)]
+        attacks = [r for r in records if r.get('connection') == connection and r.get('direction') == 's2c'
+                   and r.get('opcode') == 1045 and r.get('payload', '')[:16] == struct.pack('>II', source, victim).hex()
+                   and request['time'] <= r['time'] <= first]
+        if intervening or not attacks:
+            return unknown('basic input superseded or attack start unobserved')
+        result.update(request=request, attack_start=attacks[-1])
+    observer = Observer()
+    actor = Actor(victim, 'hero', 0, 0, hp=a['hp'], max_hp=a['max_hp'],
+                  barrier=a['barrier'], fortified=a['fortified'])
+    observer.bind(actor)
+    # A conservative sum of one float32 rounding unit per operation, scaled by
+    # the largest actual operand. No latency or unmeasured regen allowance.
+    scale = max(a['max_hp'], a['barrier'], a['fortified'], 1)
+    for r in resource:
+        payload = bytes.fromhex(r['payload'])
+        delta = struct.unpack_from('>f', payload, 8 if r['opcode'] == 1054 else 4)[0]
+        scale = max(scale, abs(delta))
+        observer.consume(r['opcode'], payload)
+        if actor.hp > actor.max_hp:
+            return unknown('healing at cap has unqualified clamping order')
+    tolerance = (len(resource)*8+2)*scale*2**-23
+    result.update(predicted={k: getattr(actor, k) for k in ('hp', 'barrier', 'fortified')},
+                  numeric_tolerance=tolerance, native_hp_drop=a['hp']-b['hp'])
+    if any(abs(getattr(actor, k)-b[k]) > tolerance for k in ('hp', 'barrier', 'fortified')):
+        return unknown('native resource delta does not reconcile with complete wire window')
+    if a['hp'] <= b['hp']:
+        return unknown('no measured native HP drop (absorption/regen may mask it)')
+    result['classification'] = 'authoritative outcome + measured CE-native effect'
+    return result
+
 
 def central_projection(camera, xyz):
     """Never let a world action hit persistent HUD controls."""
@@ -73,6 +303,24 @@ def path_step(mesh, origin, goal, distance=4.0):
         distance -= length
         previous = point
     return tuple(previous)
+
+
+# A float interpolation along an on-mesh route can quantize just outside an
+# edge (C 4m: 1.32e-6 units). Snap only within this bound; a larger gap is a
+# genuinely off-mesh goal and still raises.
+ON_MESH_CLICK_TOLERANCE = 1e-3
+
+
+def on_mesh_click(mesh, point):
+    """Return (point, height, snapped_distance) for a click endpoint on the owned mesh."""
+    try:
+        return tuple(point), mesh.height_at(point), 0.0
+    except ValueError:
+        snapped = tuple(mesh.nearest_point(point))
+        gap = math.dist(point, snapped)
+        if gap > ON_MESH_CLICK_TOLERANCE:
+            raise
+        return snapped, mesh.height_at(snapped), gap
 
 
 def lane_goal(origin, objective, team):
@@ -136,6 +384,9 @@ class ClassicMatchExercise:
         self.ability_counts = dict(A=0, B=0, C=0)
         self.pending_recall = None
         self.last_recall_attempt = -math.inf
+        self.mixed_team = None
+        self.mixed_respawn = None
+        self.mixed_rendezvous = None
 
     @staticmethod
     def require(ok, stage, detail):
@@ -284,23 +535,65 @@ class ClassicMatchExercise:
             else:
                 return camera, self.observer.actor_states(eids)
 
-    def move(self, camera, origin, goal):
+    def move(self, camera, origin, goal, *, pick_eids=None):
         # Shorten only before input if a projected point is outside the proven
         # playfield. Never retry a swallowed or rejected click.
+        actors, risks = [], []
+        if self.mixed_team is not None:
+            self.require(pick_eids is not None and self.eid in pick_eids and len(pick_eids) <= 200,
+                         'SETUP', 'native target registry missing or bound exceeded')
+            native = self.observer.actor_states(pick_eids)
+            self.require(not native['missing'], 'SETUP', 'mixed pick-safety actors unavailable')
+            actors = native['actors']
         for length in (4.0, 2.0, 1.0):
-            point = path_step(self.mesh, origin, goal, length)
-            xyz = [point[0], self.mesh.height_at(point), point[1]]
+            destination = (goal if self.mixed_team is not None and math.dist(origin, goal) <= 1e-3
+                           else path_step(self.mesh, origin, goal, length))
+            point, height, snapped = on_mesh_click(self.mesh, destination)
+            xyz = [point[0], height, point[1]]
             try:
                 xy = central_projection(camera, xyz)
-                break
             except ValueError:
                 if length == 1.0:
                     raise
+                continue
+            risk = mixed_pick_risk(camera, point, xy, actors)
+            if risk is None:
+                break
+            risks.append(dict(at=time.time(), **risk, input_submitted=False))
+        else:
+            self.d.observations.setdefault('mixed_pick_holds', []).extend(risks)
+            self.last_action = time.monotonic()
+            self.mixed_pick_hold_until = self.last_action+1.2
+            return
+        if self.mixed_team is not None:
+            from Tools.protocol_policy import mixed_structure_zones
+            route = self.mesh.find_path(origin, point)
+            if not route and math.dist(origin, point) <= 1e-3 and self.mesh.contains(origin):
+                route = [point]
+            self.require(bool(route), 'SETUP', 'mixed movement route unavailable before input')
+            previous, zones = origin, []
+            for step in route:
+                zones.extend(mixed_structure_zones(step, teams=(3-self.mixed_team,), start=previous))
+                previous = step
+            if zones:
+                self.mixed_hold('movement route enters enemy structure zone', origin, goal, zones)
+                return
         before = time.time()
-        self.d.gesture('classic-move-attempt', screen_xy=xy, world_xyz=xyz, camera=camera, wall_before=before)
+        self.d.gesture('classic-move-attempt', screen_xy=xy, world_xyz=xyz, camera=camera, wall_before=before,
+                       on_mesh_snap=snapped)
         self.d.adb.tap(*xy)
         self.d.stage('UI_COMMAND_SUBMITTED', 'PASS', 'ordinary projected movement submitted')
-        request = self.receipt('c2s', 1012, lambda r: True, before, 'CLIENT_INPUT_OBSERVED')
+        request = self.receipt('c2s', 1012, lambda r: True, before, 'CLIENT_INPUT_OBSERVED', allow_missing=True)
+        if request is None:
+            picks = [r for r in self.d.tail.records if self.d._on_connection(r)
+                     and r.get('direction') == 'c2s' and r.get('opcode') == 1060 and r['time'] >= before]
+            if picks:
+                pick = picks[0]
+                self.d.observations.setdefault('move_pick_misfires', []).append(pick)
+                self.require(False, 'CLIENT_INPUT_OBSERVED',
+                    f'move tap consumed as native pick (1060 target {int(pick["payload"][:8], 16)})')
+            self.require(False, 'CLIENT_INPUT_OBSERVED',
+                         'ordinary action missing matching c2s 1012; no blind retry')
         from server.roster import MOVE_INTENT_PAYLOAD_SIZE
         ack = self.receipt('s2c', 1016, lambda r: len(r['payload']) == MOVE_INTENT_PAYLOAD_SIZE*2 and r['payload'][:2] == f'{self.slot:02x}',
                            request['time'], 'SERVER_ACKNOWLEDGED')
@@ -587,7 +880,285 @@ class ClassicMatchExercise:
                      'ordinary Recall has no qualified completion/interruption; no retry')
         return True
 
+    def mixed_hold(self, reason, origin, goal, zones):
+        self.d.observations.setdefault('mixed_holds', []).append(
+            {'at': time.time(), 'reason': reason, 'owner': origin, 'target': goal,
+             'zones': zones, 'input_submitted': False})
+
+    def mixed_respawn_ready(self, owner, native_hp, at):
+        """Read-only settle; retained successes: >=4 alive samples, >=2.74s.
+
+        Faster retained moves also succeeded: this is a conservative measured
+        precondition, not proof that delay caused the prior unacknowledged move.
+        Camera centring is checked separately on the final fresh camera read.
+        """
+        if not owner['alive'] or native_hp <= 0:
+            if self.mixed_respawn is None:
+                self.mixed_respawn = {'death_observed_at': at, 'dead_samples': 0}
+            self.mixed_respawn.update(first_alive_at=None, alive_samples=0)
+            self.mixed_respawn['dead_samples'] += 1
+            self.last_target = None
+            return False
+        if self.mixed_respawn is None:
+            return True
+        pending = self.mixed_respawn
+        if pending['first_alive_at'] is None:
+            pending['first_alive_at'] = at
+        pending['alive_samples'] += 1
+        pending['elapsed_s'] = at-pending['first_alive_at']
+        ready = pending['alive_samples'] >= 4 and pending['elapsed_s'] >= 2.74
+        self.d.observations.setdefault('mixed_respawn_settles', []).append(
+            {'at': at, **pending, 'stage': 'camera pending' if ready else 'waiting for alive settle',
+             'input_submitted': False})
+        return ready
+
+    def mixed_respawn_camera_ready(self, camera, me):
+        if self.mixed_respawn is None:
+            return True
+        # The eleven retained centred-camera successes project the owner to
+        # (480, 246.242) at 960x540. The boot-2 failed move projected to (325.726,
+        # 224.607). One pixel bounds centring, not gameplay outcome tolerance.
+        central_projection(camera, me['position_xyz'])
+        projected = world_to_screen(camera, me['position_xyz'])
+        ready = (self.mixed_respawn['alive_samples'] >= 4 and self.mixed_respawn.get('elapsed_s', 0) >= 2.74
+                 and camera.get('eid') == me['eid']
+                 and math.dist(camera['owner_position_xyz'], me['position_xyz']) <= .01
+                 and abs(projected[0]-480) <= 1 and abs(projected[1]-246.242) <= 1)
+        self.d.observations.setdefault('mixed_respawn_settles', []).append(
+            {'at': time.time(), **self.mixed_respawn, 'stage': 'settled' if ready else 'waiting for centred camera',
+             'camera': camera, 'owner': me, 'owner_screen': projected, 'input_submitted': False})
+        if ready:
+            self.mixed_respawn = None
+        return ready
+
+    def mixed_combat_action(self, camera, me, target, *, pick_eids=None):
+        """Stage at the fixed rendezvous, then use the existing ordinary pick.
+
+        World distance alone does not prove that the actor's pick capsule is
+        inside the guarded screen rectangle. This is pre-input planning only:
+        target(), its receipts and every projection guard remain unchanged.
+        """
+        if not target.get('alive', True) or target.get('hp', 1) <= 0:
+            self.last_target = None
+        origin = tuple(me['position_xyz'][i] for i in (0, 2))
+        goal = tuple(target['position_xyz'][i] for i in (0, 2))
+        from Tools.protocol_policy import MixedRendezvous
+        self.require(self.mixed_team in (1, 2), 'SETUP', 'mixed CE team not bound')
+        if self.mixed_rendezvous is None:
+            self.mixed_rendezvous = MixedRendezvous(self.mesh)
+        rendezvous = self.mixed_rendezvous
+        stage_point = rendezvous.stage_point(self.mixed_team)
+        clean = (target.get('alive', True) and target.get('hp', 1) > 0
+                 and rendezvous.contains(origin) and rendezvous.contains(goal))
+        at = time.time()
+        outcome = self.d.observations['mixed_combat']
+        outcome.setdefault('rendezvous', rendezvous.evidence())
+        for label, point in (('ce', origin), ('participant', goal)):
+            if rendezvous.contains(point):
+                outcome.setdefault('staging_times', {}).setdefault(label, at)
+            team = self.mixed_team if label == 'ce' else 3-self.mixed_team
+            if math.dist(point, rendezvous.stage_point(team)) <= .25:
+                outcome.setdefault('stage_point_times', {}).setdefault(label, at)
+        self.d.observations.setdefault('mixed_staging', []).append(dict(at=at,
+            phase='engagement' if clean else 'staging', owner=origin, opponent=goal,
+            target_alive=target.get('alive', True)))
+        if clean:
+            outcome.setdefault('engagement_started_at', at)
+            if self.last_target == target['eid']:
+                return
+            xyz = list(target['selection_center_xyz'])
+            xyz[1] += target['selection_height'] * .5
+            try:
+                central_projection(camera, xyz)
+            except ValueError as exc:
+                if str(exc) != 'projected point outside qualified central playfield':
+                    raise
+                self.d.observations.setdefault('mixed_target_deferrals', []).append(
+                    {'at': time.time(), 'reason': str(exc), 'camera': camera,
+                     'owner': me, 'target': target, 'input_submitted': False})
+            else:
+                self.target(camera, target)
+                self.d.observations['mixed_combat']['classification'] = 'accepted; reciprocal CE-native effects pending'
+                return
+        if (not clean and rendezvous.contains(origin)
+                and math.dist(origin, stage_point) < PICK_CLEARANCE_WORLD and self.last_target is None):
+            return  # Already staged, not a hold caused by the opponent's route.
+        if ((self.last_target is not None or time.monotonic()-self.last_action >= 1.2)
+                and time.monotonic() >= getattr(self, 'mixed_pick_hold_until', 0)):
+            # No opponent-position holds during staging and no target pursuit
+            # outside the disk. Pick holds retain the ordinary action pacing.
+            rendezvous.route(origin, self.mixed_team)
+            self.move(camera, origin, stage_point, pick_eids=pick_eids)
+
+    def run_mixed(self):
+        """Opt-in bounded reciprocal exercise through the existing classic path."""
+        from collections import deque
+        from Tools.scenario_client import ANDROID_PACKAGE, TraceTail
+        from Tools.Teardown.observe_client_movement import ClientMovementObserver
+        from Tools.protocol_participants import bounded_seconds
+        from server import navigation
+        plan = self.plan['mixed_combat']
+        limit = bounded_seconds(plan.get('duration_s', 90))
+        self.require(limit >= 60, 'SETUP', 'mixed gameplay requires at least60 seconds')
+        self.require(self.plan['capture_backend'] == 'none' and not self.plan['drive_entry'],
+                     'SETUP', 'mixed exercise forbids legacy entry/capture')
+        barriers = [r for r in self.d.observations.get('nonvisual_entry', [])
+                    if r['stage'] == 'MIXED_DRAFT_READY']
+        releases = [r for r in self.d.observations.get('nonvisual_entry', [])
+                    if r['stage'] == 'MIXED_WORLD_RELEASE']
+        self.require(len(barriers) == len(releases) == 1, 'SETUP', 'mixed exercise needs qualified entry barriers')
+        assignments = barriers[0]['receipt']['assignments']
+        opponent = assignments[plan['opponent_identity']]
+        binding = self.d.observations['entry_binding']['world']
+        self.eid, self.slot, _ = self.d._qualify_nonvisual_world(self.plan)
+        self.require(opponent['team'] != binding['team'] and opponent['eid'] != self.eid,
+                     'SETUP', 'mixed opponent must be an observed enemy hero')
+        foe = opponent['eid']
+        self.mixed_team = binding['team']
+        participant_binding = {**opponent, 'identity': plan['opponent_identity'], 'match_id': binding['match_id']}
+        session = self.d.setup()
+        initial = session['snapshot']
+        self.mesh = navigation.load_halcyon_navmesh()
+        from Tools.protocol_policy import MixedRendezvous
+        self.mixed_rendezvous = MixedRendezvous(self.mesh)
+        self.observer = ClientMovementObserver(self.d.adb, self.d.out_dir/'mixed-native.jsonl',
+                                               self.eid, period_ms=50, model_transform=True)
+        peer = TraceTail(plan['participant_log'])
+        path = self.d.out_dir/'mixed-native-samples.jsonl'
+        receipts_path = self.d.out_dir/'mixed-receipt-windows.jsonl'
+        outcome = {'assignments': assignments, 'ce_identity': binding, 'reciprocal': {}, 'reconnect': None,
+                   'classification': 'missing input',
+                   'started_at': time.time(), 'scope': 'bounded mixed exercise; not full match or independent fidelity'}
+        self.d.observations['mixed_combat'] = outcome
+        recent, samples = deque(maxlen=12), []
+        seen_tick, progressed_at = initial['tick'], time.monotonic()
+        original_adb, bridge = self.d.adb, None
+        try:
+            if self.plan.get('input_bridge_dex'):
+                from Tools.input_bridge import InputBridge
+                bridge = InputBridge(original_adb, self.plan['input_bridge_dex'], self.d.out_dir/'ordinary-input.jsonl')
+                self.d.adb = bridge.start()
+            self.d.observations['mixed_runtime'] = self.observer.start()
+            self.d._guard_nonvisual_movement_ui(self.observer, dismiss_build=True, state_reader=self.fresh_ui_state)
+            self.d._lock_nonvisual_camera(self.observer)
+            deadline = time.monotonic()+limit
+            with path.open('x', encoding='utf-8') as log, receipts_path.open('x', encoding='utf-8') as receipt_log:
+                while time.monotonic() < deadline:
+                    self.require(not self.observer.errors, 'TRIAL_CONTINUITY', repr(self.observer.errors))
+                    self.require(self.d._foreground_package() == ANDROID_PACKAGE, 'SETUP', 'owned game lost foreground')
+                    state = self.d.qa.snapshot()
+                    owner = self.owned(state)
+                    self.require(state['phase'] == 'world' and state['match_id'] == binding['match_id']
+                                 and state['tick'] >= seen_tick, 'TRIAL_CONTINUITY', 'mixed WORLD changed/regressed')
+                    if state['tick'] > seen_tick:
+                        seen_tick, progressed_at = state['tick'], time.monotonic()
+                    self.require(time.monotonic()-progressed_at < 5, 'TRIAL_CONTINUITY', 'mixed server ticks stalled')
+                    start = time.time()
+                    resources = self.observer.resources()
+                    resources_end = time.time()
+                    actors_start = time.time()
+                    actors = self.observer.actor_states([self.eid, foe])
+                    actors_end = time.time()
+                    self.require(resources['eid'] == self.eid and not actors['missing'],
+                                 'TRIAL_CONTINUITY', 'native owner/opponent accessor unavailable')
+                    normalized = {a['eid']: {**a, 'host_before': actors_start, 'host_after': actors_end}
+                                  for a in actors['actors']}
+                    normalized[self.eid].update(**{k: resources['current'][k] for k in ('hp', 'barrier', 'fortified')},
+                                                max_hp=resources['max_hp'], host_before=start, host_after=resources_end)
+                    self.d.tail.poll()
+                    peer.poll()
+                    received = [r for r in self.d.tail.records if self.d._on_connection(r) and r.get('direction') == 's2c']
+                    self.require(received and time.time()-received[-1]['time'] < 5,
+                                 'TRIAL_CONTINUITY', 'CE stopped receiving')
+                    self.require(not any(r.get('connection') == self.d.connection and r.get('direction') == 'disconnect'
+                                         for r in self.d.tail.records), 'TRIAL_CONTINUITY', 'CE connection disconnected')
+                    row = {'at': actors_end, 'tick': state['tick'], 'actors': normalized,
+                           'resources': resources, 'native_actors': actors, 'state': state,
+                           'ce_last_received': received[-1]['time'], 'connection': self.d.connection}
+                    log.write(json.dumps(row, allow_nan=False)+'\n')
+                    log.flush()
+                    samples.append({'at': row['at'], 'tick': row['tick'], 'connection': self.d.connection,
+                                    'ce_last_received': row['ce_last_received'], 'hp': resources['current']['hp']})
+                    for previous in reversed(recent):
+                        for label, source, victim in (('participant_to_ce', foe, self.eid), ('ce_to_participant', self.eid, foe)):
+                            measured = native_damage_window(previous, row, self.d.tail.records,
+                                connection=self.d.connection, source=source, victim=victim,
+                                participant_records=peer.records, participant_binding=participant_binding,
+                                require_basic_input=(source == self.eid))
+                            receipt_log.write(json.dumps({'label': label, 'before_at': previous['at'],
+                                'after_at': row['at'], **measured}, allow_nan=False)+'\n')
+                            if measured['classification'] == 'authoritative outcome + measured CE-native effect':
+                                retained = outcome['reciprocal'].setdefault(label, [])
+                                if not retained or measured['damage'][-1]['time'] > retained[-1]['damage'][-1]['time']:
+                                    retained.append(measured)
+                            elif measured['damage']:
+                                outcome.setdefault('last_unverified', {})[label] = measured
+                    receipt_log.flush()
+                    recent.append(row)
+                    # Same ordinary native HUD, camera/projection and input receipts
+                    # as classic-match; no QA mutation or ability damage substitutes.
+                    self.d._guard_nonvisual_movement_ui(self.observer, state_reader=self.fresh_ui_state)
+                    settled = self.mixed_respawn_ready(owner, resources['current']['hp'], row['at'])
+                    if not settled or any(s['type'] in ('STUN', 'SUPPRESSION', 'ROOT') for s in owner['statuses']):
+                        self.last_target = None
+                        time.sleep(.2)
+                        continue
+                    camera, fresh = self.fresh_camera_actors([self.eid, foe])
+                    mapped = {a['eid']: a for a in fresh['actors']}
+                    self.require(not fresh['missing'], 'SETUP', 'fresh mixed target actors missing')
+                    me, target = mapped[self.eid], mapped[foe]
+                    # Native HP may retain a tiny residual on a dead actor (4q).
+                    # Authoritative lifecycle can veto a pick, never prove its
+                    # native effect. Keep the existing native receipt acceptance.
+                    target['alive'] = next(h['alive'] for h in state['heroes'] if h['eid'] == foe)
+                    if me['hp'] <= 0:
+                        self.last_target = None
+                        time.sleep(.2)
+                        continue
+                    if not self.mixed_respawn_camera_ready(camera, me):
+                        time.sleep(.2)
+                        continue
+                    pick_eids = sorted({r['eid'] for r in state['heroes']+state['nearby_creatures']
+                        if r['alive']})
+                    self.mixed_combat_action(camera, me, target, pick_eids=pick_eids)
+                    time.sleep(.2)
+            outcome['ended_at'] = time.time()
+            outcome['samples'] = samples
+            identities = [r for r in self.d.tail.records if r.get('direction') == 'identity'
+                          and r.get('identity') == plan['opponent_identity'] and r.get('match_id') == binding['match_id']]
+            self.require(len(identities) == 2 and identities[0]['connection'] != identities[1]['connection']
+                         and all(all(r[k] == opponent[k] for k in ('eid', 'slot', 'team')) for r in identities),
+                         'TRIAL_CONTINUITY', 'same-identity Ringo reconnect not proven on a new connection')
+            at = identities[1]['time']
+            prior = [r for r in samples if r['at'] < at]
+            later = [r for r in samples if r['at'] > at]
+            self.require(prior and later and later[0]['tick'] > prior[-1]['tick']
+                         and later[0]['ce_last_received'] > prior[-1]['ce_last_received']
+                         and prior[-1]['hp'] > 0 and later[0]['hp'] > 0,
+                         'TRIAL_CONTINUITY', 'CE live native/tick/receive continuity across reconnect unverified')
+            outcome['reconnect'] = {'identities': identities, 'ce_before': prior[-1], 'ce_after': later[0]}
+            self.require(all(outcome['reciprocal'].get(k) for k in ('participant_to_ce', 'ce_to_participant')),
+                         'PRESENTATION', 'reciprocal source-bound CE-native HP drops not both measured')
+            self.require(any(r['damage'][0]['time'] > at for effects in outcome['reciprocal'].values() for r in effects),
+                         'PRESENTATION', 'no resumed native effect involving Ringo after reconnect')
+            outcome['classification'] = 'authoritative outcome + measured CE-native effect'
+            for stage in ('UI_COMMAND_SUBMITTED', 'CLIENT_INPUT_OBSERVED', 'SERVER_ACKNOWLEDGED',
+                          'AUTHORITATIVE_EFFECT', 'PRESENTATION', 'TRIAL_CONTINUITY'):
+                self.d.stage(stage, 'PASS', 'bounded reciprocal mixed native/wire exercise')
+        finally:
+            outcome['samples'] = samples
+            self.d.observations['mixed_runtime'] = self.observer.stop()
+            self.d.artifact(path)
+            self.d.artifact(receipts_path)
+            self.d.artifact(self.observer.output)
+            if bridge is not None:
+                bridge.close()
+            self.d.adb = original_adb
+        return self.d.finish('PASS', observed=outcome, expected={'official_fidelity': 'UNVERIFIED', 'full_match': False})
+
     def run(self):
+        if self.plan.get('mixed_combat') is not None:
+            return self.run_mixed()
         from Tools.scenario_client import ANDROID_PACKAGE
         from Tools.Teardown.observe_client_movement import ClientMovementObserver
         from server import navigation, roster

@@ -42,6 +42,102 @@ def wire_binding(connection=7, identity='guest-a', eid=1500, slot=0, team=1, at=
             {'time': at+1, 'direction': 's2c', 'opcode': 1118, 'payload': '00000109', 'connection': connection}]
 
 
+class MixedCoordinationTests(unittest.TestCase):
+    def setUp(self):
+        from Tools import protocol_participants as pp
+        from server.test.test_protocol_participants import mixed_declaration, mixed_snapshot
+        self.output = pp.new_output()
+        self.plan = {'mixed_draft_ready': str(self.output/'mixed-draft-ready.json'),
+                     'mixed_world_release': str(self.output/'release.json'),
+                     'mixed_timeout_s': .01, 'not_before': time.time()-2}
+        self.hook = entry.MixedCoordination(self.plan)
+        self.binding = dict(identity='test-skye', eid=1500, slot=0, team=1, connection=17, match_id=pp.MATCH_ID)
+        payload = mixed_snapshot(mixed_declaration()).hex()
+        self.rows = [{'connection': 17, 'direction': 's2c', 'opcode': 1113,
+                      'time': time.time()-1, 'payload': payload}]
+        assignments = {r['identity']: r for r in pp.selections(bytes.fromhex(payload))}
+        self.receipt = {'match_id': pp.MATCH_ID, 'not_before': self.plan['not_before'],
+            'verified_at': time.time(), 'assignments': assignments,
+            'streams': [{'identity': i, 'snapshot': {'direction': 's2c', 'opcode': 1113,
+                        'wall_time': time.time()-1, 'payload_hex': payload}}
+                        for i in assignments if i != 'test-skye']}
+
+    def test_receipt_requires_match_start_all_six_and_current_ce_snapshot(self):
+        self.assertEqual(self.hook.validate(self.receipt, self.binding, self.rows)['eid'], 1500)
+        for field, value in (('match_id', 'old'), ('not_before', 0), ('verified_at', float('nan')),
+                             ('verified_at', time.time()+100), ('streams', [])):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.hook.validate({**self.receipt, field: value}, self.binding, self.rows)
+        for change in ({'hero_id': 0xffff}, {'identity': 'other'}, {'flags': 0}, {'team': 1}, {'slot': 0}):
+            bad = copy.deepcopy(self.receipt)
+            bad['assignments']['test-ringo'].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.hook.validate(bad, self.binding, self.rows)
+        with self.assertRaisesRegex(ValueError, 'no current'):
+            self.hook.validate(self.receipt, self.binding, [])
+        changed = copy.deepcopy(self.receipt)
+        changed['streams'][0]['snapshot']['payload_hex'] = '00'
+        with self.assertRaises(Exception):
+            self.hook.validate(changed, self.binding, self.rows)
+
+    def test_bounded_hold_no_ui_reads_and_atomic_owner_bound_release(self):
+        e = Mock(d=Mock(tail=Mock(records=self.rows)))
+        e.timeout = .01
+        e.wait = entry.NonvisualEntry.wait.__get__(e)
+        with self.assertRaisesRegex(ValueError, 'bounded wait'):
+            self.hook.hold(e, self.binding)
+        e.read.assert_not_called()
+        e.act.assert_not_called()
+        self.hook.ready.write_text(json.dumps(self.receipt), encoding='utf-8')
+        self.hook.hold(e, self.binding)
+        qualified = {'stage': 'QUALIFIED_WORLD', 'at': time.time(), 'eid': 1500,
+                     'slot': 0, 'hero_id': 265, 'connection': 17}
+        for change in ({'connection': 18}, {'eid': 1517}, {'team': 2}):
+            with self.assertRaisesRegex(ValueError, 'owner changed'):
+                self.hook.publish({**self.binding, **change}, qualified)
+        self.assertFalse(self.hook.release.exists())
+        result = self.hook.publish(self.binding, qualified)
+        self.assertEqual(json.loads(self.hook.release.read_text()), result)
+        self.assertFalse(list(self.output.glob('*.pending')))
+        with self.assertRaisesRegex(ValueError, 'already exists'):
+            self.hook.publish(self.binding, qualified)
+
+    def test_explicit_bisection_composition_is_slot_exact_and_default_still_refuses_it(self):
+        from Tools import protocol_participants as pp
+        from server.test.test_protocol_participants import mixed_declaration, mixed_snapshot
+        declaration = mixed_declaration(evidenced=True)
+        heroes = [r['hero'] for _, r in sorted(zip(pp.SLOTS, declaration['real_clients']+declaration['participants']))]
+        hook = entry.MixedCoordination({**self.plan, 'mixed_heroes_by_slot': heroes})
+        payload = mixed_snapshot(declaration).hex()
+        receipt = copy.deepcopy(self.receipt)
+        receipt['assignments'] = {r['identity']: r for r in pp.selections(bytes.fromhex(payload))}
+        for stream in receipt['streams']:
+            stream['snapshot']['payload_hex'] = payload
+        rows = [{**self.rows[0], 'payload': payload}]
+        self.assertEqual(hook.validate(receipt, self.binding, rows)['eid'], 1500)
+        with self.assertRaisesRegex(ValueError, 'all six'):
+            self.hook.validate(receipt, self.binding, rows)
+        # The same six heroes in different slots are not the declared bisection.
+        swapped = list(heroes)
+        swapped[1], swapped[3] = swapped[3], swapped[1]
+        wrong = entry.MixedCoordination({**self.plan, 'mixed_heroes_by_slot': swapped})
+        with self.assertRaisesRegex(ValueError, 'all six'):
+            wrong.validate(receipt, self.binding, rows)
+        for invalid in (heroes[:5], ['Skye']*6, ['Ringo']+heroes[1:], ['Ardan']+heroes[1:], 'Skye', [None]*6):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                entry.MixedCoordination({**self.plan, 'mixed_heroes_by_slot': invalid})
+
+    def test_stale_files_paths_and_unbounded_wait_refused_before_input(self):
+        for value in (0, -1, 601, float('nan'), float('inf')):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                entry.MixedCoordination({**self.plan, 'mixed_timeout_s': value})
+        with self.assertRaisesRegex(ValueError, 'under Local/evidence'):
+            entry.MixedCoordination({**self.plan, 'mixed_draft_ready': 'outside.json'})
+        self.hook.ready.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'initially absent'):
+            entry.MixedCoordination(self.plan)
+
+
 class NativeReceiptTests(unittest.TestCase):
     def test_active_label_has_code_qualified_click_ancestor(self):
         state = tree()
@@ -133,6 +229,203 @@ class NativeReceiptTests(unittest.TestCase):
             ui.fresh_ui_state(observer, gaps.append)
         self.assertEqual(len(gaps), 20)
         self.assertEqual(observer.ui_state.call_count, 20)
+
+
+class DraftDifficultyValueTests(unittest.TestCase):
+    def waiting(self, value='HARD'):
+        labels = sorted(ui.DRAFT_WAIT_MARKERS) + ['Skye', value]
+        return {'labels': labels, 'nodes': [
+            {'address': 'panel', 'parent': 'root'},
+            *({'address': str(i), 'text': label, 'parent': 'panel'}
+              for i, label in enumerate(labels))]}
+
+    def test_observed_value_direct_sibling_is_read_only_draft_wait(self):
+        state = self.waiting()
+        self.assertEqual(ui.DRAFT_DIFFICULTY_VALUES, {'HARD'})
+        self.assertEqual(ui.screen(state), 'DRAFT_WAIT')
+        for expected in ('DRAFT', 'DRAFT_WAIT'):
+            with self.subTest(expected=expected), self.assertRaisesRegex(ValueError, 'read-only transition'):
+                ui.control_receipt(state, 'LOCK IN', expected)
+        with self.assertRaisesRegex(ValueError, 'read-only transition'):
+            ui.control_receipt(state, 'Skye', 'DRAFT', hero_id=265)
+
+    def test_observed_value_elsewhere_is_unknown(self):
+        for parent in ('root', 'nested', None, '0x0'):
+            state = self.waiting()
+            state['nodes'][-1]['parent'] = parent
+            state['nodes'].append({'address': 'nested', 'parent': 'panel'})
+            with self.subTest(parent=parent):
+                self.assertEqual(ui.screen(state), 'UNKNOWN')
+
+    def test_unobserved_value_is_unknown_even_as_sibling(self):
+        self.assertEqual(ui.screen(self.waiting('VERY HARD')), 'UNKNOWN')
+
+    def test_two_extra_labels_including_duplicate_value_are_unknown(self):
+        for extra in ('HARD', 'VERY HARD'):
+            state = self.waiting()
+            state['labels'].append(extra)
+            state['nodes'].append({'address': 'extra', 'text': extra, 'parent': 'panel'})
+            with self.subTest(extra=extra):
+                self.assertEqual(ui.screen(state), 'UNKNOWN')
+
+    def test_missing_or_duplicate_marker_never_qualifies(self):
+        for marker in ui.DRAFT_WAIT_MARKERS:
+            for duplicate in (False, True):
+                state = self.waiting()
+                if duplicate:
+                    state['labels'].append(marker)
+                else:
+                    state['labels'].remove(marker)
+                    state['nodes'] = [n for n in state['nodes'] if n.get('text') != marker]
+                with self.subTest(marker=marker, duplicate=duplicate):
+                    self.assertNotEqual(ui.screen(state), 'DRAFT_WAIT')
+
+    def test_label_only_callers_do_not_gain_value_exception(self):
+        state = {'labels': sorted(ui.DRAFT_WAIT_MARKERS)}
+        self.assertEqual(ui.screen(state), 'DRAFT_WAIT')
+        state['labels'].append('HARD')
+        self.assertEqual(ui.screen(state), 'UNKNOWN')
+
+    def test_missing_ambiguous_or_parentless_nodes_cannot_prove_siblings(self):
+        for label in ('DIFFICULTY', 'HARD'):
+            for duplicate in (False, True):
+                state = self.waiting()
+                node = next(n for n in state['nodes'] if n.get('text') == label)
+                if duplicate:
+                    state['nodes'].append({**node, 'address': 'duplicate'})
+                else:
+                    state['nodes'].remove(node)
+                with self.subTest(label=label, duplicate=duplicate):
+                    self.assertEqual(ui.screen(state), 'UNKNOWN')
+        for parent in (None, '0x0', 'absent'):
+            state = self.waiting()
+            for node in state['nodes'][1:]:
+                node['parent'] = parent
+            with self.subTest(parent=parent):
+                self.assertEqual(ui.screen(state), 'UNKNOWN')
+
+
+class DraftRosterHandleTests(unittest.TestCase):
+    @staticmethod
+    def waiting(names=('Guest', 'Alpha Bot', 'Beta Bot')):
+        nodes = [{'address': 'root', 'parent': '0x0'},
+                 {'address': 'lca', 'parent': 'root', 'vtable': '0x27260b8'},
+                 {'address': 'content', 'parent': 'lca', 'vtable': '0x27266f0'},
+                 {'address': 'roster', 'parent': 'content', 'vtable': '0x26d27e0'},
+                 {'address': 'pane', 'parent': 'roster', 'vtable': '0x27284a0'},
+                 {'address': 'list', 'parent': 'pane', 'vtable': '0x27284a0'},
+                 {'address': 'difficulty', 'parent': 'content'}]
+        for i, text in enumerate(sorted(ui.DRAFT_WAIT_MARKERS) + ['HARD']):
+            nodes.append({'address': f'marker{i}', 'text': text,
+                          'parent': 'difficulty' if text in ('DIFFICULTY', 'HARD') else 'lca'})
+        for i, text in enumerate(names):
+            nodes.extend([{'address': f'card{i}', 'parent': 'list', 'vtable': '0x26fa2d0'},
+                          {'address': f'name{i}', 'parent': f'card{i}', 'text': text,
+                           'vtable': '0x2726530'}])
+        return {'root': 'root', 'nodes': nodes, 'labels': [n['text'] for n in nodes if 'text' in n]}
+
+    def test_wire_names_and_mixed_participant_handles_are_read_only(self):
+        for names in (('Guest', 'Alpha Bot', 'Beta Bot'), ('Guest', 'Player 2', 'Player 3'),
+                      ('Unlisted arbitrary handle',), ('Same', 'Same')):
+            from collections import Counter
+            state = self.waiting(names)
+            with self.subTest(names=names):
+                self.assertEqual(ui.screen(state, roster_handles=Counter(names)), 'DRAFT_WAIT')
+                for expected in ('DRAFT', 'DRAFT_WAIT'):
+                    with self.assertRaises(ValueError):
+                        ui.control_receipt(state, 'LOCK IN', expected)
+                with self.assertRaises(ValueError):
+                    ui.qualify_pair(state, state, 'LOCK IN', 'DRAFT')
+
+    def test_absent_unlisted_or_overcount_handle_is_unknown(self):
+        state = self.waiting()
+        self.assertEqual(ui.screen(state), 'UNKNOWN')
+        for handles in ({}, {'Guest': 1}, {'Guest': 1, 'Alpha Bot': 1, 'Beta Bot': 0}):
+            self.assertEqual(ui.screen(state, roster_handles=handles), 'UNKNOWN')
+        self.assertEqual(ui.screen(self.waiting(('Same', 'Same')), roster_handles={'Same': 1}), 'UNKNOWN')
+        base = DraftDifficultyValueTests().waiting()
+        self.assertEqual(ui.screen(base), 'DRAFT_WAIT')
+        self.assertEqual(ui.screen(base, roster_handles={}), 'DRAFT_WAIT')
+
+    def test_wrong_missing_cyclic_or_ambiguous_structure_is_unknown(self):
+        for kind in ('difficulty', 'root', 'card-type', 'same-card', 'different-list',
+                     'cycle', 'missing', 'duplicate', 'label-node-disagreement', 'marker-in-list'):
+            state = self.waiting()
+            nodes = {n['address']: n for n in state['nodes']}
+            if kind in ('difficulty', 'root'): nodes['name0']['parent'] = kind
+            elif kind == 'card-type': nodes['card0']['vtable'] = '0x27284a0'
+            elif kind == 'same-card': nodes['name1']['parent'] = 'card0'
+            elif kind == 'different-list':
+                state['nodes'].append({**nodes['list'], 'address': 'other-list'})
+                nodes['card1']['parent'] = 'other-list'
+            elif kind == 'cycle': nodes['list']['parent'] = 'card0'
+            elif kind == 'missing': state['nodes'].remove(nodes['card0'])
+            elif kind == 'duplicate': state['nodes'].append(dict(nodes['card0']))
+            elif kind == 'label-node-disagreement': nodes['name0']['text'] = 'Other'
+            elif kind == 'marker-in-list': nodes['marker0']['parent'] = 'list'
+            with self.subTest(kind=kind):
+                self.assertEqual(ui.screen(state, roster_handles={'Guest': 1, 'Alpha Bot': 1, 'Beta Bot': 1}), 'UNKNOWN')
+
+    def test_hard_sibling_rule_cannot_be_bypassed_by_wire_handle(self):
+        for duplicate in (False, True):
+            state = self.waiting(('Guest',))
+            hard = next(n for n in state['nodes'] if n.get('text') == 'HARD')
+            if duplicate:
+                state['labels'].append('HARD')
+                state['nodes'].append({**hard, 'address': 'extra-hard'})
+            else:
+                hard['parent'] = 'lca'
+            self.assertEqual(ui.screen(state, roster_handles={'Guest': 1, 'HARD': 2}), 'UNKNOWN')
+
+    @staticmethod
+    def wire():
+        from server import roster
+        binding = {'direction': 'identity', 'time': 10, 'connection': 7, 'identity': 'ce',
+                   'match_id': 'match', 'eid': 1500, 'slot': 0, 'team': 1}
+        players = roster.default_solo_bots('ce', 'match')
+        payload = roster.build_snapshot(players).hex()
+        return binding, [binding, {'direction': 's2c', 'time': 11, 'connection': 7,
+                                  'opcode': 1113, 'payload': payload}], players
+
+    def test_only_latest_bound_connection_snapshot_counts_not_frames(self):
+        from server import roster
+        binding, rows, players = self.wire()
+        self.assertEqual(entry.bound_roster_handles(rows, binding, 5)['Guest'], 1)
+        rows.append(dict(rows[-1]))
+        self.assertEqual(entry.bound_roster_handles(rows, binding, 5)['Guest'], 1)
+        players[1].handle = 'Guest'
+        rows.append({**rows[-1], 'payload': roster.build_snapshot(players).hex(), 'time': 12})
+        self.assertEqual(entry.bound_roster_handles(rows, binding, 5)['Guest'], 2)
+        players[1].handle = 'Player 2'
+        rows.append({**rows[-1], 'payload': roster.build_snapshot(players).hex(), 'time': 13})
+        handles = entry.bound_roster_handles(rows, binding, 5)
+        self.assertEqual(handles['Guest'], 1)
+        self.assertEqual(handles['Player 2'], 1)
+        self.assertNotIn('Alpha Bot', handles)
+
+    def test_opener_sent_before_identity_trace_row_is_still_connection_bound(self):
+        binding, rows, _ = self.wire()
+        rows[-1]['time'] = 9
+        rows.reverse()
+        self.assertEqual(entry.bound_roster_handles(rows, binding, 5)['Guest'], 1)
+
+    def test_other_connection_match_direction_old_missing_and_closed_are_not_sources(self):
+        for kind in ('connection', 'match', 'direction', 'old', 'missing', 'closed', 'owner', 'truncated'):
+            binding, rows, _ = self.wire()
+            if kind == 'connection': rows[-1]['connection'] = 8
+            elif kind == 'match': binding = {**binding, 'match_id': 'other'}
+            elif kind == 'direction': rows[-1]['direction'] = 'c2s'
+            elif kind == 'old': rows[-1]['time'] = 4
+            elif kind == 'missing': rows.pop()
+            elif kind == 'closed': rows.append({'direction': 'disconnect', 'connection': 7})
+            elif kind == 'owner': binding['eid'] = 1517
+            elif kind == 'truncated': rows[-1]['payload'] = '00'
+            with self.subTest(kind=kind):
+                if kind in ('owner', 'truncated'):
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        entry.bound_roster_handles(rows, binding, 5)
+                else:
+                    self.assertIsNone(entry.bound_roster_handles(rows, binding, 5))
 
 
 class IdentityAndAdmissionTests(unittest.TestCase):
@@ -287,13 +580,116 @@ class EntryInputTests(unittest.TestCase):
         guest = {'guest_id': 'guest-a', 'identities': ['guest-a'], **self.e.device}
         def await_signal(name, predicate, **kwargs):
             return guest if name.startswith('bootstrap:') else wait(name, predicate, **kwargs)
+        wait_screen = self.e.wait_screen
+        def at_menu(*args, **kwargs):
+            return callback() if args == ('MENU', 'MENU') else wait_screen(*args, **kwargs)
         with patch.object(self.e, 'wait', side_effect=await_signal), \
-                patch.object(self.e, 'wait_screen', side_effect=lambda *a, **k: callback()), \
+                patch.object(self.e, 'wait_screen', side_effect=at_menu), \
                 patch.object(sc, 'verify_resolution'), \
                 self.assertRaisesRegex(sc.ClientStageFailure, detail) as failure:
             self.e.run()
         self.assertEqual(failure.exception.stage, 'SETUP')
         self.assertEqual(failure.exception.status, 'FAIL')
+
+    def build_clock(self):
+        clock = [time.monotonic()]
+        self.enterContext(patch.object(entry.time, 'monotonic', side_effect=lambda: clock[0]))
+        self.enterContext(patch.object(entry.time, 'sleep', side_effect=lambda seconds:
+                                      clock.__setitem__(0, clock[0]+seconds)))
+        return clock
+
+    def test_entry_build_uses_one_gated_back_and_requires_hud(self):
+        self.build_clock()
+        self.state = tree('OPEN SHOP', 'BUILD')
+        self.d.adb.back.side_effect = lambda: setattr(self, 'state', tree('BUY:', 'HUD'))
+        self.e.leave_build(tree('Choose a Build', 'BUILD'))
+        self.d.adb.back.assert_called_once_with()
+        self.assertEqual([g['kind'] for g in self.d.gestures], ['native-ui-back'])
+        transport = [r for r in self.e.events if r.get('input_transport') == 'returned']
+        self.assertEqual(len(transport), 1)
+        self.assertEqual(transport[0]['stage'], 'BUILD_DISMISS')
+        self.assertEqual(self.e.events[-1]['stage'], 'BUILD_DISMISS_AFTER')
+        self.assertEqual(ui.screen(self.e.events[-1]['native']), 'HUD')
+        self.d.adb.swipe.assert_not_called()
+
+    def test_entry_surviving_build_stops_after_one_back_without_shop_input(self):
+        self.build_clock()
+        self.state = tree('OPEN SHOP', 'BUILD')
+        self.assert_setup_failure(lambda: self.e.leave_build(self.state), 'known native panel blocks walking')
+        self.d.adb.back.assert_called_once_with()
+        self.d.adb.swipe.assert_not_called()
+        self.d.adb.tap.assert_not_called()
+        self.assertEqual([g['kind'] for g in self.d.gestures], ['native-ui-back'])
+
+    def test_build_freshness_is_checked_after_acquiring_the_same_input_lease(self):
+        from contextlib import contextmanager
+        clock = self.build_clock()
+        self.state = tree('OPEN SHOP', 'BUILD')
+        @contextmanager
+        def delayed_lease():
+            clock[0] += 2
+            yield
+        self.e.input_window = delayed_lease
+        self.assert_no_input(lambda: self.e.leave_build(self.state), 'stale BUILD gating read')
+        self.d.adb.back.assert_not_called()
+
+    def test_build_back_holds_real_entry_lease_and_records_transport(self):
+        self.build_clock()
+        self.state = tree('OPEN SHOP', 'BUILD')
+        self.e.input_window = entry.NonvisualEntry.input_window.__get__(self.e)
+        def send():
+            with self.assertRaisesRegex(ValueError, 'input lease unavailable'):
+                with entry.input_lease(self.e.plan['input_lock'], 0, owner='other'):
+                    self.fail('BACK sent outside entry lease')
+            self.state = tree('BUY:', 'HUD')
+        self.d.adb.back.side_effect = send
+        self.e.leave_build(self.state)
+        self.d.adb.back.assert_called_once_with()
+        self.assertEqual(len([r for r in self.e.events if r.get('input_transport') == 'returned']), 1)
+
+    def explicit_build_exit(self, outcome):
+        self.build_clock()
+        self.e.timeout = 1
+        self.e.plan['shop_close_label'] = 'Shop'
+        self.state = tree('OPEN SHOP', 'BUILD')
+        def transition(*args, **kwargs):
+            self.state = (tree('Shop', 'SHOP') if len(self.d.gestures) == 1
+                          else tree({'HUD': 'BUY:', 'MENU': 'PLAY'}.get(outcome, 'OPEN SHOP'), outcome))
+        self.d.adb.swipe.side_effect = transition
+
+    def test_build_explicit_candidate_uses_two_ordinary_guarded_actions(self):
+        self.explicit_build_exit('HUD')
+        self.e.leave_build(self.state)
+        self.assertEqual([g['receipt']['label'] for g in self.d.gestures], ['OPEN SHOP', 'Shop'])
+        self.assertTrue(all(len(g['receipt']['pairs']) == 2 for g in self.d.gestures))
+        self.assertEqual(self.e.events[-1]['stage'], 'BUILD_EXIT_HUD')
+        self.d.adb.back.assert_not_called()
+
+    def test_build_explicit_exit_non_hud_is_setup_without_another_guess(self):
+        for outcome in ('BUILD', 'SHOP', 'MENU'):
+            with self.subTest(outcome=outcome):
+                self.d.gestures.clear()
+                self.explicit_build_exit(outcome)
+                self.assert_setup_failure(lambda: self.e.leave_build(self.state), 'SHOP exit: expected HUD')
+                self.assertEqual(len(self.d.gestures), 2)
+
+    def test_build_unqualified_explicit_exit_is_setup_without_exit_gesture(self):
+        self.explicit_build_exit('HUD')
+        self.e.plan['shop_close_label'] = 'CLOSE'
+        self.assert_setup_failure(lambda: self.e.leave_build(self.state), "label 'CLOSE' absent")
+        self.assertEqual([g['receipt']['label'] for g in self.d.gestures], ['OPEN SHOP'])
+
+    def test_build_unknown_observation_is_setup_without_input(self):
+        self.build_clock()
+        self.e.read = Mock(return_value=self.unknown_tree())
+        self.assert_no_input(lambda: self.e.leave_build(tree('OPEN SHOP', 'BUILD')), 'native gameplay HUD')
+        self.d.adb.back.assert_not_called()
+
+    def test_direct_hud_does_not_observe_or_input(self):
+        self.e.leave_build(tree('BUY:', 'HUD'))
+        self.e.read.assert_not_called()
+        self.assertEqual(self.e.events, [])
+        self.assertEqual(self.d.gestures, [])
 
     def test_focus_loss_and_paused_activity_send_zero_gestures(self):
         for change in ({'window_focus': False}, {'paused': True}, {'initialized': False}):
@@ -385,6 +781,206 @@ class EntryInputTests(unittest.TestCase):
             self.assert_setup_failure(self.e.select, 'scroll did not move')
         self.assertEqual(self.d.adb.swipe.call_count, 1)
         self.assertEqual(len(self.d.gestures), 1)
+
+    def scroll_fixture(self, starts, *, mutate=None, end_delay=.02, after_scroll=True,
+                       label='Skye', y=200):
+        """Synthetic read brackets; production signature and receipt code run."""
+        self.state = tree(label, 'DRAFT', y=y)
+        self.clock = 100.
+        self.e._scroll_returned = self.clock if after_scroll else None
+        self.enterContext(patch.object(entry.time, 'monotonic', side_effect=lambda: self.clock))
+        self.enterContext(patch.object(entry.time, 'sleep'))
+        iterator = iter(starts)
+        index = 0
+        def read():
+            nonlocal index
+            start = next(iterator)
+            state = copy.deepcopy(self.state)
+            state.update(host_read_started=100+start, host_read_ended=100+start+end_delay)
+            if mutate:
+                mutate(state, index)
+            self.clock = state['host_read_ended']
+            index += 1
+            return state
+        self.e.read = Mock(side_effect=read)
+
+    def test_post_scroll_outside_churn_span_then_fresh_pair_and_single_input(self):
+        def outside(state, i):
+            PairQualificationTests().outside_node(state, x=20+i/100)
+        self.scroll_fixture([i*.15 for i in range(31)], mutate=outside)
+        self.e.act('Skye', 'DRAFT', hero_id=265)
+        rows = [r for r in self.e.events if r['stage'] == 'DRAFT_CONTROL_WINDOW']
+        self.assertEqual(rows[-1]['reads'], 28)
+        self.assertAlmostEqual(rows[-1]['span_s'], 4.05)
+        self.assertEqual(len({r['protected_signature'] for r in rows}), 1)
+        self.assertEqual(self.e.read.call_count, 31)  # span + revalidation + post pair
+        receipt = self.d.gestures[0]['receipt']
+        self.assertGreater(receipt['outside_difference_count'], 0)
+        self.assertEqual(len(receipt['pairs']), 2)
+        self.d.adb.swipe.assert_called_once()
+        self.assertIsNone(self.e._scroll_returned)
+
+    def test_post_scroll_protected_geometry_change_restarts(self):
+        def change(state, i):
+            state['nodes'][2]['origin'][0] += 1 if i >= 20 else 0
+        self.scroll_fixture([i*.15 for i in range(48)], mutate=change)
+        self.e.control_pair('Skye', 'DRAFT', hero_id=265)
+        rows = [r for r in self.e.events if r['stage'] == 'DRAFT_CONTROL_WINDOW']
+        self.assertEqual([i for i, r in enumerate(rows) if r['restarted']], [0, 20])
+        self.assertEqual(rows[-1]['reads'], 28)
+        self.assertEqual(self.e.read.call_count, 48)
+        self.d.adb.swipe.assert_not_called()
+
+    def test_post_scroll_short_span_does_not_accept_even_with_enough_reads(self):
+        self.scroll_fixture([i*.1 for i in range(28)] + [15])
+        self.assert_no_input(lambda: self.e.act('Skye', 'DRAFT', hero_id=265), '15s budget')
+        rows = [r for r in self.e.events if r['stage'] == 'DRAFT_CONTROL_WINDOW']
+        self.assertEqual(rows[27]['reads'], 28)
+        self.assertLess(rows[27]['span_s'], 3.888)
+
+    def test_rev4_descendant_churn_with_pulses_holds_window_and_final_revalidation(self):
+        def change(state, i):
+            leaf = {**copy.deepcopy(state['nodes'][1]), 'address': 'leaf', 'text': '',
+                    'flags': 76 if i % 2 else 204}
+            state['nodes'].append(leaf)
+            state['traversal'].update(visited=4, active=4)
+            state['nodes'][2]['flags'] ^= 2 if i % 2 else 0
+        self.scroll_fixture([i*.15 for i in range(31)], mutate=change)
+        self.e.act('Skye', 'DRAFT', hero_id=265)
+        windows = [r for r in self.e.events if r['stage'] == 'DRAFT_CONTROL_WINDOW']
+        self.assertEqual([i for i, r in enumerate(windows) if r['restarted']], [0])
+        self.assertEqual(windows[-1]['reads'], 28)
+        for pair in self.d.gestures[0]['receipt']['pairs']:
+            self.assertEqual({d['classification'] for d in pair['tolerated_differences']},
+                             {'PULSE_0x2', 'UNCLASSIFIED'})
+        self.assertEqual(len([r for r in self.e.events if r['stage'] == 'PULSE_0x2']), 27)
+        self.d.adb.swipe.assert_called_once()
+
+    def test_rev4_nondescendant_and_structural_mutations_restart_window(self):
+        for field, value in (('parent', 'root'), ('flags', 72), ('text', 'decoration'),
+                             ('events', [{'type': 1}]), ('child', 'label')):
+            with self.subTest(field=field):
+                def change(state, i):
+                    leaf = {**copy.deepcopy(state['nodes'][1]), 'address': 'leaf', 'text': '',
+                            'flags': 76 if i < 20 else 204}
+                    if field == 'parent' or i >= 20:
+                        leaf[field] = value
+                    state['nodes'].append(leaf)
+                    state['traversal'].update(visited=4, active=4)
+                self.e.events.clear()
+                self.scroll_fixture([i*.15 for i in range(48)], mutate=change)
+                self.e.control_pair('Skye', 'DRAFT', hero_id=265)
+                rows = [r for r in self.e.events if r['stage'] == 'DRAFT_CONTROL_WINDOW']
+                self.assertEqual([i for i, r in enumerate(rows) if r['restarted']], [0, 20])
+                self.assertEqual(self.e.read.call_count, 48)
+                self.d.adb.swipe.assert_not_called()
+
+    def test_post_scroll_fewer_than_count_does_not_accept_even_with_long_span(self):
+        self.scroll_fixture([i*.2 for i in range(27)] + [15])
+        self.assert_no_input(lambda: self.e.act('Skye', 'DRAFT', hero_id=265), '15s budget')
+        rows = [r for r in self.e.events if r['stage'] == 'DRAFT_CONTROL_WINDOW']
+        self.assertEqual(rows[26]['reads'], 27)
+        self.assertGreater(rows[26]['span_s'], 3.888)
+
+    def test_post_scroll_budget_includes_time_since_scroll_return(self):
+        self.scroll_fixture([])
+        self.clock = 115
+        self.assert_no_input(lambda: self.e.act('Skye', 'DRAFT', hero_id=265), '15s budget')
+        self.e.read.assert_not_called()
+
+    def test_post_scroll_stale_final_pair_still_refused_without_retry(self):
+        self.scroll_fixture([i*.15 for i in range(27)] + [6])
+        self.assert_no_input(lambda: self.e.act('Skye', 'DRAFT', hero_id=265), 'stale native label receipt')
+        self.assertEqual(self.e.read.call_count, 28)
+
+    def test_post_scroll_revalidation_still_no_retry(self):
+        def change(state, i):
+            state['nodes'][2]['flags'] ^= 1 if i == 28 else 0
+        self.scroll_fixture([i*.15 for i in range(29)], mutate=change)
+        self.assert_no_input(lambda: self.e.act('Skye', 'DRAFT', hero_id=265), 'full ancestry mutation')
+        self.assertEqual(self.e.read.call_count, 29)
+
+    def test_pulse_window_and_terminal_revalidation_pass_without_reversal(self):
+        def change(state, i):
+            state['nodes'][2]['flags'] ^= 2 if i in (8, 15) or i >= 28 else 0
+        self.scroll_fixture([i*.15 for i in range(31)], mutate=change)
+        self.e.act('Skye', 'DRAFT', hero_id=265)
+        windows = [r for r in self.e.events if r['stage'] == 'DRAFT_CONTROL_WINDOW']
+        self.assertEqual([i for i,r in enumerate(windows) if r['restarted']], [0])
+        self.assertEqual(windows[-1]['reads'], 28)
+        pulses = [r for r in self.e.events if r['stage'] == 'PULSE_0x2']
+        self.assertEqual(len(pulses), 4)
+        self.assertTrue(all(r['differences'][0]['classification'] == 'PULSE_0x2' for r in pulses))
+        final = self.d.gestures[0]['receipt']['pairs'][1]
+        self.assertEqual(final['tolerated_difference_count'], 1)
+        self.assertEqual(final['tolerated_differences'][0]['xor'], 2)
+        self.d.adb.swipe.assert_called_once()
+
+    def test_post_scroll_signature_has_no_age_dependency_and_rejects_partial_tree(self):
+        state = tree('Skye', 'DRAFT')
+        expected = ui.protected_signature(state, 'Skye', 'DRAFT', hero_id=265)
+        state.pop('host_read_started')
+        state.pop('host_read_ended')
+        self.assertEqual(ui.protected_signature(state, 'Skye', 'DRAFT', hero_id=265), expected)
+        state['traversal']['complete'] = False
+        with self.assertRaisesRegex(ValueError, 'incomplete'):
+            ui.protected_signature(state, 'Skye', 'DRAFT', hero_id=265)
+
+    def test_non_scroll_path_does_not_consult_structural_window(self):
+        with patch.object(ui, 'protected_signature', side_effect=AssertionError('non-scroll changed')):
+            self.e.act('PLAY', 'MENU')
+        self.assertEqual(self.e.read.call_count, 5)
+        self.d.adb.swipe.assert_called_once()
+
+    def test_first_draft_scroll_waits_through_opening_animation(self):
+        def opening(state, i):
+            state['nodes'][2]['origin'][0] += 1 if i >= 8 else 0
+        self.scroll_fixture([i*.15 for i in range(39)], mutate=opening,
+                            after_scroll=False, y=700)
+        self.e.act('Skye', 'DRAFT', hero_id=265, scroll=True)
+        rows = [r for r in self.e.events if r['stage'] == 'DRAFT_CONTROL_WINDOW']
+        self.assertEqual([i for i, r in enumerate(rows) if r['restarted']], [0, 8])
+        self.assertEqual(rows[-1]['reads'], 28)
+        self.assertAlmostEqual(rows[-1]['span_s'], 4.05)
+        self.assertTrue(all(r['scroll_returned'] is None for r in rows))
+        self.assertEqual(self.e.read.call_count, 39)
+        self.d.adb.swipe.assert_called_once()
+        self.assertEqual(self.d.gestures[0]['kind'], 'entry-scroll')
+
+    def test_hero_tap_and_lock_each_collect_a_new_window_without_scroll(self):
+        self.scroll_fixture([i*.15 for i in range(62)], after_scroll=False)
+        self.e.act('Skye', 'DRAFT', hero_id=265)
+        self.state = tree('LOCK IN', 'DRAFT')
+        self.e.admission_guests = ['synthetic-guest']
+        with patch.object(entry, 'admission_roster', return_value={'synthetic': True}) as admission:
+            self.e.act('LOCK IN', 'DRAFT')
+        admission.assert_called_once()
+        rows = [r for r in self.e.events if r['stage'] == 'DRAFT_CONTROL_WINDOW']
+        for label in ('Skye', 'LOCK IN'):
+            window = [r for r in rows if r['label'] == label]
+            self.assertEqual(len(window), 28)
+            self.assertEqual(window[0]['reads'], 1)
+            self.assertTrue(window[0]['restarted'])
+            self.assertAlmostEqual(window[-1]['span_s'], 4.05)
+        self.assertGreater(rows[28]['window_started'], rows[0]['window_started'])
+        self.assertEqual(self.e.read.call_count, 62)
+        self.assertEqual(self.d.adb.swipe.call_count, 2)
+
+    def test_draft_opening_budget_exhaustion_sends_no_first_input(self):
+        self.scroll_fixture([i*.5 for i in range(31)], after_scroll=False,
+            mutate=lambda state, i: state['nodes'][2].update(flags=i % 2))
+        self.assert_no_input(lambda: self.e.act('Skye', 'DRAFT', hero_id=265), '15s budget')
+
+    def test_all_non_draft_controls_keep_adjacent_pairs_without_window(self):
+        for label, stage in (('PLAY', 'MENU'), ('SOLO BOTS', 'MODE'),
+                             ('3V3', 'MAP'), ('VERY EASY', 'DIFFICULTY')):
+            with self.subTest(stage=stage):
+                self.state = tree(label, stage)
+                self.e.read.reset_mock()
+                with patch.object(ui, 'protected_signature', side_effect=AssertionError('non-DRAFT changed')):
+                    self.e.act(label, stage)
+                self.assertEqual(self.e.read.call_count, 5)
+        self.assertEqual(self.d.adb.swipe.call_count, 4)
 
     def test_second_human_missing_never_locks_first(self):
         self.d.profile['nonvisual_entry']['peers'] = [{'device_tag': 'B', 'listener_port': 9444}]
@@ -492,6 +1088,93 @@ class EntryInputTests(unittest.TestCase):
                 transitions=('DRAFT_WAIT',)), draft)
         self.assertEqual(self.e.read.call_count, 3)
         self.d.adb.swipe.assert_not_called()
+
+    def wait_screen_sequence(self, states, times):
+        """Synthetic wall clock advances only when a native read completes."""
+        clock = [0.0]
+        sequence = iter(zip(states, times, strict=True))
+        def read():
+            state, clock[0] = next(sequence)
+            return state
+        self.e.read.side_effect = read
+        self.e.timeout = 30
+        self.enterContext(patch.object(entry.time, 'monotonic', side_effect=lambda: clock[0]))
+        self.enterContext(patch.object(entry.time, 'sleep'))
+        return self.e.wait_screen
+
+    def unknown_tree(self):
+        state = tree()
+        state['labels'] = ['unknown']
+        return state
+
+    def test_transient_unknown_between_previous_and_wanted_requires_fresh_pair(self):
+        previous, unknown, wanted = tree(), self.unknown_tree(), tree('SOLO BOTS', 'MODE')
+        wait = self.wait_screen_sequence([previous, unknown, wanted, wanted], [0, .1, .2, .3])
+        self.assertEqual(wait('MODE', 'MENU'), wanted)
+        self.assertEqual(self.e.read.call_count, 4)
+        records = [r for r in self.e.events if r['stage'] == 'TRANSIENT_UNKNOWN']
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['native'], unknown)
+        self.assertEqual(records[0]['count'], 1)
+        self.assertEqual(records[0]['continuous_s'], 0)
+        self.d.adb.tap.assert_not_called()
+        self.d.adb.swipe.assert_not_called()
+
+    def test_transient_unknown_continuous_over_three_seconds_is_setup(self):
+        unknown = self.unknown_tree()
+        wait = self.wait_screen_sequence([unknown]*3, [0, 3.0, 3.001])
+        self.assert_no_input(lambda: wait('MODE', 'MENU'), 'UNKNOWN bound exceeded')
+        self.assertEqual(self.e.read.call_count, 3)
+        records = [r for r in self.e.events if r['stage'] == 'TRANSIENT_UNKNOWN']
+        self.assertEqual([r['continuous_s'] for r in records], [0, 3.0, 3.001])
+        self.assertTrue(all(r['native'] == unknown for r in records))
+
+    def test_transient_unknown_sixteenth_total_read_is_setup_even_when_interrupted(self):
+        unknown, previous = self.unknown_tree(), tree()
+        states = [unknown, previous]*15 + [unknown]
+        wait = self.wait_screen_sequence(states, [i*.05 for i in range(len(states))])
+        self.assert_no_input(lambda: wait('MODE', 'MENU'), '16 total reads')
+        records = [r for r in self.e.events if r['stage'] == 'TRANSIENT_UNKNOWN']
+        self.assertEqual(len(records), 16)
+        self.assertEqual(self.e.read.call_count, 31)
+        self.assertTrue(all(r['continuous_s'] == 0 for r in records))
+
+    def test_transient_unknown_known_read_resets_continuous_timer(self):
+        unknown, previous, wanted = self.unknown_tree(), tree(), tree('SOLO BOTS', 'MODE')
+        states = [unknown, unknown, previous, unknown, unknown, wanted, wanted]
+        wait = self.wait_screen_sequence(states, [0, 2.9, 3, 3.1, 6, 6.1, 6.2])
+        self.assertEqual(wait('MODE', 'MENU'), wanted)
+        self.assertEqual(self.e.read.call_count, 7)
+        self.d.adb.swipe.assert_not_called()
+
+    def test_wait_screen_unexpected_known_screen_is_immediate_setup(self):
+        wait = self.wait_screen_sequence([tree('LOCK IN', 'DRAFT')], [0])
+        self.assert_no_input(lambda: wait('MODE', 'MENU'), 'unexpected native screen DRAFT')
+        self.assertEqual(self.e.read.call_count, 1)
+        self.assertFalse(any(r['stage'] == 'TRANSIENT_UNKNOWN' for r in self.e.events))
+
+    def test_transient_unknown_breaks_wanted_pair(self):
+        wanted, unknown = tree('SOLO BOTS', 'MODE'), self.unknown_tree()
+        wait = self.wait_screen_sequence([wanted, unknown, wanted, wanted], [0, .1, .2, .3])
+        self.assertEqual(wait('MODE', 'MENU'), wanted)
+        self.assertEqual(self.e.read.call_count, 4)
+        self.assertEqual(sum(r['stage'] == 'SCREEN_PAIR' for r in self.e.events), 1)
+        self.d.adb.tap.assert_not_called()
+        self.d.adb.swipe.assert_not_called()
+
+    def test_bound_wire_names_wait_read_only_then_require_two_draft_reads(self):
+        waiting = DraftRosterHandleTests.waiting()
+        waiting['traversal'] = {'complete': True, 'root_unchanged': True, 'node_limit': 4096,
+                                'visited': len(waiting['nodes']), 'active': len(waiting['nodes'])}
+        self.e.binding, self.d.tail.records, _ = DraftRosterHandleTests.wire()
+        draft = tree('LOCK IN', 'DRAFT')
+        self.e.read.side_effect = [waiting, draft, draft]
+        with patch.object(entry.time, 'sleep'):
+            self.assertEqual(self.e.wait_screen('DRAFT', 'DIFFICULTY', transitions=('DRAFT_WAIT',)), draft)
+        self.d.tail.poll.assert_called_once()
+        self.d.adb.tap.assert_not_called()
+        self.d.adb.swipe.assert_not_called()
+        self.assertEqual(self.e.read.call_count, 3)
 
     def test_waiting_roster_times_out_and_is_not_a_general_transition(self):
         self.state = tree('LOCK IN', 'DRAFT')
@@ -605,9 +1288,9 @@ class EntryInputTests(unittest.TestCase):
         refusal = next(r for r in self.e.events if r['stage'] == 'CONTROL_PAIR_REFUSED')
         self.assertTrue(refusal['replan'])
 
-    def test_ancestor_bit_one_refuses_pair_then_accepts_stable_pair(self):
+    def test_ancestor_nonpulse_bit_refuses_pair_then_accepts_stable_pair(self):
         a, b = tree(), tree()
-        b['nodes'][2]['flags'] ^= 2
+        b['nodes'][2]['flags'] ^= 1
         self.e.read.side_effect = [a, b, b, b, b, b, b]
         with patch.object(entry.time, 'sleep'):
             self.e.act('PLAY', 'MENU')
@@ -618,6 +1301,51 @@ class EntryInputTests(unittest.TestCase):
 
     def test_positive_mocked_path_all_stages_preserves_receipts_and_owner(self):
         self.run_mocked_path()
+
+    def test_absent_mixed_flags_preserves_windowed_ordinary_path_bytes(self):
+        import hashlib
+        # Step4g deliberately changes ordinary DRAFT behavior too. Pin the
+        # windowed path, including all reads/receipts; normalize only TEMP.
+        with patch.object(time, 'time', return_value=100.0), patch.object(time, 'monotonic', return_value=10.0), \
+                patch.object(entry, 'MixedCoordination', side_effect=AssertionError('opt-in only')):
+            self.setUp()
+            self.run_mocked_path()
+            value = {'events': self.e.events, 'gestures': self.d.gestures, 'observations': self.d.observations,
+                     'stages': self.d.stages, 'preparation': self.d.preparation}
+            encoded = json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).replace(
+                json.dumps(self.temp)[1:-1], '<TEMP>').encode()
+            self.assertEqual(hashlib.sha256(encoded).hexdigest(),
+                             '92d94b21b624f4a2994c074775b92213daad907e10e986851db8226e38692eee')
+
+    def test_mixed_hold_precedes_every_lock_read_and_release_follows_native_qualification(self):
+        mixed = Mock()
+        def held(e, binding):
+            self.assertEqual(binding['eid'], 1500)
+            self.assertEqual(self.d.adb.swipe.call_count, 5)
+            self.assertFalse(any(r.get('receipt', {}).get('label') == 'LOCK IN' for r in e.events))
+            # Change the entire selected control position while held. A stale
+            # receipt would fail or click the old point instead of qualifying anew.
+            self.state = tree('LOCK IN', 'DRAFT', y=250)
+        def released(binding, qualification):
+            self.assertEqual(qualification['stage'], 'QUALIFIED_WORLD')
+            self.assertEqual(self.d.observations['entry_binding']['world'], binding)
+            self.assertEqual(self.d.adb.swipe.call_count, 6)
+            return {'qualified': True}
+        mixed.hold.side_effect = held
+        mixed.publish.side_effect = released
+        self.run_mocked_path(mixed=mixed)
+        self.assertEqual(self.d.gestures[-1]['receipt']['center'], [400, 250])
+        mixed.hold.assert_called_once()
+        mixed.publish.assert_called_once()
+
+    def test_mixed_hold_failure_sends_no_lock_and_never_releases(self):
+        mixed = Mock()
+        mixed.hold.side_effect = ValueError('mixed draft timeout fixture')
+        self.e.mixed = mixed
+        with self.assertRaisesRegex(sc.ClientStageFailure, 'mixed draft timeout'):
+            self.run_mocked_path()
+        self.assertEqual(self.d.adb.swipe.call_count, 5)
+        mixed.publish.assert_not_called()
 
     def test_background_play_records_native_consumption_then_server_acceptance(self):
         self.run_mocked_path(background=True)
@@ -640,7 +1368,19 @@ class EntryInputTests(unittest.TestCase):
                 self.setUp()
                 self.run_mocked_path(missing=missing)
 
-    def run_mocked_path(self, missing=None, background=False):
+    def run_mocked_path(self, missing=None, background=False, mixed=None):
+        # Synthetic native cadence runs the real DRAFT window without wall-time
+        # sleeps. No qualification/receipt/revalidation function is mocked.
+        clock = [time.monotonic()]
+        def read():
+            if ui.screen(self.state) == 'DRAFT':
+                clock[0] += .15
+            return {**copy.deepcopy(self.state), 'host_read_started': clock[0],
+                    'host_read_ended': clock[0]}
+        self.e.read = Mock(side_effect=read)
+        self.e.timeout = 1
+        if mixed is not None:
+            self.e.mixed = mixed
         if background:
             self.e.input_window = entry.NonvisualEntry.input_window.__get__(self.e)
             self.e.plan['require_background_play'] = True
@@ -695,7 +1435,10 @@ class EntryInputTests(unittest.TestCase):
                 self.state = tree('BUY:', 'HUD')
             return value
         self.e.server_ops = ops
-        with patch.object(sc, 'verify_resolution'):
+        with patch.object(sc, 'verify_resolution'), \
+                patch.object(entry.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(entry.time, 'sleep', side_effect=lambda seconds:
+                             clock.__setitem__(0, clock[0]+seconds)):
             if missing is None:
                 self.e.run()
             else:
@@ -714,12 +1457,116 @@ class EntryInputTests(unittest.TestCase):
         self.assertEqual(self.d.connection, 7)
         self.assertEqual(self.d.observations['entry_binding']['world']['eid'], 1500)
         self.assertEqual(self.d.stages['SETUP']['status'], 'PASS')
-        self.assertEqual(self.e.events[-1]['stage'], 'QUALIFIED_WORLD')
+        self.assertEqual(self.e.events[-1]['stage'], 'MIXED_WORLD_RELEASE' if mixed else 'QUALIFIED_WORLD')
         for gesture in self.d.gestures:
             self.assertTrue(gesture['receipt']['tree_sha256'])
             self.assertTrue(gesture['health']['lifecycle']['ready'])
         self.d.adb.back.assert_not_called()
         self.d.adb.screencap.assert_not_called()
+
+
+    def transition_unknown_tree(self, labels=()):
+        """Retained 4s boot-1 entry-stages.jsonl:101 root/layer vtables, small fake."""
+        root = {'address': '0x763874d82000', 'parent': '0x0', 'child': '0x763866dbece0', 'next': '0x0',
+                'flags': 32716, 'vtable': '0x2726260', 'events': [], 'bounds_method': '0xe02010',
+                'local_bounds': '0xe020b4', 'size_method': '0xe13e54', 'anchor': [0, 0], 'origin': [0, 0],
+                'scale': [0.3515195846557617, 0.3515195846557617], 'size': [960, 540],
+                'resolved_size': [960, 540], 'clip': [-1, -1, -1, -1]}
+        layer = {**root, 'address': '0x763866dbece0', 'parent': '0x763874d82000', 'child': '0x0',
+                 'flags': 1703018444, 'vtable': '0x26ba008', 'size': [2731, 1536.1875],
+                 'resolved_size': [2731, 1536.1875], 'clip': [0, 0, 960, 540]}
+        nodes = [root, layer]
+        for index, text in enumerate(labels):
+            nodes.append({**layer, 'address': f'0x763866dbf{index:03x}', 'parent': '0x763866dbece0',
+                          'flags': 32716, 'vtable': '0x2726530', 'text': text, 'size': [100, 40],
+                          'resolved_size': [100, 40]})
+        return {'root': '0x763874d82000', 'nodes': nodes, 'labels': list(labels),
+                'traversal': {'visited': len(nodes), 'active': len(nodes), 'duration_ms': 18.7,
+                              'node_limit': 4096, 'complete': True, 'root_unchanged': True},
+                'host_read_started': time.monotonic(), 'host_read_ended': time.monotonic()}
+
+    def test_post_input_label_free_unknown_after_very_easy_defers_to_wait_screen_and_clears(self):
+        difficulty = tree('VERY EASY', 'DIFFICULTY')
+        unknown = self.transition_unknown_tree()
+        draft = tree('LOCK IN', 'DRAFT')
+        reads = [difficulty, difficulty, difficulty, unknown, unknown, unknown, draft, draft]
+        clock = [100.0]
+        def read():
+            clock[0] += .05
+            state = copy.deepcopy(reads.pop(0))
+            state.update(host_read_started=clock[0], host_read_ended=clock[0])
+            return state
+        self.e.read = Mock(side_effect=read)
+        self.e.timeout = 5
+        with patch.object(entry.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(entry.time, 'sleep'):
+            self.e.act('VERY EASY', 'DIFFICULTY', transition=True)
+            self.assertEqual(self.e._transition_pending, 'DIFFICULTY')
+            settled = self.e.wait_screen('DRAFT', 'DIFFICULTY', transitions=('MENU', 'MENU_TRANSITION', 'DRAFT_WAIT'))
+        self.assertIsNone(self.e._transition_pending)
+        self.assertEqual(ui.screen(settled), 'DRAFT')
+        self.d.adb.swipe.assert_called_once()
+        transients = [r for r in self.e.events if r['stage'] == 'POST_INPUT_TRANSIENT']
+        self.assertEqual(len(transients), 1)
+        self.assertEqual(transients[0]['input_stage'], 'DIFFICULTY')
+        self.assertEqual(transients[0]['label'], 'VERY EASY')
+        self.assertEqual(transients[0]['reason'], 'post-input UNKNOWN deferred to bounded wait_screen')
+        self.assertEqual(transients[0]['before']['labels'], [])
+        self.assertEqual(transients[0]['after']['labels'], [])
+        self.assertEqual(sum(r['stage'] == 'TRANSIENT_UNKNOWN' for r in self.e.events), 1)
+
+    def test_post_input_unknown_with_settings_still_raises_even_when_transition_true(self):
+        difficulty = tree('VERY EASY', 'DIFFICULTY')
+        settings_unknown = self.transition_unknown_tree(labels=('Settings',))
+        self.e.read = Mock(side_effect=[difficulty, difficulty, difficulty, settings_unknown, settings_unknown])
+        self.assert_setup_failure(lambda: self.e.act('VERY EASY', 'DIFFICULTY', transition=True),
+                                  'DIFFICULTY: unknown post-input screen; no further gestures')
+        self.d.adb.swipe.assert_called_once()
+        self.assertFalse(any(r['stage'] == 'POST_INPUT_TRANSIENT' for r in self.e.events))
+        self.assertIsNone(self.e._transition_pending)
+
+    def test_act_while_transition_pending_refuses_before_any_read_or_gesture(self):
+        self.e._transition_pending = 'DIFFICULTY'
+        self.assert_no_input(lambda: self.e.act('Skye', 'DRAFT', hero_id=265),
+                             'DRAFT: input refused; prior transition DIFFICULTY not yet qualified')
+        self.e.read.assert_not_called()
+
+    def test_persistent_post_input_unknown_exceeds_wait_screen_bound_with_no_further_gesture(self):
+        difficulty = tree('VERY EASY', 'DIFFICULTY')
+        unknown = self.transition_unknown_tree()
+        times = iter([10.0, 10.02, 10.04, 10.06, 10.08, 10.1, 13.0, 13.15])
+        clock = [10.0]
+        def read():
+            clock[0] = next(times)
+            state = copy.deepcopy(difficulty if len(self.d.gestures) == 0 else unknown)
+            state.update(host_read_started=clock[0], host_read_ended=clock[0])
+            return state
+        self.e.read = Mock(side_effect=read)
+        self.e.timeout = 30
+        def seq():
+            self.e.act('VERY EASY', 'DIFFICULTY', transition=True)
+            self.e.wait_screen('DRAFT', 'DIFFICULTY', transitions=('MENU', 'MENU_TRANSITION', 'DRAFT_WAIT'))
+        with patch.object(entry.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(entry.time, 'sleep'):
+            self.assert_setup_failure(seq, 'DIFFICULTY->DRAFT: transient UNKNOWN bound exceeded')
+        self.assertEqual(self.d.adb.swipe.call_count, 1)
+        self.assertEqual(self.e._transition_pending, 'DIFFICULTY')
+        self.e.read.reset_mock()
+        with self.assertRaisesRegex(ValueError, 'prior transition DIFFICULTY not yet qualified'):
+            self.e.act('Skye', 'DRAFT', hero_id=265)
+        self.e.read.assert_not_called()
+        self.assertEqual(self.d.adb.swipe.call_count, 1)
+
+    def test_hero_select_without_transition_still_raises_on_post_input_unknown(self):
+        unknown = self.transition_unknown_tree()
+        self.scroll_fixture([i*.15 for i in range(31)], after_scroll=False,
+                            mutate=lambda state, i: state.update(root=unknown['root'], labels=[], nodes=unknown['nodes'],
+                                                                 traversal=unknown['traversal']) if i >= 29 else None)
+        self.assert_setup_failure(lambda: self.e.act('Skye', 'DRAFT', hero_id=265),
+                                  'DRAFT: unknown post-input screen; no further gestures')
+        self.assertEqual(self.d.adb.swipe.call_count, 1)
+        self.assertFalse(any(r['stage'] == 'POST_INPUT_TRANSIENT' for r in self.e.events))
+        self.assertIsNone(self.e._transition_pending)
 
 
 class HostLeaseTests(unittest.TestCase):

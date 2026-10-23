@@ -197,6 +197,9 @@ def build_player_info(p: Player, match_id: str) -> bytes:
             struct.pack_into(">I", body, 176 + 4 * k, FNVL_EMPTY)
         body[204:208] = b"\xff\xff\x00\xff"
         body[208:212] = b"\x00\x02\x01\x00"
+        # The solo corpus local player was team 1; other human slots are not.
+        # Keep the same team as 1113/1011, including opposing human players.
+        body[210] = p.team
         body[212:216] = b"\x00\x00\x00\x01"
     return bytes(body)
 

@@ -1,5 +1,19 @@
 # Current implementation and validation status
 
+## M5 phase C live — 2026-10-21
+
+**M5 step C PASS** — 2026-10-23. One CE plus five protocol participants; corrected conditions below.
+`4m`–`4y`: composition/barriers and QUALIFIED_WORLD established; paced opponent/self-pick safety followed. Corrected acceptance is clean-disk-before-1060 and reconnect at exercise ≥75 s, strictly after engagement; own-stage ordering is evidence only.
+`4z`: all-actor coverage/stale-target reset/staged wait gated; no staging/reconnect amid 252 holds (**inference:** partial-projection refusal of an offscreen neutral). Evidence: `Local/evidence/run-1792695520542-24d01817/`; earlier records retained.
+`4aa`: conditions 1–7 PASS, pulse audit failed; null-size whole-clip transient remains **unresolved** (**inference:** countdown/header label). Evidence: `Local/evidence/run-1792697695633-24b8411f/`.
+`4ab`: staging/reconnect/reciprocal effects and pulse audit PASS; CE exit 1, no resumed effect. **Inference:** sub-near all-projected neutral 100010 caused post-respawn pick holds. Evidence: `Local/evidence/run-1792713087386-c2329de8/`.
+`4ac` — **2026-10-23**: H1 uses all-projected only with all four anchors at w≥n, otherwise F1 clipping/unknown refusal; retains hold camera. Pacing, world clearance and classifiers unchanged.
+`4ac` gates: 642 module tests, smoke 73 + known VGR skip, transport 39, seven exact pairs and diff check PASS; pin `97cab2d55fad0410be61c2637cdcb0152cc31b39c1715a512f9480b84ec99dd4`.
+`4ac` live conditions: 1 PASS, 2 PASS, 3 PASS, 4 PASS, 5 PASS, 6 PASS, 7 PASS, 8 PASS; ce_to_participant 8/2 before/after reconnect; participant_to_ce 9/3 before/after reconnect; 0 misfires; 1 boot(s).
+`4ac` evidence and measured limits: `Local/evidence/run-1792714193636-6a7c91c5/REPORT.md`, `dispatch-acceptance.json`; cleanup/restoration and pre-doc source seal PASS.
+Scope boundary: this proves only the recorded one-CE/five-participant exercise; not two CE, not a complete match, not long-duration stability, not independent gameplay fidelity. Remaining M5 gates stay open.
+This authorized post-seal status edit changes the manifest; the seal proves zero tracked drift through the pre-doc seal, not equality after this edit.
+
 ## Workflow revision — 2026-10-11
 
 The operator approved a revised workflow: one integration/runtime owner plus at

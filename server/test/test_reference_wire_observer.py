@@ -22,6 +22,27 @@ def fixture(server_tail=b''):
 
 
 class ReferenceWireObserverTests(unittest.TestCase):
+    def test_output_guard_allows_local_and_external_but_refuses_other_checkout_paths(self):
+        from pathlib import Path
+        from Tools.Teardown import observe_reference_wire as observer
+        common = ['--adb', 'unused', '--serial', 'unused', '--remote-pcap', '/sdcard/owned.pcap',
+                  '--match-id', MATCH, '--server-port', '7088']
+        for destination, allowed in ((observer.ROOT/'Local/evidence/reference-test', True),
+                                     (observer.ROOT.parent/'external-reference-test', True),
+                                     (observer.ROOT/'server/reference-test', False),
+                                     (observer.ROOT, False),
+                                     (observer.ROOT/'Local/../Docs/reference-test', False)):
+            with self.subTest(destination=destination), patch.object(Path, 'mkdir', side_effect=RuntimeError('guard passed')) as mkdir:
+                if allowed:
+                    with self.assertRaisesRegex(RuntimeError, 'guard passed'):
+                        observer.main(common+['--output', str(destination)])
+                    mkdir.assert_called_once_with(parents=True, exist_ok=False)
+                else:
+                    with self.assertRaises(SystemExit) as error:
+                        observer.main(common+['--output', str(destination)])
+                    self.assertEqual(error.exception.code, 2)
+                    mkdir.assert_not_called()
+
     def test_tcp_wrap_gap_and_duplicate_preserve_first_observation(self):
         stream = TCPBytes(2**32 - 2)
         stream.add(2**32 - 2, b'ab', 1)
