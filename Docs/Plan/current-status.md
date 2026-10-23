@@ -38,6 +38,28 @@ open. The game was closed for replay; the owned stack and VPN remain running.
 No simulation changes or commits were made in this follow-up. The previous
 round's 93 targeted platform/VPN tests are not a new full-suite qualification.
 
+**Same-day cold-process reconnect follow-up — FAIL at native readiness.**
+The platform/VPN work above was committed as `02ba7e8` at the operator's request.
+After another ordinary Practice 3v3 Skye entry, a bounded controller closed and
+immediately relaunched the original phone app, leaving VPN and server unchanged.
+The first same-match reattachment arrived **7.757 seconds after force-stop**;
+five automatic attempts retained identity, EID 1500, slot 0 and hero 265, at
+continuing ticks 371/490/609/728/847. The server emitted each catchup without a
+recorded dump send error, then the match socket reached EOF: **no applied
+client opcode or readiness on generations 2–6**. The 40-second readiness
+deadline failed; no timeout extension, forced WORLD or protocol change was used.
+Reopened PID remained alive; this does not establish a native crash. The known
+Google sign-in popup was observed only after the controller window.
+
+The closed failure journal replays exactly in both independent processes:
+**1,517 operations, 59 checkpoints, 10,129 events, final tick 973**, all six
+artifacts equal and live anchors matching. Ten existing reconnect/resource
+tests passed before this run; neither result closes native reconnect acceptance.
+The next bounded diagnosis is the cold client's load/ready handshake before
+current-state catchup; the immediate world dump is a hypothesis, not a proven
+cause. Evidence: `Local/evidence/phone-vpn-reconnect-1792732410435054500/summary.json`.
+Game stopped after the failed attempt; VPN and owned loopback stack remain on.
+
 ## M5 phase C live — 2026-10-21
 
 **M5 step C PASS** — 2026-10-23. One CE plus five protocol participants; corrected conditions below.
