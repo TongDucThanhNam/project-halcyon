@@ -134,10 +134,12 @@ The latest recorded progress through September 12 is:
 
 The working project consists of two parts:
 1. **Git repository (GitHub)**: All server code (`server/`), RE/verification tools (`Tools/`), documentation (`Docs/`), and SHA-256 input manifests (`Config/local-inputs.json`).
-2. **Distilled Google Drive Backup (`Local/backup-distilled/`)**: Private, Git-ignored assets and state distilled from ~41 GB down to three clean archives:
-   - **`halcyon-local-core.zip` (~1.44 GB — REQUIRED)**: Contains the unmodified Android APK & OBB, `libGameKindred.so` (for the native ARM64 health oracle), all 944 required PC 4.13 `Data/` store files (navmeshes + all 942 `INST`/`CFF0` manifests), `runtime/` configs/tapes/certs/WireGuard & Let's Encrypt keys, `research/runtime-corpus/` (`.32`, `.36`, `.72` `.vgr` anchors), and the distilled `research/vg_max/` corpus (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
-   - **`halcyon-milestone-journals.zip` (~150 MB — RECOMMENDED)**: Contains the irreplaceable live-session input journals (`journal.jsonl`, `inputs-*.jsonl`) and milestone reports (`M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn`) for deterministic replay.
-   - **`Vainglory-4.13-pc-full-optional.7z` (~1.69 GB — OPTIONAL)**: Full standalone Windows PC 4.13 archive (only needed if you ever want the remaining 47,278 PC texture/audio files or `Vainglory.exe`).
+2. **Single Distilled Google Drive Archive (`halcyon-local-backup.zip`, ~1.56 GB)**: Private, Git-ignored assets and state distilled from ~41 GB down to **one single `.zip` file** containing:
+   - Unmodified Android APK (`vg-4.13.4-147219-base.apk`) & OBB (`main.147219...obb`), plus `vainglory/lib/arm64-v8a/libGameKindred.so` (for the native ARM64 health oracle).
+   - All 944 required PC 4.13 `Data/` store files (navmeshes + all 942 `INST`/`CFF0` manifests — 16.4 MB instead of 3.45 GB of unused PC textures/audio).
+   - Complete `runtime/` state (`world_tape.bin`, `answers.json`, local TLS CA, WireGuard `phone-vpn/` keys, and Let's Encrypt `phone-acme/` certificates for `rpc.halcyon.tongducthanhnam.id.vn`).
+   - Complete `research/runtime-corpus/` (`.32`, `.36`, `.72` `.vgr` anchors) and distilled `research/vg_max/` corpus (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
+   - Irreplaceable live-session input journals (`journal.jsonl`, `inputs-*.jsonl`) and milestone reports under `evidence/` (`M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn`) for deterministic replay.
 
 ### Step-by-Step Restoration on a Fresh / Wiped Machine
 
@@ -147,12 +149,10 @@ The working project consists of two parts:
    Set-Location D:\project-halcyon
    ```
 
-2. **Download `halcyon-local-core.zip` (and optionally `halcyon-milestone-journals.zip`) from Google Drive** and extract them directly into `D:\project-halcyon\Local`:
+2. **Download `halcyon-local-backup.zip` from Google Drive** and extract it directly into `D:\project-halcyon\Local`:
    ```powershell
    New-Item -ItemType Directory -Path .\Local -Force | Out-Null
-   Expand-Archive -LiteralPath "C:\path\to\halcyon-local-core.zip" -DestinationPath .\Local -Force
-   # Optional: restore milestone live input journals for deterministic replay
-   Expand-Archive -LiteralPath "C:\path\to\halcyon-milestone-journals.zip" -DestinationPath .\Local -Force
+   Expand-Archive -LiteralPath "C:\path\to\halcyon-local-backup.zip" -DestinationPath .\Local -Force
    ```
 
 3. **Create the Python virtual environment and install dependencies** (Python 3.11+, tested on 3.14 x64):

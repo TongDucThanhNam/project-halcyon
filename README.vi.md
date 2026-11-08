@@ -133,10 +133,12 @@ Tiến độ được ghi nhận đến hết ngày 12/09:
 
 Toàn bộ dự án được tách thành 2 phần rõ ràng:
 1. **Mã nguồn trên Git (GitHub)**: Toàn bộ code server (`server/`), công cụ RE & kiểm thử (`Tools/`), tài liệu (`Docs/`) và danh mục băm SHA-256 (`Config/local-inputs.json`).
-2. **Bản sao lưu đã chắt lọc trên Google Drive (`Local/backup-distilled/`)**: Dữ liệu riêng (Git-ignored) đã được chắt lọc từ ~41 GB xuống còn 3 file nén gọn sạch:
-   - **`halcyon-local-core.zip` (~1,48 GB — BẮT BUỘC)**: Chứa APK & OBB Android gốc, `libGameKindred.so` (cho native ARM64 oracle), toàn bộ 944 file `Data/` PC 4.13 cần thiết (navmesh + 942 file `INST`/`CFF0` manifest), toàn bộ cấu hình `runtime/` (`world_tape.bin`, `answers.json`, chứng chỉ TLS CA, khóa WireGuard & Let's Encrypt), `research/runtime-corpus/` (3 file `.vgr` `.32`, `.36`, `.72`) và kho `research/vg_max/` đã lọc sạch (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
-   - **`halcyon-milestone-journals.zip` (~116 MB — KHUYẾN NGHỊ)**: Chứa các nhật ký đầu vào phiên live không thể tái tạo lại từ code (`journal.jsonl`, `inputs-*.jsonl`) và báo cáo nghiệm thu của các mốc `M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn` để chạy replay tất định.
-   - **`Vainglory-4.13-pc-full-optional.7z` (~1,69 GB — TÙY CHỌN)**: Bản nén đầy đủ của bộ cài Vainglory PC 4.13 (chỉ cần nếu sau này muốn lấy thêm 47.278 file texture/âm thanh PC hoặc `Vainglory.exe`).
+2. **1 File ZIP duy nhất trên Google Drive (`halcyon-local-backup.zip`, ~1,56 GB)**: Dữ liệu riêng (Git-ignored) đã được chắt lọc từ ~41 GB xuống còn **đúng 1 file `.zip` duy nhất** chứa trọn bộ:
+   - APK (`vg-4.13.4-147219-base.apk`) & OBB (`main.147219...obb`) Android gốc, cùng `vainglory/lib/arm64-v8a/libGameKindred.so` (cho native ARM64 oracle).
+   - Đúng 944 file `Data/` PC 4.13 cần thiết (navmesh + 942 file `INST`/`CFF0` manifest — chỉ 16,4 MB thay vì 3,45 GB texture/âm thanh thừa).
+   - Toàn bộ cấu hình `runtime/` (`world_tape.bin`, `answers.json`, chứng chỉ TLS CA, khóa WireGuard `phone-vpn/` & chứng chỉ Let's Encrypt `phone-acme/` cho `rpc.halcyon.tongducthanhnam.id.vn`).
+   - Toàn bộ `research/runtime-corpus/` (3 file `.vgr` `.32`, `.36`, `.72`) và kho `research/vg_max/` đã lọc sạch (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
+   - Toàn bộ nhật ký đầu vào phiên live (`journal.jsonl`, `inputs-*.jsonl`) và báo cáo nghiệm thu trong `evidence/` (`M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn`) để chạy replay tất định.
 
 ### Các bước khôi phục nhanh khi bắt đầu lại trên máy mới / sau khi xóa thư mục
 
@@ -146,12 +148,10 @@ Toàn bộ dự án được tách thành 2 phần rõ ràng:
    Set-Location D:\project-halcyon
    ```
 
-2. **Tải `halcyon-local-core.zip` (và `halcyon-milestone-journals.zip`) từ Google Drive về máy**, sau đó giải nén thẳng vào `D:\project-halcyon\Local`:
+2. **Tải `halcyon-local-backup.zip` từ Google Drive về máy**, sau đó giải nén thẳng vào `D:\project-halcyon\Local`:
    ```powershell
    New-Item -ItemType Directory -Path .\Local -Force | Out-Null
-   Expand-Archive -LiteralPath "C:\duong-dan-tai-ve\halcyon-local-core.zip" -DestinationPath .\Local -Force
-   # Tùy chọn: giải nén thêm các journal cột mốc để chạy replay
-   Expand-Archive -LiteralPath "C:\duong-dan-tai-ve\halcyon-milestone-journals.zip" -DestinationPath .\Local -Force
+   Expand-Archive -LiteralPath "C:\duong-dan-tai-ve\halcyon-local-backup.zip" -DestinationPath .\Local -Force
    ```
 
 3. **Tạo môi trường ảo Python `.venv` và cài đặt thư viện** (Python 3.11+, đã đo chuẩn trên Python 3.14 x64):
