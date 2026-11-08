@@ -1,5 +1,11 @@
 # Current implementation and validation status
 
+## Archival checkpoint — 2026-11-08
+
+- **Source state**: All server/ and Tools/ files are preserved unchanged from d8be29d (source_manifest pin 97cab2d55fad0410be61c2637cdcb0152cc31b39c1715a512f9480b84ec99dd4).
+- **Distilled private data archive (uploaded to Google Drive)**: halcyon-local-backup.zip (1,677,465,514 bytes, 2,712 files, SHA-256 c058bd18b0882d14701539cd436bb48860d28b9044e71abea03ffe70b6dc8704). Extracts directly into D:\project-halcyon\Local and passes python -B Tools/setup_local.py --check --profile client with 0 failures.
+- **Cold-start restore instructions**: See [README.md §4](../../README.md#4-cold-start-restore--local-setup-resuming-after-archival) and [README.vi.md §4](../../README.vi.md#4-khôi-phục-từ-đầu--thiết-lập-cục-bộ-cold-start-restore-guide).
+
 ## Unmodified physical Android — 2026-10-23
 
 **One owned phone's transport and recorded-input replay PASS; not native

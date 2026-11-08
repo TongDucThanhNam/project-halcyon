@@ -134,12 +134,15 @@ The latest recorded progress through September 12 is:
 
 The working project consists of two parts:
 1. **Git repository (GitHub)**: All server code (`server/`), RE/verification tools (`Tools/`), documentation (`Docs/`), and SHA-256 input manifests (`Config/local-inputs.json`).
-2. **Single Distilled Google Drive Archive (`halcyon-local-backup.zip`, ~1.56 GB)**: Private, Git-ignored assets and state distilled from ~41 GB down to **one single `.zip` file** containing:
-   - Unmodified Android APK (`vg-4.13.4-147219-base.apk`) & OBB (`main.147219...obb`), plus `vainglory/lib/arm64-v8a/libGameKindred.so` (for the native ARM64 health oracle).
-   - All 944 required PC 4.13 `Data/` store files (navmeshes + all 942 `INST`/`CFF0` manifests — 16.4 MB instead of 3.45 GB of unused PC textures/audio).
-   - Complete `runtime/` state (`world_tape.bin`, `answers.json`, local TLS CA, WireGuard `phone-vpn/` keys, and Let's Encrypt `phone-acme/` certificates for `rpc.halcyon.tongducthanhnam.id.vn`).
-   - Complete `research/runtime-corpus/` (`.32`, `.36`, `.72` `.vgr` anchors) and distilled `research/vg_max/` corpus (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
-   - Irreplaceable live-session input journals (`journal.jsonl`, `inputs-*.jsonl`) and milestone reports under `evidence/` (`M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn`) for deterministic replay.
+2. **Single Distilled Google Drive Archive (`halcyon-local-backup.zip`)**:
+   - **Size**: `1,677,465,514 bytes` (`1,599.76 MB`, `2,712 files`)
+   - **SHA-256**: `c058bd18b0882d14701539cd436bb48860d28b9044e71abea03ffe70b6dc8704`
+   - **Contents**: Private, Git-ignored assets and state distilled from ~41 GB down to **one single `.zip` file**:
+     - Unmodified Android APK (`vg-4.13.4-147219-base.apk`) & OBB (`main.147219...obb`), plus `vainglory/lib/arm64-v8a/libGameKindred.so` (for the native ARM64 health oracle).
+     - All 944 required PC 4.13 `Data/` store files (navmeshes + all 942 `INST`/`CFF0` manifests — 16.4 MB instead of 3.45 GB of unused PC textures/audio).
+     - Complete `runtime/` state (`world_tape.bin`, `answers.json`, local TLS CA, WireGuard `phone-vpn/` keys, and Let's Encrypt `phone-acme/` certificates for `rpc.halcyon.tongducthanhnam.id.vn`).
+     - Complete `research/runtime-corpus/` (`.32`, `.36`, `.72` `.vgr` anchors) and distilled `research/vg_max/` corpus (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
+     - Irreplaceable live-session input journals (`journal.jsonl`, `inputs-*.jsonl`) and milestone reports under `evidence/` (`M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn`) for deterministic replay, plus `BACKUP-MANIFEST.json`.
 
 ### Step-by-Step Restoration on a Fresh / Wiped Machine
 
@@ -149,8 +152,10 @@ The working project consists of two parts:
    Set-Location D:\project-halcyon
    ```
 
-2. **Download `halcyon-local-backup.zip` from Google Drive** and extract it directly into `D:\project-halcyon\Local`:
+2. **Download `halcyon-local-backup.zip` from Google Drive**, verify its SHA-256, and extract it directly into `D:\project-halcyon\Local`:
    ```powershell
+   certutil -hashfile "C:\path\to\halcyon-local-backup.zip" SHA256
+   # Expect: c058bd18b0882d14701539cd436bb48860d28b9044e71abea03ffe70b6dc8704
    New-Item -ItemType Directory -Path .\Local -Force | Out-Null
    Expand-Archive -LiteralPath "C:\path\to\halcyon-local-backup.zip" -DestinationPath .\Local -Force
    ```

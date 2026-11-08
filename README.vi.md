@@ -133,12 +133,15 @@ Tiến độ được ghi nhận đến hết ngày 12/09:
 
 Toàn bộ dự án được tách thành 2 phần rõ ràng:
 1. **Mã nguồn trên Git (GitHub)**: Toàn bộ code server (`server/`), công cụ RE & kiểm thử (`Tools/`), tài liệu (`Docs/`) và danh mục băm SHA-256 (`Config/local-inputs.json`).
-2. **1 File ZIP duy nhất trên Google Drive (`halcyon-local-backup.zip`, ~1,56 GB)**: Dữ liệu riêng (Git-ignored) đã được chắt lọc từ ~41 GB xuống còn **đúng 1 file `.zip` duy nhất** chứa trọn bộ:
-   - APK (`vg-4.13.4-147219-base.apk`) & OBB (`main.147219...obb`) Android gốc, cùng `vainglory/lib/arm64-v8a/libGameKindred.so` (cho native ARM64 oracle).
-   - Đúng 944 file `Data/` PC 4.13 cần thiết (navmesh + 942 file `INST`/`CFF0` manifest — chỉ 16,4 MB thay vì 3,45 GB texture/âm thanh thừa).
-   - Toàn bộ cấu hình `runtime/` (`world_tape.bin`, `answers.json`, chứng chỉ TLS CA, khóa WireGuard `phone-vpn/` & chứng chỉ Let's Encrypt `phone-acme/` cho `rpc.halcyon.tongducthanhnam.id.vn`).
-   - Toàn bộ `research/runtime-corpus/` (3 file `.vgr` `.32`, `.36`, `.72`) và kho `research/vg_max/` đã lọc sạch (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
-   - Toàn bộ nhật ký đầu vào phiên live (`journal.jsonl`, `inputs-*.jsonl`) và báo cáo nghiệm thu trong `evidence/` (`M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn`) để chạy replay tất định.
+2. **1 File ZIP duy nhất trên Google Drive (`halcyon-local-backup.zip`)**:
+   - **Dung lượng**: `1.677.465.514 bytes` (`1.599,76 MB`, `2.712 file`)
+   - **SHA-256**: `c058bd18b0882d14701539cd436bb48860d28b9044e71abea03ffe70b6dc8704`
+   - **Nội dung**: Dữ liệu riêng (Git-ignored) đã được chắt lọc từ ~41 GB xuống còn **đúng 1 file `.zip` duy nhất** chứa trọn bộ:
+     - APK (`vg-4.13.4-147219-base.apk`) & OBB (`main.147219...obb`) Android gốc, cùng `vainglory/lib/arm64-v8a/libGameKindred.so` (cho native ARM64 oracle).
+     - Đúng 944 file `Data/` PC 4.13 cần thiết (navmesh + 942 file `INST`/`CFF0` manifest — chỉ 16,4 MB thay vì 3,45 GB texture/âm thanh thừa).
+     - Toàn bộ cấu hình `runtime/` (`world_tape.bin`, `answers.json`, chứng chỉ TLS CA, khóa WireGuard `phone-vpn/` & chứng chỉ Let's Encrypt `phone-acme/` cho `rpc.halcyon.tongducthanhnam.id.vn`).
+     - Toàn bộ `research/runtime-corpus/` (3 file `.vgr` `.32`, `.36`, `.72`) và kho `research/vg_max/` đã lọc sạch (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
+     - Toàn bộ nhật ký đầu vào phiên live (`journal.jsonl`, `inputs-*.jsonl`) và báo cáo nghiệm thu trong `evidence/` (`M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn`) để chạy replay tất định, kèm `BACKUP-MANIFEST.json`.
 
 ### Các bước khôi phục nhanh khi bắt đầu lại trên máy mới / sau khi xóa thư mục
 
@@ -148,8 +151,10 @@ Toàn bộ dự án được tách thành 2 phần rõ ràng:
    Set-Location D:\project-halcyon
    ```
 
-2. **Tải `halcyon-local-backup.zip` từ Google Drive về máy**, sau đó giải nén thẳng vào `D:\project-halcyon\Local`:
+2. **Tải `halcyon-local-backup.zip` từ Google Drive về máy**, kiểm tra SHA-256 và giải nén thẳng vào `D:\project-halcyon\Local`:
    ```powershell
+   certutil -hashfile "C:\duong-dan-tai-ve\halcyon-local-backup.zip" SHA256
+   # Khớp: c058bd18b0882d14701539cd436bb48860d28b9044e71abea03ffe70b6dc8704
    New-Item -ItemType Directory -Path .\Local -Force | Out-Null
    Expand-Archive -LiteralPath "C:\duong-dan-tai-ve\halcyon-local-backup.zip" -DestinationPath .\Local -Force
    ```
