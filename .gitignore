@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .zcode-dispatch/
+/.agent-dispatch/
+/.tmp/
 /session*.png
 
 # Operator-owned game installs, captures, runtime certificates and local tools.

@@ -9,8 +9,11 @@ runtime files and QA output stay inside ignored `Local/` (new runs:
 
 🌐 **Languages**: [English](README.md) | [Tiếng Việt](README.vi.md)
 
-**Status reviewed September 13, 2026:** an experimental server with recorded
-single-client gameplay and automated simulation coverage. Overall gameplay
+**Status reviewed October 23, 2026 (archived November 8, 2026):** an experimental
+authoritative server with verified 6-participant wire sessions, natural match
+completion to Vain Crystal destruction, byte-exact deterministic input-journal
+replay, 1 real CE client + 5 protocol participants (`M5 step C`), and unmodified
+physical Android transport over WireGuard + public TLS. Overall full-game PvP
 acceptance remains **OPEN**. Start with the
 [current status and limitations](Docs/Plan/current-status.md); the
 [scenario evidence](Docs/Plan/solo-sandbox-scenarios.md) distinguishes live
@@ -113,40 +116,76 @@ The latest recorded progress through September 12 is:
 ### Tier 3: PvP Online / Multiplayer
 > *Objective: Smooth local LAN or online matches with friends.*
 
-- Implemented and exercised by automated tests: shared match routing, draft synchronization and reconnect/session handling.
-- Open acceptance milestone: a reproducible combat session with **two actual game clients**, with consistent attacks and health changes on both screens.
-- Open: complete fog of war/brush concealment, kit and reconnect fidelity, and sustained service reliability. A roughly 30-minute idle client crash remains under investigation.
+- **Implemented & Verified Milestones (through October 23, 2026)**:
+  - **Milestone 2 (`M2`)**: Six wire-only participants (Skye/Catherine/Adagio vs Ringo/Gwen/Amael) pass draft/readiness and execute learn, native cast, move, attack, shop purchase, Recall, and same-identity reconnect.
+  - **Milestone 3 (`M3`)**: Natural 6-participant match to Vain Crystal destruction (`1106 → 1072 → 1009`), replayed byte-identically across independent seeds (6,813 records, 328 checkpoints, 145,052 events).
+  - **Milestone 4 (`M4`)**: Application-order `server/input_journal.py` and exact two-process production replay (`Tools/run_scenarios.py --mode replay --journal <path>`).
+  - **Milestone 5 Step C (`4ac`)**: One real Android CE client plus five protocol participants pass all 8 live conditions (reciprocal combat before and after reconnect).
+  - **Milestone 7 Preparation (`M7 prep`)**: Dead wave minions and removed-EID histories bounded; separate-process host (`Tools/protocol_host.py`); 30-minute 6-participant soak replayed byte-identically (38,391 operations, 1,027,103 events).
+  - **Unmodified Physical Android VPN Ingress**: Unrooted Redmi Note 11 running original CE 4.13.4 over official WireGuard + owned-domain Let's Encrypt TLS (`server/platform/phone_vpn.py`); 538-second live session recorded and replayed byte-identically across seeds.
+- **Open Priorities When Resuming Development**:
+  1. **Physical Android cold-process reconnect readiness**: Cold relaunch reattaches to the match within 7.8s and receives catchup, but disconnects before emitting client opcodes/readiness (diagnose load/ready handshake before catchup dump).
+  2. **Two real rendered CE clients (`M5` full gate)**: Dual-client live combat session with consistent attacks and health changes on both screens.
+  3. **M7 soak residuals & kit completeness**: Attribute remaining +0.069 ms/min checkpoint growth and +0.17 MiB/min RSS growth; expand remaining hero kits and fog of war/brush concealment.
 
 ---
 
-## 4. Local Setup and Verification
+## 4. Cold-Start Restore & Local Setup (Resuming After Archival)
 
-Start with the **[complete Windows development setup guide](Docs/Setup/windows-local-development.md)**.
-It documents required downloads and exact client hashes, LDPlayer 9 installation,
-root and ADB settings, APK/OBB installation, local routing/CA trust, startup,
-troubleshooting, and how to continue development.
+The working project consists of two parts:
+1. **Git repository (GitHub)**: All server code (`server/`), RE/verification tools (`Tools/`), documentation (`Docs/`), and SHA-256 input manifests (`Config/local-inputs.json`).
+2. **Distilled Google Drive Backup (`Local/backup-distilled/`)**: Private, Git-ignored assets and state distilled from ~41 GB down to three clean archives:
+   - **`halcyon-local-core.zip` (~1.44 GB — REQUIRED)**: Contains the unmodified Android APK & OBB, `libGameKindred.so` (for the native ARM64 health oracle), all 944 required PC 4.13 `Data/` store files (navmeshes + all 942 `INST`/`CFF0` manifests), `runtime/` configs/tapes/certs/WireGuard & Let's Encrypt keys, `research/runtime-corpus/` (`.32`, `.36`, `.72` `.vgr` anchors), and the distilled `research/vg_max/` corpus (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
+   - **`halcyon-milestone-journals.zip` (~150 MB — RECOMMENDED)**: Contains the irreplaceable live-session input journals (`journal.jsonl`, `inputs-*.jsonl`) and milestone reports (`M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn`) for deterministic replay.
+   - **`Vainglory-4.13-pc-full-optional.7z` (~1.69 GB — OPTIONAL)**: Full standalone Windows PC 4.13 archive (only needed if you ever want the remaining 47,278 PC texture/audio files or `Vainglory.exe`).
 
-Original owned game files and research inputs now live physically in the ignored
-`Local/` directory. They are absent from Git and must be acquired separately on
-another machine. `Tools/import_local_data.ps1` copies existing archives with
-SHA-256 verification and preserves the originals. The tracked
-[input inventory](Config/local-inputs.json) records required filenames and provenance.
+### Step-by-Step Restoration on a Fresh / Wiped Machine
 
-After following the guide and installing `requirements.txt` into your venv:
+1. **Clone the repository into `D:\project-halcyon`** (using `D:\project-halcyon` preserves exact path pins in historical replay journals):
+   ```powershell
+   git clone https://github.com/TongDucThanhNam/project-halcyon.git D:\project-halcyon
+   Set-Location D:\project-halcyon
+   ```
 
-```powershell
-python -B Tools/setup_local.py --init
-python -B Tools/setup_local.py --check --serial emulator-5554
-python -B -W error::ResourceWarning -m unittest discover -s server/test -t .
-python -B Tools/run_scenarios.py --mode headless --scenario all
-python -B -m server.platform.live_up --bind-host 127.0.0.1 --match-host 127.0.0.1
-```
+2. **Download `halcyon-local-core.zip` (and optionally `halcyon-milestone-journals.zip`) from Google Drive** and extract them directly into `D:\project-halcyon\Local`:
+   ```powershell
+   New-Item -ItemType Directory -Path .\Local -Force | Out-Null
+   Expand-Archive -LiteralPath "C:\path\to\halcyon-local-core.zip" -DestinationPath .\Local -Force
+   # Optional: restore milestone live input journals for deterministic replay
+   Expand-Archive -LiteralPath "C:\path\to\halcyon-milestone-journals.zip" -DestinationPath .\Local -Force
+   ```
 
-The live helper restarts prior local stack processes and applies guest routing.
-Follow **PLAY → SOLO BOTS → 3V3 → VERY EASY**, select an implemented hero such
-as Skye, lock in and choose **Manual Build** when offered. Keep QA output under
-ignored `Local/evidence/`. A passing headless run establishes internal repeatability;
-independent reference remains `UNAVAILABLE` without a supplied reference fixture.
+3. **Create the Python virtual environment and install dependencies** (Python 3.11+, tested on 3.14 x64):
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   # Optional packages for RE inspectors, native ARM64 oracle, and phone WireGuard ingress:
+   .\.venv\Scripts\python.exe -m pip install -r requirements-research.txt -r requirements-native.txt -r requirements-phone-vpn.txt
+   ```
+
+4. **Verify all local inputs, certificates, and simulation loaders**:
+   ```powershell
+   .\.venv\Scripts\python.exe -B Tools/setup_local.py --check --profile headless
+   .\.venv\Scripts\python.exe -B Tools/setup_local.py --check --profile client
+   ```
+   Both commands must print `RESULT: PASS (0 prerequisite failures)`.
+
+5. **Run the verification suites (no emulator required)**:
+   ```powershell
+   # Fast smoke test lane (~11s):
+   .\.venv\Scripts\python.exe -B Tools/run_checks.py --suite smoke
+   # Full 7-scenario two-process deterministic headless check:
+   .\.venv\Scripts\python.exe -B Tools/run_scenarios.py --mode headless --scenario all
+   # Replay the recorded physical Android live session deterministically:
+   .\.venv\Scripts\python.exe -B Tools/run_scenarios.py --mode replay --journal .\Local\evidence\phone-vpn-journal-1792731479464021600\replay\journal.jsonl
+   ```
+
+6. **Run with a live game client (LDPlayer 9 or Unmodified Physical Android)**:
+   - See the **[complete Windows & client setup guide](Docs/Setup/windows-local-development.md)** for LDPlayer 9 ADB/root setup (§5–§9) and unmodified physical Android WireGuard + public TLS setup (§6.1).
+   - Quick start for LDPlayer (`emulator-5554`):
+     ```powershell
+     .\.venv\Scripts\python.exe -B -m server.platform.live_up --serial emulator-5554 --bind-host 127.0.0.1 --match-host 127.0.0.1
+     ```
 
 ---
 

@@ -9,11 +9,14 @@ runtime và kết quả kiểm thử đặt trong `Local/` được Git bỏ qua
 
 🌐 **Ngôn ngữ**: [English](README.md) | [Tiếng Việt](README.vi.md)
 
-**Rà soát trạng thái ngày 13/09/2026:** máy chủ thử nghiệm đã có bằng chứng
-gameplay với một client và kiểm thử mô phỏng tự động. Nghiệm thu gameplay tổng
-thể vẫn **MỞ**. Xem [tiến độ và giới hạn hiện tại](Docs/Plan/current-status.md)
-và [hồ sơ scenario](Docs/Plan/solo-sandbox-scenarios.md) để phân biệt quan sát
-trực tiếp, điều kiện kiểm thử và các bước xác minh còn thiếu.
+**Rà soát trạng thái ngày 23/10/2026 (lưu trữ ngày 08/11/2026):** máy chủ
+authoritative thử nghiệm đã xác minh phiên 6 participant qua giao thức wire,
+trận đấu tự nhiên hoàn chỉnh tới lúc nổ Vain Crystal (`M3`), replay tất định
+chính xác từng byte từ input journal (`M4`), 1 client CE thật + 5 participant
+giao thức (`M5 step C`), và kết nối điện thoại Android vật lý nguyên bản qua
+WireGuard + TLS chứng chỉ công khai. Nghiệm thu PvP toàn diện vẫn **MỞ**. Xem
+[tiến độ và giới hạn hiện tại](Docs/Plan/current-status.md) và
+[hồ sơ scenario](Docs/Plan/solo-sandbox-scenarios.md).
 
 ---
 
@@ -112,40 +115,76 @@ Tiến độ được ghi nhận đến hết ngày 12/09:
 ### Tầng 3: PvP Online / Đa người chơi
 > *Mục tiêu: Đấu nhóm bạn qua mạng LAN / Online.*
 
-- Đã cài đặt và có kiểm thử tự động: định tuyến vào cùng trận, đồng bộ draft và xử lý phiên/kết nối lại.
-- Mốc nghiệm thu còn mở: phiên giao chiến tái lập được với **hai client game thật**, có đòn đánh và thay đổi máu nhất quán trên cả hai màn hình.
-- Còn mở: sương mù/núp bụi đầy đủ, độ chính xác của bộ kỹ năng và kết nối lại, độ ổn định dài hạn. Lỗi client crash sau khoảng 30 phút đứng yên vẫn đang được điều tra.
+- **Các cột mốc đã hoàn thành & xác minh (đến ngày 23/10/2026)**:
+  - **Milestone 2 (`M2`)**: 6 participant giao thức wire (Skye/Catherine/Adagio vs Ringo/Gwen/Amael) vượt qua draft/readiness và thực thi nâng chiêu, tung chiêu native, di chuyển, đánh thường, mua trang bị, Biến về (Recall) và kết nối lại giữ nguyên định danh.
+  - **Milestone 3 (`M3`)**: Trận đấu 6 participant tự nhiên đến lúc phá hủy Vain Crystal (`1106 → 1072 → 1009`), replay khớp từng byte giữa hai tiến trình độc lập (6.813 bản ghi, 328 checkpoint, 145.052 sự kiện).
+  - **Milestone 4 (`M4`)**: Nhật ký đầu vào theo thứ tự áp dụng (`server/input_journal.py`) và cơ chế replay production khớp tuyệt đối (`Tools/run_scenarios.py --mode replay --journal <path>`).
+  - **Milestone 5 Step C (`4ac`)**: 1 client Android CE thật cùng 5 participant giao thức vượt qua cả 8 điều kiện live (giao tranh hai chiều trước và sau khi kết nối lại).
+  - **Milestone 7 Preparation (`M7 prep`)**: Giới hạn bộ nhớ lịch sử lính chết và EID đã xóa; tách tiến trình host (`Tools/protocol_host.py`); chạy soak 30 phút 6 participant và replay khớp từng byte (38.391 thao tác, 1.027.103 sự kiện).
+  - **Kết nối Điện thoại Android Vật lý Nguyên bản (WireGuard + Public TLS)**: Điện thoại Redmi Note 11 chưa root chạy bản CE 4.13.4 gốc qua WireGuard chính thức + chứng chỉ TLS Let's Encrypt tên miền riêng (`server/platform/phone_vpn.py`); phiên live 538 giây được ghi lại và replay khớp tuyệt đối.
+- **Việc cần làm tiếp khi quay lại phát triển**:
+  1. **Khôi phục kết nối lại (cold-process reconnect) trên điện thoại Android thật**: Khi đóng và mở lại app, client kết nối lại vào trận sau 7,8s và nhận catchup nhưng đóng socket trước khi gửi opcode/readiness (cần chẩn đoán bước bắt tay load/ready trước khi bắn world dump).
+  2. **Nghiệm thu 2 client CE hiển thị thật (`M5` full gate)**: Phiên giao tranh trực tiếp giữa 2 máy thật/giả lập với đòn đánh và máu đồng bộ trên cả hai màn hình.
+  3. **Xử lý phần dư M7 soak & hoàn thiện bộ kỹ năng**: Tìm nguyên nhân mức tăng +0,069 ms/phút của checkpoint và +0,17 MiB/phút của RSS; mở rộng các bộ kỹ năng tướng còn lại và sương mù/bụi cỏ.
 
 ---
 
-## 4. Local Setup and Verification
+## 4. Khôi phục từ đầu & Thiết lập Cục bộ (Cold-Start Restore Guide)
 
-Start with the **[complete Windows development setup guide](Docs/Setup/windows-local-development.md)**.
-It documents required downloads and exact client hashes, LDPlayer 9 installation,
-root and ADB settings, APK/OBB installation, local routing/CA trust, startup,
-troubleshooting, and how to continue development.
+Toàn bộ dự án được tách thành 2 phần rõ ràng:
+1. **Mã nguồn trên Git (GitHub)**: Toàn bộ code server (`server/`), công cụ RE & kiểm thử (`Tools/`), tài liệu (`Docs/`) và danh mục băm SHA-256 (`Config/local-inputs.json`).
+2. **Bản sao lưu đã chắt lọc trên Google Drive (`Local/backup-distilled/`)**: Dữ liệu riêng (Git-ignored) đã được chắt lọc từ ~41 GB xuống còn 3 file nén gọn sạch:
+   - **`halcyon-local-core.zip` (~1,48 GB — BẮT BUỘC)**: Chứa APK & OBB Android gốc, `libGameKindred.so` (cho native ARM64 oracle), toàn bộ 944 file `Data/` PC 4.13 cần thiết (navmesh + 942 file `INST`/`CFF0` manifest), toàn bộ cấu hình `runtime/` (`world_tape.bin`, `answers.json`, chứng chỉ TLS CA, khóa WireGuard & Let's Encrypt), `research/runtime-corpus/` (3 file `.vgr` `.32`, `.36`, `.72`) và kho `research/vg_max/` đã lọc sạch (`.pcap`, `.vgr`, `.pkl`, `.tsv`, `inst_dump/`).
+   - **`halcyon-milestone-journals.zip` (~116 MB — KHUYẾN NGHỊ)**: Chứa các nhật ký đầu vào phiên live không thể tái tạo lại từ code (`journal.jsonl`, `inputs-*.jsonl`) và báo cáo nghiệm thu của các mốc `M3`, `M4`, `M5 4ac`, `M7 soak`, `phone-vpn` để chạy replay tất định.
+   - **`Vainglory-4.13-pc-full-optional.7z` (~1,69 GB — TÙY CHỌN)**: Bản nén đầy đủ của bộ cài Vainglory PC 4.13 (chỉ cần nếu sau này muốn lấy thêm 47.278 file texture/âm thanh PC hoặc `Vainglory.exe`).
 
-Original owned game files and research inputs now live physically in the ignored
-`Local/` directory. They are absent from Git and must be acquired separately on
-another machine. `Tools/import_local_data.ps1` copies existing archives with
-SHA-256 verification and preserves the originals. The tracked
-[input inventory](Config/local-inputs.json) records required filenames and provenance.
+### Các bước khôi phục nhanh khi bắt đầu lại trên máy mới / sau khi xóa thư mục
 
-After following the guide and installing `requirements.txt` into your venv:
+1. **Clone repository về đúng đường dẫn `D:\project-halcyon`** (giữ đường dẫn `D:\project-halcyon` giúp các file replay journal lịch sử khớp ngay đường dẫn tuyệt đối mà không cần sửa):
+   ```powershell
+   git clone https://github.com/TongDucThanhNam/project-halcyon.git D:\project-halcyon
+   Set-Location D:\project-halcyon
+   ```
 
-```powershell
-python -B Tools/setup_local.py --init
-python -B Tools/setup_local.py --check --serial emulator-5554
-python -B -W error::ResourceWarning -m unittest discover -s server/test -t .
-python -B Tools/run_scenarios.py --mode headless --scenario all
-python -B -m server.platform.live_up --bind-host 127.0.0.1 --match-host 127.0.0.1
-```
+2. **Tải `halcyon-local-core.zip` (và `halcyon-milestone-journals.zip`) từ Google Drive về máy**, sau đó giải nén thẳng vào `D:\project-halcyon\Local`:
+   ```powershell
+   New-Item -ItemType Directory -Path .\Local -Force | Out-Null
+   Expand-Archive -LiteralPath "C:\duong-dan-tai-ve\halcyon-local-core.zip" -DestinationPath .\Local -Force
+   # Tùy chọn: giải nén thêm các journal cột mốc để chạy replay
+   Expand-Archive -LiteralPath "C:\duong-dan-tai-ve\halcyon-milestone-journals.zip" -DestinationPath .\Local -Force
+   ```
 
-The live helper restarts prior local stack processes and applies guest routing.
-Follow **PLAY → SOLO BOTS → 3V3 → VERY EASY**, select an implemented hero such
-as Skye, lock in and choose **Manual Build** when offered. Keep QA output under
-ignored `Local/evidence/`. A passing headless run establishes internal repeatability;
-independent reference remains `UNAVAILABLE` without a supplied reference fixture.
+3. **Tạo môi trường ảo Python `.venv` và cài đặt thư viện** (Python 3.11+, đã đo chuẩn trên Python 3.14 x64):
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   # Cài thêm gói phục vụ RE, native ARM64 oracle và WireGuard VPN cho điện thoại:
+   .\.venv\Scripts\python.exe -m pip install -r requirements-research.txt -r requirements-native.txt -r requirements-phone-vpn.txt
+   ```
+
+4. **Kiểm tra toàn bộ dữ liệu đầu vào, chứng chỉ và bộ nạp mô phỏng**:
+   ```powershell
+   .\.venv\Scripts\python.exe -B Tools/setup_local.py --check --profile headless
+   .\.venv\Scripts\python.exe -B Tools/setup_local.py --check --profile client
+   ```
+   Cả hai lệnh phải báo `RESULT: PASS (0 prerequisite failures)`.
+
+5. **Chạy kiểm thử tự động và kịch bản mô phỏng (không cần bật giả lập)**:
+   ```powershell
+   # Chạy gói kiểm thử nhanh smoke (~11 giây):
+   .\.venv\Scripts\python.exe -B Tools/run_checks.py --suite smoke
+   # Chạy toàn bộ 7 kịch bản headless đối chiếu tất định 2 tiến trình:
+   .\.venv\Scripts\python.exe -B Tools/run_scenarios.py --mode headless --scenario all
+   # Replay lại phiên chơi thực tế trên điện thoại Android vật lý:
+   .\.venv\Scripts\python.exe -B Tools/run_scenarios.py --mode replay --journal .\Local\evidence\phone-vpn-journal-1792731479464021600\replay\journal.jsonl
+   ```
+
+6. **Chạy với Client Game (LDPlayer 9 hoặc Điện thoại Android thật qua WireGuard)**:
+   - Xem **[hướng dẫn thiết lập chi tiết trên Windows](Docs/Setup/windows-local-development.md)** để cấu hình LDPlayer 9 (§5–§9) hoặc kết nối điện thoại Android thật không cần root qua WireGuard + TLS (§6.1).
+   - Lệnh khởi chạy nhanh server kèm định tuyến cho LDPlayer (`emulator-5554`):
+     ```powershell
+     .\.venv\Scripts\python.exe -B -m server.platform.live_up --serial emulator-5554 --bind-host 127.0.0.1 --match-host 127.0.0.1
+     ```
 
 ---
 
